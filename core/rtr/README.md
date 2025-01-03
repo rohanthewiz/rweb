@@ -15,22 +15,22 @@ Router for internal use only
 router := router.New[string]()
 
 // Static routes
-router.Add("GET", "/hello", "...")
-router.Add("GET", "/world", "...")
+router.Add(consts.MethodGet, "/hello", "...")
+router.Add(consts.MethodGet, "/world", "...")
 
 // Parameter routes
-router.Add("GET", "/users/:id", "...")
-router.Add("GET", "/users/:id/comments", "...")
+router.Add(consts.MethodGet, "/users/:id", "...")
+router.Add(consts.MethodGet, "/users/:id/comments", "...")
 
 // Wildcard routes
-router.Add("GET", "/images/*path", "...")
+router.Add(consts.MethodGet, "/images/*path", "...")
 
 // Simple lookup
-data, params := router.Lookup("GET", "/users/42")
+data, params := router.Lookup(consts.MethodGet, "/users/42")
 fmt.Println(data, params)
 
 // Efficient lookup
-data := router.LookupNoAlloc("GET", "/users/42", func(key string, value string) {
+data := router.LookupNoAlloc(consts.MethodGet, "/users/42", func(key string, value string) {
 	fmt.Println(key, value)
 })
 ```

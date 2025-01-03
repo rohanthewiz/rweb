@@ -8,6 +8,7 @@ import (
 
 	"git.akyoto.dev/go/assert"
 	"github.com/rohanthewiz/rweb"
+	"github.com/rohanthewiz/rweb/consts"
 )
 
 func TestWrite(t *testing.T) {
@@ -18,7 +19,7 @@ func TestWrite(t *testing.T) {
 		return err
 	})
 
-	response := s.Request("GET", "/", nil, nil)
+	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "Hello")
 }
@@ -31,7 +32,7 @@ func TestWriteString(t *testing.T) {
 		return err
 	})
 
-	response := s.Request("GET", "/", nil, nil)
+	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "Hello")
 }
@@ -56,7 +57,7 @@ func TestResponseCompression(t *testing.T) {
 		return ctx.Bytes(uncompressed)
 	})
 
-	response := s.Request("GET", "/", nil, nil)
+	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.True(t, len(response.Body()) < len(uncompressed))
 
@@ -77,7 +78,7 @@ func TestResponseHeader(t *testing.T) {
 		return ctx.String(contentType)
 	})
 
-	response := s.Request("GET", "/", nil, nil)
+	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, response.Header("Content-Type"), "text/plain")
 	assert.Equal(t, response.Header("Non existent header"), "")
@@ -93,7 +94,7 @@ func TestResponseHeaderOverwrite(t *testing.T) {
 		return nil
 	})
 
-	response := s.Request("GET", "/", nil, nil)
+	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, response.Header("Content-Type"), "text/html")
 	assert.Equal(t, string(response.Body()), "")

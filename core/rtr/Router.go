@@ -1,5 +1,7 @@
 package rtr
 
+import "github.com/rohanthewiz/rweb/consts"
+
 // Router is a high-performance router.
 type Router[T any] struct {
 	get     Tree[T]
@@ -60,23 +62,23 @@ func (router *Router[T]) Map(transform func(T) T) {
 // selectTree returns the tree by the given HTTP method.
 func (router *Router[T]) selectTree(method string) *Tree[T] {
 	switch method {
-	case "GET":
+	case consts.MethodGet:
 		return &router.get
-	case "POST":
+	case consts.MethodPost:
 		return &router.post
-	case "DELETE":
+	case consts.MethodDelete:
 		return &router.delete
-	case "PUT":
+	case consts.MethodPut:
 		return &router.put
-	case "PATCH":
+	case consts.MethodPatch:
 		return &router.patch
-	case "HEAD":
+	case consts.MethodHead:
 		return &router.head
-	case "CONNECT":
+	case consts.MethodConnect:
 		return &router.connect
-	case "TRACE":
+	case consts.MethodTrace:
 		return &router.trace
-	case "OPTIONS":
+	case consts.MethodOptions:
 		return &router.options
 	default:
 		return nil

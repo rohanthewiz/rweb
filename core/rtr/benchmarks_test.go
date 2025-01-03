@@ -3,6 +3,7 @@ package rtr_test
 import (
 	"testing"
 
+	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
 	"github.com/rohanthewiz/rweb/core/rtr/testdata"
 )
@@ -17,13 +18,13 @@ func BenchmarkBlog(b *testing.B) {
 
 	b.Run("Len1-Param0", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			r.LookupNoAlloc("GET", "/", noop)
+			r.LookupNoAlloc(consts.MethodGet, "/", noop)
 		}
 	})
 
 	b.Run("Len1-Param1", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			r.LookupNoAlloc("GET", "/:id", noop)
+			r.LookupNoAlloc(consts.MethodGet, "/:id", noop)
 		}
 	})
 }
@@ -38,19 +39,19 @@ func BenchmarkGitHub(b *testing.B) {
 
 	b.Run("Len7-Param0", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			r.LookupNoAlloc("GET", "/issues", noop)
+			r.LookupNoAlloc(consts.MethodGet, "/issues", noop)
 		}
 	})
 
 	b.Run("Len7-Param1", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			r.LookupNoAlloc("GET", "/gists/:id", noop)
+			r.LookupNoAlloc(consts.MethodGet, "/gists/:id", noop)
 		}
 	})
 
 	b.Run("Len7-Param2", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			r.LookupNoAlloc("GET", "/repos/:owner/:repo/issues", noop)
+			r.LookupNoAlloc(consts.MethodGet, "/repos/:owner/:repo/issues", noop)
 		}
 	})
 }

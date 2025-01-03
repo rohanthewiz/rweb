@@ -6,6 +6,7 @@ import (
 
 	"git.akyoto.dev/go/assert"
 	"github.com/rohanthewiz/rweb"
+	"github.com/rohanthewiz/rweb/consts"
 )
 
 func TestRequest(t *testing.T) {
@@ -20,7 +21,7 @@ func TestRequest(t *testing.T) {
 		return ctx.String(fmt.Sprintf("%s %s %s %s", method, scheme, host, path))
 	})
 
-	response := s.Request("GET", "http://example.com/request?x=1", []rweb.Header{{"Accept", "*/*"}}, nil)
+	response := s.Request(consts.MethodGet, "http://example.com/request?x=1", []rweb.Header{{"Accept", "*/*"}}, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "GET http example.com /request")
 }
@@ -34,7 +35,7 @@ func TestRequestHeader(t *testing.T) {
 		return ctx.String(accept + empty)
 	})
 
-	response := s.Request("GET", "/", []rweb.Header{{"Accept", "*/*"}}, nil)
+	response := s.Request(consts.MethodGet, "/", []rweb.Header{{"Accept", "*/*"}}, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "*/*")
 }
@@ -48,7 +49,7 @@ func TestRequestParam(t *testing.T) {
 		return ctx.String(article + empty)
 	})
 
-	response := s.Request("GET", "/blog/my-article", nil, nil)
+	response := s.Request(consts.MethodGet, "/blog/my-article", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "my-article")
 }

@@ -1,11 +1,15 @@
 package rweb
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/rohanthewiz/rweb/consts"
+)
 
 // isRequestMethod returns true if the given string is a valid HTTP request method.
 func isRequestMethod(method string) bool {
 	switch method {
-	case "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH":
+	case consts.MethodGet, consts.MethodHead, consts.MethodPost, consts.MethodPut, consts.MethodDelete, consts.MethodConnect, consts.MethodOptions, consts.MethodTrace, consts.MethodPatch:
 		return true
 	default:
 		return false

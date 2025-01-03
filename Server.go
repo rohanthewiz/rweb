@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
 
@@ -62,13 +63,12 @@ func NewServer() Server {
 
 // Get registers your function to be called when the given GET path has been requested.
 func (s *server) Get(path string, handler Handler) {
-	s.Router().Add("GET", path, handler)
+	s.Router().Add(consts.MethodGet, path, handler)
 }
 
 // Request performs a synthetic request and returns the response.
 // This function keeps the response in memory so it's slightly slower than a real request.
 // However it is very useful inside tests where you don't want to spin up a real web server.
-// TODO - body is unused here
 func (s *server) Request(method string, url string, headers []Header, body io.Reader) Response {
 	ctx := s.newContext()
 	ctx.request.headers = headers
@@ -140,14 +140,14 @@ func (s *server) handleConnection(conn net.Conn) {
 		space := strings.IndexByte(message, ' ')
 
 		if space <= 0 {
-			_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
 			return
 		}
 
 		method = message[:space]
 
 		if !isRequestMethod(method) {
-			_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\n\r\n")
+			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
 			return
 		}
 

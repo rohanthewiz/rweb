@@ -1,15 +1,25 @@
 package rweb_test
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"syscall"
 	"testing"
+	"time"
 
 	"git.akyoto.dev/go/assert"
 	"github.com/rohanthewiz/rweb"
+	"github.com/rohanthewiz/rweb/consts"
 )
+
+const (
+	testPort = ":8080"
+	HTTP11OK = "HTTP/1.1 200"
+)
+
+var dialDelay = 100 * time.Millisecond
 
 func TestPanic(t *testing.T) {
 	s := rweb.NewServer()
@@ -26,7 +36,7 @@ func TestPanic(t *testing.T) {
 		}
 	}()
 
-	s.Request("GET", "/panic", nil, nil)
+	s.Request(consts.MethodGet, "/panic", nil, nil)
 }
 
 func TestRun(t *testing.T) {
@@ -35,11 +45,11 @@ func TestRun(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		_, err := http.Get("http://127.0.0.1:8080/")
+		_, err := http.Get(fmt.Sprintf("http://127.0.0.1%s/", testPort))
 		assert.Nil(t, err)
 	}()
 
-	s.Run(":8080")
+	s.Run(testPort)
 }
 
 func TestBadRequest(t *testing.T) {
@@ -48,7 +58,8 @@ func TestBadRequest(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		conn, err := net.Dial("tcp", ":8080")
+		time.Sleep(dialDelay)
+		conn, err := net.Dial("tcp", testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
@@ -57,10 +68,10 @@ func TestBadRequest(t *testing.T) {
 
 		response, err := io.ReadAll(conn)
 		assert.Nil(t, err)
-		assert.Equal(t, string(response), "HTTP/1.1 400 Bad Request\r\n\r\n")
+		assert.Equal(t, string(response), consts.HTTPBadRequest)
 	}()
 
-	s.Run(":8080")
+	s.Run(testPort)
 }
 
 func TestBadRequestHeader(t *testing.T) {
@@ -73,20 +84,21 @@ func TestBadRequestHeader(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		conn, err := net.Dial("tcp", ":8080")
+		time.Sleep(dialDelay)
+		conn, err := net.Dial("tcp", testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
 		_, err = io.WriteString(conn, "GET / HTTP/1.1\r\nBadHeader\r\nGood: Header\r\n\r\n")
 		assert.Nil(t, err)
 
-		buffer := make([]byte, len("HTTP/1.1 200"))
+		buffer := make([]byte, len(HTTP11OK))
 		_, err = conn.Read(buffer)
 		assert.Nil(t, err)
-		assert.Equal(t, string(buffer), "HTTP/1.1 200")
+		assert.Equal(t, string(buffer), HTTP11OK)
 	}()
 
-	s.Run(":8080")
+	s.Run(testPort)
 }
 
 func TestBadRequestMethod(t *testing.T) {
@@ -95,19 +107,20 @@ func TestBadRequestMethod(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		conn, err := net.Dial("tcp", ":8080")
+		time.Sleep(dialDelay)
+		conn, err := net.Dial("tcp", testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
-		_, err = io.WriteString(conn, "BAD-METHOD / HTTP/1.1\r\n\r\n")
+		_, err = io.WriteString(conn, consts.HTTPBadMethod)
 		assert.Nil(t, err)
 
 		response, err := io.ReadAll(conn)
 		assert.Nil(t, err)
-		assert.Equal(t, string(response), "HTTP/1.1 400 Bad Request\r\n\r\n")
+		assert.Equal(t, string(response), consts.HTTPBadRequest)
 	}()
 
-	s.Run(":8080")
+	s.Run(testPort)
 }
 
 func TestBadRequestProtocol(t *testing.T) {
@@ -120,20 +133,21 @@ func TestBadRequestProtocol(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		conn, err := net.Dial("tcp", ":8080")
+		time.Sleep(dialDelay)
+		conn, err := net.Dial("tcp", testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
 		_, err = io.WriteString(conn, "GET /\r\n\r\n")
 		assert.Nil(t, err)
 
-		buffer := make([]byte, len("HTTP/1.1 200"))
+		buffer := make([]byte, len(HTTP11OK))
 		_, err = conn.Read(buffer)
 		assert.Nil(t, err)
-		assert.Equal(t, string(buffer), "HTTP/1.1 200")
+		assert.Equal(t, string(buffer), HTTP11OK)
 	}()
 
-	s.Run(":8080")
+	s.Run(testPort)
 }
 
 func TestEarlyClose(t *testing.T) {
@@ -142,7 +156,8 @@ func TestEarlyClose(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		conn, err := net.Dial("tcp", ":8080")
+		time.Sleep(dialDelay)
+		conn, err := net.Dial("tcp", testPort)
 		assert.Nil(t, err)
 
 		_, err = io.WriteString(conn, "GET /\r\n")
@@ -152,14 +167,14 @@ func TestEarlyClose(t *testing.T) {
 		assert.Nil(t, err)
 	}()
 
-	s.Run(":8080")
+	s.Run(testPort)
 }
 
 func TestUnavailablePort(t *testing.T) {
-	listener, err := net.Listen("tcp", ":8080")
+	listener, err := net.Listen("tcp", testPort)
 	assert.Nil(t, err)
 	defer listener.Close()
 
 	s := rweb.NewServer()
-	s.Run(":8080")
+	s.Run(testPort)
 }

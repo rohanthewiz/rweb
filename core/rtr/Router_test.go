@@ -5,34 +5,35 @@ import (
 	"testing"
 
 	"git.akyoto.dev/go/assert"
+	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
 	"github.com/rohanthewiz/rweb/core/rtr/testdata"
 )
 
 func TestHello(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/blog", "Blog")
-	r.Add("GET", "/blog/post", "Blog post")
+	r.Add(consts.MethodGet, "/blog", "Blog")
+	r.Add(consts.MethodGet, "/blog/post", "Blog post")
 
-	data, params := r.Lookup("GET", "/blog")
+	data, params := r.Lookup(consts.MethodGet, "/blog")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Blog")
 
-	data, params = r.Lookup("GET", "/blog/post")
+	data, params = r.Lookup(consts.MethodGet, "/blog/post")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Blog post")
 }
 
 func TestStatic(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/hello", "Hello")
-	r.Add("GET", "/world", "World")
+	r.Add(consts.MethodGet, "/hello", "Hello")
+	r.Add(consts.MethodGet, "/world", "World")
 
-	data, params := r.Lookup("GET", "/hello")
+	data, params := r.Lookup(consts.MethodGet, "/hello")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Hello")
 
-	data, params = r.Lookup("GET", "/world")
+	data, params = r.Lookup(consts.MethodGet, "/world")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "World")
 
@@ -46,7 +47,7 @@ func TestStatic(t *testing.T) {
 	}
 
 	for _, path := range notFound {
-		data, params = r.Lookup("GET", path)
+		data, params = r.Lookup(consts.MethodGet, path)
 		assert.Equal(t, len(params), 0)
 		assert.Equal(t, data, "")
 	}
@@ -54,16 +55,16 @@ func TestStatic(t *testing.T) {
 
 func TestParameter(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/blog/:post", "Blog post")
-	r.Add("GET", "/blog/:post/comments/:id", "Comment")
+	r.Add(consts.MethodGet, "/blog/:post", "Blog post")
+	r.Add(consts.MethodGet, "/blog/:post/comments/:id", "Comment")
 
-	data, params := r.Lookup("GET", "/blog/hello-world")
+	data, params := r.Lookup(consts.MethodGet, "/blog/hello-world")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "post")
 	assert.Equal(t, params[0].Value, "hello-world")
 	assert.Equal(t, data, "Blog post")
 
-	data, params = r.Lookup("GET", "/blog/hello-world/comments/123")
+	data, params = r.Lookup(consts.MethodGet, "/blog/hello-world/comments/123")
 	assert.Equal(t, len(params), 2)
 	assert.Equal(t, params[0].Key, "post")
 	assert.Equal(t, params[0].Value, "hello-world")
@@ -74,56 +75,56 @@ func TestParameter(t *testing.T) {
 
 func TestWildcard(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/", "Front page")
-	r.Add("GET", "/users/:id", "Parameter")
-	r.Add("GET", "/images/static", "Static")
-	r.Add("GET", "/images/*path", "Wildcard")
-	r.Add("GET", "/:post", "Blog post")
-	r.Add("GET", "/*any", "Wildcard")
-	r.Add("GET", "*root", "Root wildcard")
+	r.Add(consts.MethodGet, "/", "Front page")
+	r.Add(consts.MethodGet, "/users/:id", "Parameter")
+	r.Add(consts.MethodGet, "/images/static", "Static")
+	r.Add(consts.MethodGet, "/images/*path", "Wildcard")
+	r.Add(consts.MethodGet, "/:post", "Blog post")
+	r.Add(consts.MethodGet, "/*any", "Wildcard")
+	r.Add(consts.MethodGet, "*root", "Root wildcard")
 
-	data, params := r.Lookup("GET", "/")
+	data, params := r.Lookup(consts.MethodGet, "/")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Front page")
 
-	data, params = r.Lookup("GET", "/blog-post")
+	data, params = r.Lookup(consts.MethodGet, "/blog-post")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "post")
 	assert.Equal(t, params[0].Value, "blog-post")
 	assert.Equal(t, data, "Blog post")
 
-	data, params = r.Lookup("GET", "/users/42")
+	data, params = r.Lookup(consts.MethodGet, "/users/42")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "id")
 	assert.Equal(t, params[0].Value, "42")
 	assert.Equal(t, data, "Parameter")
 
-	data, _ = r.Lookup("GET", "/users/42/test.txt")
+	data, _ = r.Lookup(consts.MethodGet, "/users/42/test.txt")
 	assert.Equal(t, data, "Wildcard")
 
-	data, params = r.Lookup("GET", "/images/static")
+	data, params = r.Lookup(consts.MethodGet, "/images/static")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Static")
 
-	data, params = r.Lookup("GET", "/images/ste")
+	data, params = r.Lookup(consts.MethodGet, "/images/ste")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "path")
 	assert.Equal(t, params[0].Value, "ste")
 	assert.Equal(t, data, "Wildcard")
 
-	data, params = r.Lookup("GET", "/images/sta")
+	data, params = r.Lookup(consts.MethodGet, "/images/sta")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "path")
 	assert.Equal(t, params[0].Value, "sta")
 	assert.Equal(t, data, "Wildcard")
 
-	data, params = r.Lookup("GET", "/images/favicon/256.png")
+	data, params = r.Lookup(consts.MethodGet, "/images/favicon/256.png")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "path")
 	assert.Equal(t, params[0].Value, "favicon/256.png")
 	assert.Equal(t, data, "Wildcard")
 
-	data, params = r.Lookup("GET", "not-a-path")
+	data, params = r.Lookup(consts.MethodGet, "not-a-path")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, params[0].Key, "root")
 	assert.Equal(t, params[0].Value, "not-a-path")
@@ -132,48 +133,48 @@ func TestWildcard(t *testing.T) {
 
 func TestMap(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/hello", "Hello")
-	r.Add("GET", "/world", "World")
-	r.Add("GET", "/user/:user", "User")
-	r.Add("GET", "/*path", "Path")
-	r.Add("GET", "*root", "Root")
+	r.Add(consts.MethodGet, "/hello", "Hello")
+	r.Add(consts.MethodGet, "/world", "World")
+	r.Add(consts.MethodGet, "/user/:user", "User")
+	r.Add(consts.MethodGet, "/*path", "Path")
+	r.Add(consts.MethodGet, "*root", "Root")
 
 	r.Map(func(data string) string {
 		return strings.Repeat(data, 2)
 	})
 
-	data, params := r.Lookup("GET", "/hello")
+	data, params := r.Lookup(consts.MethodGet, "/hello")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "HelloHello")
 
-	data, params = r.Lookup("GET", "/world")
+	data, params = r.Lookup(consts.MethodGet, "/world")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "WorldWorld")
 
-	data, params = r.Lookup("GET", "/user/123")
+	data, params = r.Lookup(consts.MethodGet, "/user/123")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, data, "UserUser")
 
-	data, params = r.Lookup("GET", "/test.txt")
+	data, params = r.Lookup(consts.MethodGet, "/test.txt")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, data, "PathPath")
 
-	data, params = r.Lookup("GET", "test.txt")
+	data, params = r.Lookup(consts.MethodGet, "test.txt")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, data, "RootRoot")
 }
 
 func TestMethods(t *testing.T) {
 	methods := []string{
-		"GET",
-		"POST",
-		"DELETE",
-		"PUT",
-		"PATCH",
-		"HEAD",
-		"CONNECT",
-		"TRACE",
-		"OPTIONS",
+		consts.MethodGet,
+		consts.MethodPost,
+		consts.MethodDelete,
+		consts.MethodPut,
+		consts.MethodPatch,
+		consts.MethodHead,
+		consts.MethodConnect,
+		consts.MethodTrace,
+		consts.MethodOptions,
 	}
 
 	r := rtr.New[string]()
@@ -207,54 +208,54 @@ func TestGitHub(t *testing.T) {
 
 func TestTrailingSlash(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/hello", "Hello 1")
+	r.Add(consts.MethodGet, "/hello", "Hello 1")
 
-	data, params := r.Lookup("GET", "/hello")
+	data, params := r.Lookup(consts.MethodGet, "/hello")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Hello 1")
 
-	data, params = r.Lookup("GET", "/hello/")
+	data, params = r.Lookup(consts.MethodGet, "/hello/")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "Hello 1")
 }
 
 func TestTrailingSlashOverwrite(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/hello", "route 1")
-	r.Add("GET", "/hello/", "route 2")
-	r.Add("GET", "/:param", "route 3")
-	r.Add("GET", "/:param/", "route 4")
-	r.Add("GET", "/*any", "route 5")
+	r.Add(consts.MethodGet, "/hello", "route 1")
+	r.Add(consts.MethodGet, "/hello/", "route 2")
+	r.Add(consts.MethodGet, "/:param", "route 3")
+	r.Add(consts.MethodGet, "/:param/", "route 4")
+	r.Add(consts.MethodGet, "/*any", "route 5")
 
-	data, params := r.Lookup("GET", "/hello")
+	data, params := r.Lookup(consts.MethodGet, "/hello")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "route 1")
 
-	data, params = r.Lookup("GET", "/hello/")
+	data, params = r.Lookup(consts.MethodGet, "/hello/")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "route 2")
 
-	data, params = r.Lookup("GET", "/param")
+	data, params = r.Lookup(consts.MethodGet, "/param")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, data, "route 3")
 
-	data, params = r.Lookup("GET", "/param/")
+	data, params = r.Lookup(consts.MethodGet, "/param/")
 	assert.Equal(t, len(params), 1)
 	assert.Equal(t, data, "route 4")
 
-	data, _ = r.Lookup("GET", "/wild/card/")
+	data, _ = r.Lookup(consts.MethodGet, "/wild/card/")
 	assert.Equal(t, data, "route 5")
 }
 
 func TestOverwrite(t *testing.T) {
 	r := rtr.New[string]()
-	r.Add("GET", "/", "1")
-	r.Add("GET", "/", "2")
-	r.Add("GET", "/", "3")
-	r.Add("GET", "/", "4")
-	r.Add("GET", "/", "5")
+	r.Add(consts.MethodGet, "/", "1")
+	r.Add(consts.MethodGet, "/", "2")
+	r.Add(consts.MethodGet, "/", "3")
+	r.Add(consts.MethodGet, "/", "4")
+	r.Add(consts.MethodGet, "/", "5")
 
-	data, params := r.Lookup("GET", "/")
+	data, params := r.Lookup(consts.MethodGet, "/")
 	assert.Equal(t, len(params), 0)
 	assert.Equal(t, data, "5")
 }

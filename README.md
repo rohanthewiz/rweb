@@ -1,6 +1,10 @@
 ## Intro
+**Note**: this is not yet production ready as everything is not yet tested.
+If you are confident in what you see, feel free to use it.
+
 *This is a fork of Akyoto's [web](http://git.akyoto.dev/go/web)*.
-I'll be taking it in a slightly different direction.
+
+> Imitation is the sincerest form of flattery.
 
 All thanks and credit to Akyoto!
 
