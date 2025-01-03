@@ -1,0 +1,4 @@
+GET /
+GET /:slug
+GET /tags
+GET /tag/:tag
