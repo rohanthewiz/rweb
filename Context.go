@@ -20,7 +20,7 @@ type Context interface {
 type context struct {
 	request
 	response
-	server       *server
+	server       *Server
 	handlerCount uint8
 }
 

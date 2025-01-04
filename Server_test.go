@@ -45,6 +45,7 @@ func TestRun(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
+		time.Sleep(dialDelay)
 		_, err := http.Get(fmt.Sprintf("http://127.0.0.1%s/", testPort))
 		assert.Nil(t, err)
 	}()
@@ -59,7 +60,7 @@ func TestBadRequest(t *testing.T) {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
 		time.Sleep(dialDelay)
-		conn, err := net.Dial("tcp", testPort)
+		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
@@ -85,7 +86,7 @@ func TestBadRequestHeader(t *testing.T) {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
 		time.Sleep(dialDelay)
-		conn, err := net.Dial("tcp", testPort)
+		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
@@ -108,7 +109,7 @@ func TestBadRequestMethod(t *testing.T) {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
 		time.Sleep(dialDelay)
-		conn, err := net.Dial("tcp", testPort)
+		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
@@ -134,7 +135,7 @@ func TestBadRequestProtocol(t *testing.T) {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
 		time.Sleep(dialDelay)
-		conn, err := net.Dial("tcp", testPort)
+		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
 
@@ -157,7 +158,7 @@ func TestEarlyClose(t *testing.T) {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
 		time.Sleep(dialDelay)
-		conn, err := net.Dial("tcp", testPort)
+		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 
 		_, err = io.WriteString(conn, "GET /\r\n")
@@ -171,7 +172,7 @@ func TestEarlyClose(t *testing.T) {
 }
 
 func TestUnavailablePort(t *testing.T) {
-	listener, err := net.Listen("tcp", testPort)
+	listener, err := net.Listen(consts.ProtocolTCP, testPort)
 	assert.Nil(t, err)
 	defer listener.Close()
 

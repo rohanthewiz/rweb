@@ -1,6 +1,5 @@
 ## Intro
-**Note**: this is not yet production ready as everything is not yet tested.
-If you are confident in what you see, feel free to use it.
+**Note**: this is not yet production ready .
 
 *This is a fork of Akyoto's [web](http://git.akyoto.dev/go/web)*.
 

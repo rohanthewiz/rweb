@@ -17,39 +17,41 @@ import (
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
 
-// Server is the interface for an HTTP server.
-type Server interface {
-	Get(path string, handler Handler)
-	Request(method string, path string, headers []Header, body io.Reader) Response
-	Router() *rtr.Router[Handler]
-	Run(address string) error
-	Use(handlers ...Handler)
-}
-
-// server is an HTTP server.
-type server struct {
+// Server is the HTTP Server.
+type Server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
-	router       *rtr.Router[Handler]
+	radRouter    *rtr.RadRouter[Handler]
+	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
 }
 
 // NewServer creates a new HTTP server.
-func NewServer() Server {
-	r := &rtr.Router[Handler]{}
-	s := &server{
-		router: r,
-		handlers: []Handler{
-			func(c Context) error {
-				ctx := c.(*context)
-				handler := r.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
+func NewServer() *Server {
+	radRtr := &rtr.RadRouter[Handler]{}
+	hashRtr := rtr.NewHashRouter[Handler]()
 
-				if handler == nil {
-					ctx.SetStatus(404)
+	s := &Server{
+		radRouter:  radRtr,
+		hashRouter: hashRtr,
+
+		handlers: []Handler{
+			func(c Context) error { // default handler
+				ctx := c.(*context)
+				var hdlr Handler
+
+				// Try exact match first
+				hdlr = hashRtr.Lookup(ctx.request.method, ctx.request.path)
+				if hdlr == nil {
+					hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
+				}
+
+				if hdlr == nil {
+					ctx.SetStatus(consts.StatusNotFound)
 					return nil
 				}
 
-				return handler(c)
+				return hdlr(c)
 			},
 		},
 		errorHandler: func(ctx Context, err error) {
@@ -62,14 +64,18 @@ func NewServer() Server {
 }
 
 // Get registers your function to be called when the given GET path has been requested.
-func (s *server) Get(path string, handler Handler) {
-	s.Router().Add(consts.MethodGet, path, handler)
+func (s *Server) Get(path string, handler Handler) {
+	if strings.IndexByte(path, ':') < 0 {
+		s.hashRouter.Add(consts.MethodGet, path, handler)
+	} else {
+		s.radRouter.Add(consts.MethodGet, path, handler)
+	}
 }
 
 // Request performs a synthetic request and returns the response.
 // This function keeps the response in memory so it's slightly slower than a real request.
 // However it is very useful inside tests where you don't want to spin up a real web server.
-func (s *server) Request(method string, url string, headers []Header, body io.Reader) Response {
+func (s *Server) Request(method string, url string, headers []Header, body io.Reader) Response {
 	ctx := s.newContext()
 	ctx.request.headers = headers
 	s.handleRequest(ctx, method, url, io.Discard)
@@ -77,8 +83,8 @@ func (s *server) Request(method string, url string, headers []Header, body io.Re
 }
 
 // Run starts the server on the given address.
-func (s *server) Run(address string) error {
-	listener, err := net.Listen("tcp", address)
+func (s *Server) Run(address string) error {
+	listener, err := net.Listen(consts.ProtocolTCP, address)
 
 	if err != nil {
 		return err
@@ -104,20 +110,22 @@ func (s *server) Run(address string) error {
 	return nil
 }
 
-// Router returns the router used by the server.
-func (s *server) Router() *rtr.Router[Handler] {
-	return s.router
+/*// Router returns the router used by the server.
+func (s *Server) Router(path string) *rtr.RadRouter[Handler] {
+	return s.radRouter
 }
+*/
 
 // Use adds handlers to your handlers chain.
-func (s *server) Use(handlers ...Handler) {
+func (s *Server) Use(handlers ...Handler) {
 	last := s.handlers[len(s.handlers)-1]
+	// Re-slice to exclude last and add append the incoming handlers
 	s.handlers = append(s.handlers[:len(s.handlers)-1], handlers...)
-	s.handlers = append(s.handlers, last)
+	s.handlers = append(s.handlers, last) // add back the last
 }
 
 // handleConnection handles an accepted connection.
-func (s *server) handleConnection(conn net.Conn) {
+func (s *Server) handleConnection(conn net.Conn) {
 	var (
 		ctx    = s.contextPool.Get().(*context)
 		method string
@@ -201,7 +209,7 @@ func (s *server) handleConnection(conn net.Conn) {
 }
 
 // handleRequest handles the given request.
-func (s *server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
+func (s *Server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 
@@ -231,7 +239,7 @@ func (s *server) handleRequest(ctx *context, method string, url string, writer i
 }
 
 // newContext allocates a new context with the default state.
-func (s *server) newContext() *context {
+func (s *Server) newContext() *context {
 	return &context{
 		server: s,
 		request: request{
