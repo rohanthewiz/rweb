@@ -2,6 +2,7 @@ package rweb
 
 import (
 	"bufio"
+	"mime/multipart"
 
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
@@ -27,6 +28,11 @@ type request struct {
 	headers []Header
 	body    []byte
 	params  []rtr.Parameter
+
+	multipartForm         *multipart.Form
+	multipartFormBoundary string
+
+	postArgs Args
 }
 
 // Header returns the header value for the given key.

@@ -2,8 +2,8 @@ package rtr
 
 import "github.com/rohanthewiz/rweb/consts"
 
-// RadRouter is a high-performance router.
-type RadRouter[T any] struct {
+// RadixRouter is a high-performance router.
+type RadixRouter[T any] struct {
 	get     Tree[T]
 	post    Tree[T]
 	delete  Tree[T]
@@ -16,18 +16,18 @@ type RadRouter[T any] struct {
 }
 
 // New creates a new router containing trees for every HTTP method.
-func New[T any]() *RadRouter[T] {
-	return &RadRouter[T]{}
+func New[T any]() *RadixRouter[T] {
+	return &RadixRouter[T]{}
 }
 
 // Add registers a new handler for the given method and path.
-func (router *RadRouter[T]) Add(method string, path string, handler T) {
+func (router *RadixRouter[T]) Add(method string, path string, handler T) {
 	tree := router.selectTree(method)
 	tree.Add(path, handler)
 }
 
 // Lookup finds the handler and parameters for the given route.
-func (router *RadRouter[T]) Lookup(method string, path string) (T, []Parameter) {
+func (router *RadixRouter[T]) Lookup(method string, path string) (T, []Parameter) {
 	if method[0] == 'G' {
 		return router.get.Lookup(path)
 	}
@@ -37,7 +37,7 @@ func (router *RadRouter[T]) Lookup(method string, path string) (T, []Parameter) 
 }
 
 // LookupNoAlloc finds the handler and parameters for the given route without using any memory allocations.
-func (router *RadRouter[T]) LookupNoAlloc(method string, path string, addParameter func(string, string)) T {
+func (router *RadixRouter[T]) LookupNoAlloc(method string, path string, addParameter func(string, string)) T {
 	if method[0] == 'G' {
 		return router.get.LookupNoAlloc(path, addParameter)
 	}
@@ -47,7 +47,7 @@ func (router *RadRouter[T]) LookupNoAlloc(method string, path string, addParamet
 }
 
 // Map traverses all trees and calls the given function on every node.
-func (router *RadRouter[T]) Map(transform func(T) T) {
+func (router *RadixRouter[T]) Map(transform func(T) T) {
 	router.get.Map(transform)
 	router.post.Map(transform)
 	router.delete.Map(transform)
@@ -60,7 +60,7 @@ func (router *RadRouter[T]) Map(transform func(T) T) {
 }
 
 // selectTree returns the tree by the given HTTP method.
-func (router *RadRouter[T]) selectTree(method string) *Tree[T] {
+func (router *RadixRouter[T]) selectTree(method string) *Tree[T] {
 	switch method {
 	case consts.MethodGet:
 		return &router.get

@@ -31,6 +31,10 @@ func main() {
 		return send.CSS(ctx, "body{}")
 	})
 
+	s.Post("/post-form-data/:form_id", func(ctx rweb.Context) error {
+		return ctx.String("Posted - form_id: " + ctx.Request().Param("form_id"))
+	})
+
 	s.Get("/static/my.css", func(ctx rweb.Context) error {
 		body, err := os.ReadFile("assets/my.css")
 		if err != nil {
@@ -47,5 +51,6 @@ func main() {
 		return ctx.String("Hi big city!")
 	})
 
+	fmt.Println("Launching server on 8080")
 	log.Fatal(s.Run(":8080"))
 }

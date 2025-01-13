@@ -3,6 +3,7 @@ package rweb
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -21,19 +22,19 @@ import (
 type Server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
-	radRouter    *rtr.RadRouter[Handler]
+	radixRouter  *rtr.RadixRouter[Handler]
 	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
 }
 
 // NewServer creates a new HTTP server.
 func NewServer() *Server {
-	radRtr := &rtr.RadRouter[Handler]{}
+	radRtr := &rtr.RadixRouter[Handler]{}
 	hashRtr := rtr.NewHashRouter[Handler]()
 
 	s := &Server{
-		radRouter:  radRtr,
-		hashRouter: hashRtr,
+		radixRouter: radRtr,
+		hashRouter:  hashRtr,
 
 		handlers: []Handler{
 			func(c Context) error { // default handler
@@ -68,7 +69,25 @@ func (s *Server) Get(path string, handler Handler) {
 	if strings.IndexByte(path, ':') < 0 {
 		s.hashRouter.Add(consts.MethodGet, path, handler)
 	} else {
-		s.radRouter.Add(consts.MethodGet, path, handler)
+		s.radixRouter.Add(consts.MethodGet, path, handler)
+	}
+}
+
+// Post registers your function to be called when the given POST path has been requested.
+func (s *Server) Post(path string, handler Handler) {
+	if strings.IndexByte(path, ':') < 0 {
+		s.hashRouter.Add(consts.MethodPost, path, handler)
+	} else {
+		s.radixRouter.Add(consts.MethodPost, path, handler)
+	}
+}
+
+// Put registers your function to be called when the given PUT path has been requested.
+func (s *Server) Put(path string, handler Handler) {
+	if strings.IndexByte(path, ':') < 0 {
+		s.hashRouter.Add(consts.MethodPut, path, handler)
+	} else {
+		s.radixRouter.Add(consts.MethodPut, path, handler)
 	}
 }
 
@@ -139,8 +158,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	for {
 		// Read the HTTP request line
-		message, err := ctx.reader.ReadString('\n')
-
+		message, err := ctx.reader.ReadString(consts.RuneNewLine)
 		if err != nil {
 			return
 		}
@@ -159,23 +177,25 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		lastSpace := strings.LastIndexByte(message, ' ')
+		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
 
 		if lastSpace == space {
-			lastSpace = len(message) - len("\r\n")
+			lastSpace = len(message) - len(consts.CRLF)
 		}
 
 		url = message[space+1 : lastSpace]
 
+		var contentLen int64
+		var isChunked bool
+
 		// Add headers until we meet an empty line
 		for {
-			message, err = ctx.reader.ReadString('\n')
-
+			message, err = ctx.reader.ReadString(consts.RuneNewLine)
 			if err != nil {
 				return
 			}
 
-			if message == "\r\n" {
+			if message == "\r\n" { // end of headers
 				break
 			}
 
@@ -192,10 +212,77 @@ func (s *Server) handleConnection(conn net.Conn) {
 				Key:   key,
 				Value: value,
 			})
+
+			// Check for Content-Length and Transfer-Encoding headers
+			if strings.EqualFold(key, "Content-Length") {
+				contentLen, err = strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					return
+				}
+			} else if strings.EqualFold(key, "Transfer-Encoding") && strings.Contains(strings.ToLower(value), "chunked") {
+				isChunked = true
+			}
 		}
+
+		// Read the request body if present
+		if contentLen > 0 {
+			// Fixed-length body
+			body := make([]byte, contentLen)
+			_, err = io.ReadFull(ctx.reader, body)
+			if err != nil {
+				return
+			}
+			ctx.request.body = append(ctx.request.body, body...)
+		} else if isChunked {
+			// Chunked encoding
+			for {
+				// Read chunk size
+				chunkSize, err := ctx.reader.ReadString(consts.RuneNewLine)
+				if err != nil {
+					return
+				}
+
+				// Parse chunk size (hex)
+				size, err := strconv.ParseInt(strings.TrimSpace(chunkSize), 16, 64)
+				if err != nil {
+					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					return
+				}
+
+				// Zero size chunk means end of body
+				if size == 0 {
+					// Read final CRLF
+					_, err = ctx.reader.ReadString(consts.RuneNewLine)
+					if err != nil {
+						return
+					}
+					break
+				}
+
+				// Read chunk data
+				chunk := make([]byte, size)
+				_, err = io.ReadFull(ctx.reader, chunk)
+				if err != nil {
+					return
+				}
+				ctx.request.body = append(ctx.request.body, chunk...)
+
+				// Read chunk CRLF
+				_, err = ctx.reader.ReadString(consts.RuneNewLine)
+				if err != nil {
+					return
+				}
+			}
+		}
+
+		fmt.Printf("**-> ctx.request.body %q\n", string(ctx.request.body))
 
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
+		fmt.Println("**-> Request Handled.")
+		fmt.Printf("**-> ctx %#v\n", ctx)
+		fmt.Println(strings.Repeat("-", 50))
 
 		// Clean up the context
 		ctx.request.headers = ctx.request.headers[:0]
@@ -213,8 +300,13 @@ func (s *Server) handleRequest(ctx *context, method string, url string, writer i
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 
-	err := s.handlers[0](ctx)
+	// TODO Parse Post Args
+	// if rbody := strings.TrimSpace(ctx.request.body); len() > 0 {
+	// 	rbody := strings.TrimSpace()
+	// }
 
+	// Call the Request handler
+	err := s.handlers[0](ctx)
 	if err != nil {
 		s.errorHandler(ctx, err)
 	}
