@@ -105,7 +105,7 @@ func (req *request) parsePostArgs() {
 	}
 	req.parsedPostArgs = true
 
-	if bytes.HasPrefix(req.ContentType, consts.StrPostArgsContentType) {
+	if !bytes.EqualFold(req.ContentType, consts.StrFormData) {
 		return
 	}
 	req.postArgs.ParseBytes(req.body)

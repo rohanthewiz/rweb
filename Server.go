@@ -220,6 +220,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
 					return
 				}
+			} else if strings.EqualFold(key, consts.HeaderContentType) {
+				ctx.request.ContentType = s2b(value)
 			} else if strings.EqualFold(key, "Transfer-Encoding") && strings.Contains(strings.ToLower(value), "chunked") {
 				isChunked = true
 			}
@@ -234,6 +236,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				return
 			}
 			ctx.request.body = append(ctx.request.body, body...)
+
 		} else if isChunked {
 			// Chunked encoding
 			for {
@@ -302,7 +305,10 @@ func (s *Server) handleRequest(ctx *context, method string, url string, writer i
 
 	// Parse Post Args
 	if len(ctx.request.body) > 0 {
+		// if bytes.EqualFold(ctx.ContentType, consts.StrFormData) {
+		fmt.Println("**-> Parsing Post Args")
 		ctx.request.parsePostArgs()
+		// }
 	}
 
 	fmt.Println("** Post Args -->", ctx.request.postArgs.String())
