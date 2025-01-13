@@ -2,13 +2,15 @@ package rweb
 
 import (
 	"bufio"
+	"bytes"
 	"mime/multipart"
 
+	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
 
-// Request is an interface for HTTP requests.
-type Request interface {
+// IntfRequest is an interface for HTTP requests.
+type IntfRequest interface {
 	Header(string) string
 	Host() string
 	Method() string
@@ -19,20 +21,24 @@ type Request interface {
 
 // request represents the HTTP request used in the given context.
 type request struct {
-	reader  *bufio.Reader
-	scheme  string
-	host    string
-	method  string
-	path    string
-	query   string
-	headers []Header
-	body    []byte
-	params  []rtr.Parameter
+	reader *bufio.Reader
+	scheme string
+	host   string
+	method string
+	path   string
+	query  string
+
+	// Header
+	ContentType []byte // shortcut to content type
+	headers     []Header
+	body        []byte
+	params      []rtr.Parameter
 
 	multipartForm         *multipart.Form
 	multipartFormBoundary string
 
-	postArgs Args
+	postArgs       Args
+	parsedPostArgs bool
 }
 
 // Header returns the header value for the given key.
@@ -85,4 +91,22 @@ func (req *request) addParameter(key string, value string) {
 		Key:   key,
 		Value: value,
 	})
+}
+
+// PostArgs returns POST arguments.
+func (req *request) PostArgs() *Args {
+	req.parsePostArgs()
+	return &req.postArgs
+}
+
+func (req *request) parsePostArgs() {
+	if req.parsedPostArgs {
+		return
+	}
+	req.parsedPostArgs = true
+
+	if bytes.HasPrefix(req.ContentType, consts.StrPostArgsContentType) {
+		return
+	}
+	req.postArgs.ParseBytes(req.body)
 }

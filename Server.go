@@ -300,10 +300,12 @@ func (s *Server) handleRequest(ctx *context, method string, url string, writer i
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 
-	// TODO Parse Post Args
-	// if rbody := strings.TrimSpace(ctx.request.body); len() > 0 {
-	// 	rbody := strings.TrimSpace()
-	// }
+	// Parse Post Args
+	if len(ctx.request.body) > 0 {
+		ctx.request.parsePostArgs()
+	}
+
+	fmt.Println("** Post Args -->", ctx.request.postArgs.String())
 
 	// Call the Request handler
 	err := s.handlers[0](ctx)
