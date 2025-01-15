@@ -66,7 +66,7 @@ func NewServer() *Server {
 
 // Get registers your function to be called when the given GET path has been requested.
 func (s *Server) Get(path string, handler Handler) {
-	if strings.IndexByte(path, ':') < 0 {
+	if strings.IndexByte(path, consts.RuneColon) < 0 {
 		s.hashRouter.Add(consts.MethodGet, path, handler)
 	} else {
 		s.radixRouter.Add(consts.MethodGet, path, handler)
@@ -75,7 +75,7 @@ func (s *Server) Get(path string, handler Handler) {
 
 // Post registers your function to be called when the given POST path has been requested.
 func (s *Server) Post(path string, handler Handler) {
-	if strings.IndexByte(path, ':') < 0 {
+	if strings.IndexByte(path, consts.RuneColon) < 0 {
 		s.hashRouter.Add(consts.MethodPost, path, handler)
 	} else {
 		s.radixRouter.Add(consts.MethodPost, path, handler)
@@ -84,7 +84,7 @@ func (s *Server) Post(path string, handler Handler) {
 
 // Put registers your function to be called when the given PUT path has been requested.
 func (s *Server) Put(path string, handler Handler) {
-	if strings.IndexByte(path, ':') < 0 {
+	if strings.IndexByte(path, consts.RuneColon) < 0 {
 		s.hashRouter.Add(consts.MethodPut, path, handler)
 	} else {
 		s.radixRouter.Add(consts.MethodPut, path, handler)
@@ -101,10 +101,29 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
-// Run starts the server on the given address.
-func (s *Server) Run(address string) error {
-	listener, err := net.Listen(consts.ProtocolTCP, address)
+type RunOpts struct {
+	Verbose bool
+	// StatusChan is a channel signalling that the server is about to enter its listen loop
+	// It should be a buffered chan (cap 1 is all that is needed), so the server will not hang
+	StatusChan chan struct{}
+}
 
+// Run starts the server on the given address.
+func (s *Server) Run(address string, runOpts ...RunOpts) error {
+	opts := RunOpts{}
+
+	if len(runOpts) == 1 {
+		opts.Verbose = runOpts[0].Verbose // Verbose
+
+		// Running Channel
+		if runOpts[0].StatusChan != nil && cap(runOpts[0].StatusChan) < 1 && opts.Verbose {
+			fmt.Println("Running channel capacity should be at least 1, or we may hang")
+		}
+		// Assign even if it is nil as we will do nil check on use
+		opts.StatusChan = runOpts[0].StatusChan
+	}
+
+	listener, err := net.Listen(consts.ProtocolTCP, address)
 	if err != nil {
 		return err
 	}
@@ -112,9 +131,16 @@ func (s *Server) Run(address string) error {
 	defer listener.Close()
 
 	go func() {
+		if opts.StatusChan != nil { // don't forget nil check!
+			opts.StatusChan <- struct{}{} // Let the caller know we are running
+		}
+
+		if opts.Verbose {
+			fmt.Printf("Server is running at %s\n", address)
+		}
+
 		for {
 			conn, err := listener.Accept()
-
 			if err != nil {
 				continue
 			}
@@ -163,7 +189,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		space := strings.IndexByte(message, ' ')
+		space := strings.IndexByte(message, consts.RuneSingleSpace)
 
 		if space <= 0 {
 			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
@@ -173,7 +199,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		method = message[:space]
 
 		if !isRequestMethod(method) {
-			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+			_, _ = io.WriteString(conn, consts.HTTPBadMethod)
 			return
 		}
 
@@ -190,19 +216,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		// Add headers until we meet an empty line
 		for {
-			message, err = ctx.reader.ReadString(consts.RuneNewLine)
+			message, err = ctx.reader.ReadString(consts.RuneNewLine) // read a line
 			if err != nil {
 				return
 			}
 
-			if message == "\r\n" { // end of headers
+			if message == consts.CRLF { // "empty" line // end of headers
 				break
 			}
 
-			colon := strings.IndexByte(message, ':')
+			colon := strings.IndexByte(message, consts.RuneColon)
 
 			if colon <= 0 {
-				continue
+				continue // header should include a colon
 			}
 
 			key := message[:colon]
@@ -279,13 +305,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 		}
 
-		fmt.Printf("**-> ctx.request.body %q\n", string(ctx.request.body))
+		fmt.Printf("**-> ctx.request.body: %q\n", string(ctx.request.body))
 
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
-		fmt.Println("**-> Request Handled.")
+		// fmt.Println("**-> Request Handled.")
 		fmt.Printf("**-> ctx %#v\n", ctx)
-		fmt.Println(strings.Repeat("-", 50))
+		fmt.Println(strings.Repeat("-", 20))
 
 		// Clean up the context
 		ctx.request.headers = ctx.request.headers[:0]

@@ -41,25 +41,29 @@ func TestPanic(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	s := rweb.NewServer()
+	runChan := make(chan struct{}, 1)
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		time.Sleep(dialDelay)
+		<-runChan // wait for server
+
 		_, err := http.Get(fmt.Sprintf("http://127.0.0.1%s/", testPort))
 		assert.Nil(t, err)
 	}()
 
-	s.Run(testPort)
+	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
 }
 
 func TestBadRequest(t *testing.T) {
 	s := rweb.NewServer()
+	runChan := make(chan struct{}, 1)
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		time.Sleep(dialDelay)
+		<-runChan // wait for server
+
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -72,11 +76,12 @@ func TestBadRequest(t *testing.T) {
 		assert.Equal(t, string(response), consts.HTTPBadRequest)
 	}()
 
-	s.Run(testPort)
+	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
 }
 
 func TestBadRequestHeader(t *testing.T) {
 	s := rweb.NewServer()
+	runChan := make(chan struct{}, 1)
 
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.String("Hello")
@@ -85,7 +90,7 @@ func TestBadRequestHeader(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		time.Sleep(dialDelay)
+		<-runChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -99,16 +104,17 @@ func TestBadRequestHeader(t *testing.T) {
 		assert.Equal(t, string(buffer), HTTP11OK)
 	}()
 
-	s.Run(testPort)
+	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
 }
 
 func TestBadRequestMethod(t *testing.T) {
 	s := rweb.NewServer()
+	runChan := make(chan struct{}, 1)
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		time.Sleep(dialDelay)
+		<-runChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -118,14 +124,15 @@ func TestBadRequestMethod(t *testing.T) {
 
 		response, err := io.ReadAll(conn)
 		assert.Nil(t, err)
-		assert.Equal(t, string(response), consts.HTTPBadRequest)
+		assert.Equal(t, string(response), consts.HTTPBadMethod)
 	}()
 
-	s.Run(testPort)
+	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
 }
 
 func TestBadRequestProtocol(t *testing.T) {
 	s := rweb.NewServer()
+	runChan := make(chan struct{}, 1)
 
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.String("Hello")
@@ -134,7 +141,7 @@ func TestBadRequestProtocol(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		time.Sleep(dialDelay)
+		<-runChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -148,16 +155,17 @@ func TestBadRequestProtocol(t *testing.T) {
 		assert.Equal(t, string(buffer), HTTP11OK)
 	}()
 
-	s.Run(testPort)
+	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
 }
 
 func TestEarlyClose(t *testing.T) {
 	s := rweb.NewServer()
+	runChan := make(chan struct{}, 1)
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		time.Sleep(dialDelay)
+		<-runChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 
@@ -168,7 +176,7 @@ func TestEarlyClose(t *testing.T) {
 		assert.Nil(t, err)
 	}()
 
-	s.Run(testPort)
+	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
 }
 
 func TestUnavailablePort(t *testing.T) {

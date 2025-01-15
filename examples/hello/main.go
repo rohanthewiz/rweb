@@ -51,6 +51,8 @@ func main() {
 		return ctx.String("Hi big city!")
 	})
 
-	fmt.Println("Launching server on 8080")
-	log.Fatal(s.Run(":8080"))
+	fmt.Println("Launching server")
+	log.Fatal(s.Run(":8080", rweb.RunOpts{
+		Verbose: true, /*RunningChan: make(chan struct{}, 1),*/
+	}))
 }

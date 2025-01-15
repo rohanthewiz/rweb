@@ -1,5 +1,7 @@
 package rtr
 
+import "github.com/rohanthewiz/rweb/consts"
+
 // Tree represents a radix tree.
 type Tree[T any] struct {
 	root treeNode[T]
@@ -15,7 +17,7 @@ func (tree *Tree[T]) Add(path string, data T) {
 	for {
 	begin:
 		switch node.kind {
-		case parameter:
+		case consts.RuneColon:
 			// This only occurs when the same parameter based route is added twice.
 			// node: /post/:id|
 			// path: /post/:id|
@@ -25,7 +27,7 @@ func (tree *Tree[T]) Add(path string, data T) {
 			}
 
 			// When we hit a separator, we'll search for a fitting child.
-			if path[i] == separator {
+			if path[i] == consts.RuneFwdSlash {
 				node, offset, _ = node.end(path, data, i, offset)
 				goto next
 			}
@@ -138,9 +140,9 @@ begin:
 				for i < uint(len(path)) {
 					// node: /:id|/posts
 					// path: /123|/posts
-					if path[i] == separator {
+					if path[i] == consts.RuneFwdSlash {
 						addParameter(node.prefix, path[:i])
-						index := node.indices[separator-node.startIndex]
+						index := node.indices[consts.RuneFwdSlash-node.startIndex]
 						node = node.children[index]
 						path = path[i:]
 						i = 1
