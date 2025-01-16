@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	s := rweb.NewServer()
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true})
 
 	s.Use(func(ctx rweb.Context) error {
 		start := time.Now()
@@ -52,7 +52,5 @@ func main() {
 	})
 
 	fmt.Println("Launching server")
-	log.Fatal(s.Run(":8080", rweb.RunOpts{
-		Verbose: true, /*RunningChan: make(chan struct{}, 1),*/
-	}))
+	log.Fatal(s.Run(":8080"))
 }

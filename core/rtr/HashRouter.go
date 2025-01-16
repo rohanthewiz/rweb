@@ -21,8 +21,8 @@ type HashRouter[T any] struct {
 // It is important to use this method when a new hash router is needed
 func NewHashRouter[T any]() *HashRouter[T] {
 	hr := &HashRouter[T]{
-		get:     make(map[string]T, 4),
-		post:    make(map[string]T, 4),
+		get:     make(map[string]T),
+		post:    make(map[string]T),
 		delete:  make(map[string]T),
 		put:     make(map[string]T),
 		patch:   make(map[string]T),
@@ -36,8 +36,13 @@ func NewHashRouter[T any]() *HashRouter[T] {
 
 // Add registers a new handler for the given method and path.
 func (hr *HashRouter[T]) Add(method string, path string, handler T) {
-	hashMap := hr.selectMethodMap(method)
+	hashMap := hr.SelectMethodMap(method)
 	hashMap[path] = handler
+	// Debug
+	// for k, h := range hashMap {
+	// 	fmt.Printf("Added. Now - method: %q, route key: %q, handler: %v\n", method, k, h)
+	// }
+
 }
 
 // Lookup finds the handler for the given route.
@@ -46,12 +51,12 @@ func (hr *HashRouter[T]) Lookup(method string, path string) T {
 		return hr.get[path]
 	}
 
-	hashMap := hr.selectMethodMap(method)
+	hashMap := hr.SelectMethodMap(method)
 	return hashMap[path]
 }
 
-// selectMethodMap returns the map based on the given HTTP method.
-func (hr *HashRouter[T]) selectMethodMap(method string) map[string]T {
+// SelectMethodMap returns the map based on the given HTTP method.
+func (hr *HashRouter[T]) SelectMethodMap(method string) map[string]T {
 	switch method {
 	case consts.MethodGet:
 		return hr.get

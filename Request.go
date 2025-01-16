@@ -17,6 +17,8 @@ type IntfRequest interface {
 	Path() string
 	Scheme() string
 	Param(string) string
+	GetPostValue(string) string
+	Body() []byte
 }
 
 // request represents the HTTP request used in the given context.
@@ -91,6 +93,14 @@ func (req *request) addParameter(key string, value string) {
 		Key:   key,
 		Value: value,
 	})
+}
+
+func (req *request) Body() []byte {
+	return req.body
+}
+
+func (req *request) GetPostValue(key string) string {
+	return b2s(req.PostArgs().Peek(key))
 }
 
 // PostArgs returns POST arguments.

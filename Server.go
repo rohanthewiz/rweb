@@ -18,6 +18,14 @@ import (
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
 
+type ServerOptions struct {
+	Verbose bool
+	Debug   bool
+	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
+	// It should be a buffered chan (cap 1 is all that is needed), so there is no chance the server will hang
+	ReadyChan chan struct{}
+}
+
 // Server is the HTTP Server.
 type Server struct {
 	handlers     []Handler
@@ -25,38 +33,63 @@ type Server struct {
 	radixRouter  *rtr.RadixRouter[Handler]
 	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
+	options      ServerOptions
 }
 
 // NewServer creates a new HTTP server.
-func NewServer() *Server {
+func NewServer(options ...ServerOptions) *Server {
 	radRtr := &rtr.RadixRouter[Handler]{}
 	hashRtr := rtr.NewHashRouter[Handler]()
+
+	opts := ServerOptions{}
+	if len(options) == 1 {
+		opts.Verbose = options[0].Verbose // Verbose
+
+		// Running Channel
+		if options[0].ReadyChan != nil && cap(options[0].ReadyChan) < 1 && opts.Verbose {
+			fmt.Println("Running channel capacity should be at least 1, or we may hang")
+		}
+		// Assign even if it is nil as we will do nil check on use
+		opts.ReadyChan = options[0].ReadyChan
+	}
 
 	s := &Server{
 		radixRouter: radRtr,
 		hashRouter:  hashRtr,
-
-		handlers: []Handler{
-			func(c Context) error { // default handler
-				ctx := c.(*context)
-				var hdlr Handler
-
-				// Try exact match first
-				hdlr = hashRtr.Lookup(ctx.request.method, ctx.request.path)
-				if hdlr == nil {
-					hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
-				}
-
-				if hdlr == nil {
-					ctx.SetStatus(consts.StatusNotFound)
-					return nil
-				}
-
-				return hdlr(c)
-			},
-		},
+		options:     opts,
 		errorHandler: func(ctx Context, err error) {
 			log.Println(ctx.Request().Path(), err)
+		},
+	}
+
+	s.handlers = []Handler{
+		func(c Context) error { // default handler
+			ctx := c.(*context)
+			var hdlr Handler
+
+			// Try exact match first
+			fmt.Printf("Request - method: %q, path: %q\n", ctx.request.method, ctx.request.path)
+			methodMap := s.hashRouter.SelectMethodMap(ctx.request.method)
+			if methodMap != nil {
+				fmt.Println("**-> len(methodMap)", len(methodMap))
+				for k, h := range methodMap {
+					fmt.Printf("method: %q, route key: %q, handler: %v\n", ctx.request.method, k, h)
+				}
+			} else {
+				fmt.Println("Method map is nil for", ctx.request.method)
+			}
+			hdlr = s.hashRouter.Lookup(ctx.request.method, ctx.request.path)
+			if hdlr == nil {
+				fmt.Println("Route not found in hash router")
+				hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
+			}
+
+			if hdlr == nil {
+				ctx.SetStatus(consts.StatusNotFound)
+				return nil
+			}
+
+			return hdlr(c)
 		},
 	}
 
@@ -101,28 +134,8 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
-type RunOpts struct {
-	Verbose bool
-	// StatusChan is a channel signalling that the server is about to enter its listen loop
-	// It should be a buffered chan (cap 1 is all that is needed), so the server will not hang
-	StatusChan chan struct{}
-}
-
 // Run starts the server on the given address.
-func (s *Server) Run(address string, runOpts ...RunOpts) error {
-	opts := RunOpts{}
-
-	if len(runOpts) == 1 {
-		opts.Verbose = runOpts[0].Verbose // Verbose
-
-		// Running Channel
-		if runOpts[0].StatusChan != nil && cap(runOpts[0].StatusChan) < 1 && opts.Verbose {
-			fmt.Println("Running channel capacity should be at least 1, or we may hang")
-		}
-		// Assign even if it is nil as we will do nil check on use
-		opts.StatusChan = runOpts[0].StatusChan
-	}
-
+func (s *Server) Run(address string) error {
 	listener, err := net.Listen(consts.ProtocolTCP, address)
 	if err != nil {
 		return err
@@ -131,12 +144,12 @@ func (s *Server) Run(address string, runOpts ...RunOpts) error {
 	defer listener.Close()
 
 	go func() {
-		if opts.StatusChan != nil { // don't forget nil check!
-			opts.StatusChan <- struct{}{} // Let the caller know we are running
+		if s.options.Verbose {
+			fmt.Printf("Server is running at %s\n", address)
 		}
 
-		if opts.Verbose {
-			fmt.Printf("Server is running at %s\n", address)
+		if s.options.ReadyChan != nil { // don't forget nil check!
+			s.options.ReadyChan <- struct{}{} // Let the caller know we are running
 		}
 
 		for {
@@ -180,7 +193,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 	ctx.reader.Reset(conn)
 
 	defer conn.Close()
-	defer s.contextPool.Put(ctx)
+
+	defer func() {
+		// Clean up the context
+		ctx.request.headers = ctx.request.headers[:0]
+		ctx.request.body = ctx.request.body[:0]
+		ctx.response.headers = ctx.response.headers[:0]
+		ctx.response.body = ctx.response.body[:0]
+		ctx.params = ctx.params[:0]
+		ctx.handlerCount = 0
+		ctx.status = 200
+
+		s.contextPool.Put(ctx)
+	}()
 
 	for {
 		// Read the HTTP request line
@@ -261,8 +286,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if err != nil {
 				return
 			}
-			ctx.request.body = append(ctx.request.body, body...)
 
+			if method != consts.MethodHead && method != consts.MethodTrace {
+				ctx.request.body = append(ctx.request.body, body...)
+			}
 		} else if isChunked {
 			// Chunked encoding
 			for {
@@ -305,13 +332,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 		}
 
-		fmt.Printf("**-> ctx.request.body: %q\n", string(ctx.request.body))
+		if s.options.Verbose && len(ctx.request.body) > 0 {
+			fmt.Printf("** ctx.request.body: %q\n", string(ctx.request.body))
+		}
 
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
-		// fmt.Println("**-> Request Handled.")
-		fmt.Printf("**-> ctx %#v\n", ctx)
-		fmt.Println(strings.Repeat("-", 20))
+		if s.options.Debug {
+			fmt.Printf("** ctx -> %#v\n\n", ctx)
+		}
 
 		// Clean up the context
 		ctx.request.headers = ctx.request.headers[:0]
@@ -328,16 +357,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 func (s *Server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
+	// fmt.Println("**-> ctx.path", ctx.path)
 
 	// Parse Post Args
 	if len(ctx.request.body) > 0 {
-		// if bytes.EqualFold(ctx.ContentType, consts.StrFormData) {
-		fmt.Println("**-> Parsing Post Args")
-		ctx.request.parsePostArgs()
-		// }
+		if bytes.EqualFold(ctx.ContentType, consts.StrFormData) {
+			// fmt.Println("**-> Parsing Post Args")
+			ctx.request.parsePostArgs()
+			if s.options.Verbose {
+				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
+			}
+		}
 	}
-
-	fmt.Println("** Post Args -->", ctx.request.postArgs.String())
 
 	// Call the Request handler
 	err := s.handlers[0](ctx)

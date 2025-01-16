@@ -1,6 +1,7 @@
 package rweb_test
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -18,8 +19,6 @@ const (
 	testPort = ":8080"
 	HTTP11OK = "HTTP/1.1 200"
 )
-
-var dialDelay = 100 * time.Millisecond
 
 func TestPanic(t *testing.T) {
 	s := rweb.NewServer()
@@ -39,30 +38,156 @@ func TestPanic(t *testing.T) {
 	s.Request(consts.MethodGet, "/panic", nil, nil)
 }
 
-func TestRun(t *testing.T) {
-	s := rweb.NewServer()
-	runChan := make(chan struct{}, 1)
+func TestGet(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+
+	const msg = "You pinged root"
+	s.Get("/", func(ctx rweb.Context) error {
+		return ctx.String(msg)
+	})
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		<-runChan // wait for server
-
-		_, err := http.Get(fmt.Sprintf("http://127.0.0.1%s/", testPort))
+		<-readyChan // wait for server
+		time.Sleep(100 * time.Millisecond)
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1%s", testPort))
 		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, "200")
+
+		body, _ := io.ReadAll(resp.Body)
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		assert.Equal(t, string(body), msg)
 	}()
 
-	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
+	_ = s.Run(testPort)
+}
+
+/*
+	func TestNoRoutes(t *testing.T) {
+		readyChan := make(chan struct{}, 1)
+
+		s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+
+		go func() {
+			defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+
+			<-readyChan // wait for server
+
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1%s/", testPort))
+			assert.Nil(t, err)
+			assert.Equal(t, "404", resp.Status)
+		}()
+
+		_ = s.Run(testPort)
+	}
+*/
+func TestPost(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+
+	s.Post("/", func(ctx rweb.Context) error {
+		return ctx.String(ctx.Request().GetPostValue("def"))
+	})
+
+	go func() {
+		defer func() {
+			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		}()
+
+		<-readyChan // wait for server
+
+		buf := bytes.NewReader([]byte("abc=123&def=456"))
+
+		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1%s", ":8081"),
+			string(consts.StrFormData), buf)
+		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, "200")
+
+		body, _ := io.ReadAll(resp.Body)
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		assert.Equal(t, string(body), "456")
+	}()
+
+	_ = s.Run(":8081")
+}
+
+func TestMultipleRequests(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+
+	// const msg = "You pinged root"
+	// s.Get("/", func(ctx rweb.Context) error {
+	// 	return ctx.String(msg)
+	// })
+
+	s.Post("/", func(ctx rweb.Context) error {
+		return ctx.String(ctx.Request().GetPostValue("def"))
+	})
+
+	s.Post("/comment", func(ctx rweb.Context) error {
+		return ctx.String(string(ctx.Request().Body()))
+	})
+
+	go func() {
+		defer func() {
+			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		}()
+
+		<-readyChan // wait for server
+
+		// POST
+		buf := bytes.NewReader([]byte("abc=123&def=456"))
+		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1%s/", ":8082"),
+			string(consts.StrFormData), buf)
+		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, "200")
+
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		assert.Equal(t, string(body), "456")
+
+		/*		// GET
+				resp, err = http.Get(fmt.Sprintf("http://127.0.0.1%s/", testPort))
+				assert.Nil(t, err)
+				assert.Equal(t, resp.Status, "200")
+
+				body, _ = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				assert.Equal(t, string(body), msg)
+		*/
+		// POST comment
+		jBody := []byte(`{"key": "value", "count": 20}`)
+		buf.Reset(jBody)
+		resp, err = http.Post(fmt.Sprintf("http://127.0.0.1%s/comment", ":8082"),
+			string(consts.StrJSONData), buf)
+		assert.Nil(t, err)
+		assert.Equal(t, "200", resp.Status)
+
+		body, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		assert.Equal(t, string(jBody), string(body))
+	}()
+
+	_ = s.Run(":8082")
 }
 
 func TestBadRequest(t *testing.T) {
-	s := rweb.NewServer()
-	runChan := make(chan struct{}, 1)
+	readyChan := make(chan struct{}, 1)
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		<-runChan // wait for server
+		<-readyChan // wait for server
 
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
@@ -76,12 +201,12 @@ func TestBadRequest(t *testing.T) {
 		assert.Equal(t, string(response), consts.HTTPBadRequest)
 	}()
 
-	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
+	_ = s.Run(testPort)
 }
 
 func TestBadRequestHeader(t *testing.T) {
-	s := rweb.NewServer()
-	runChan := make(chan struct{}, 1)
+	readyChan := make(chan struct{}, 1)
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.String("Hello")
@@ -90,7 +215,7 @@ func TestBadRequestHeader(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		<-runChan // wait for server
+		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -104,17 +229,17 @@ func TestBadRequestHeader(t *testing.T) {
 		assert.Equal(t, string(buffer), HTTP11OK)
 	}()
 
-	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
+	_ = s.Run(testPort)
 }
 
 func TestBadRequestMethod(t *testing.T) {
-	s := rweb.NewServer()
-	runChan := make(chan struct{}, 1)
+	readyChan := make(chan struct{}, 1)
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		<-runChan // wait for server
+		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -127,12 +252,12 @@ func TestBadRequestMethod(t *testing.T) {
 		assert.Equal(t, string(response), consts.HTTPBadMethod)
 	}()
 
-	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
+	_ = s.Run(testPort)
 }
 
 func TestBadRequestProtocol(t *testing.T) {
-	s := rweb.NewServer()
-	runChan := make(chan struct{}, 1)
+	readyChan := make(chan struct{}, 1)
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.String("Hello")
@@ -141,7 +266,7 @@ func TestBadRequestProtocol(t *testing.T) {
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		<-runChan // wait for server
+		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 		defer conn.Close()
@@ -155,17 +280,17 @@ func TestBadRequestProtocol(t *testing.T) {
 		assert.Equal(t, string(buffer), HTTP11OK)
 	}()
 
-	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
+	_ = s.Run(testPort)
 }
 
 func TestEarlyClose(t *testing.T) {
-	s := rweb.NewServer()
-	runChan := make(chan struct{}, 1)
+	readyChan := make(chan struct{}, 1)
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-		<-runChan // wait for server
+		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, testPort)
 		assert.Nil(t, err)
 
@@ -176,7 +301,7 @@ func TestEarlyClose(t *testing.T) {
 		assert.Nil(t, err)
 	}()
 
-	s.Run(testPort, rweb.RunOpts{Verbose: true, StatusChan: runChan})
+	_ = s.Run(testPort)
 }
 
 func TestUnavailablePort(t *testing.T) {
@@ -185,5 +310,5 @@ func TestUnavailablePort(t *testing.T) {
 	defer listener.Close()
 
 	s := rweb.NewServer()
-	s.Run(testPort)
+	_ = s.Run(testPort)
 }
