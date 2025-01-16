@@ -95,6 +95,8 @@ func TestPost(t *testing.T) {
 		return ctx.String(ctx.Request().GetPostValue("def"))
 	})
 
+	s.ListRoutes()
+
 	go func() {
 		defer func() {
 			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -124,11 +126,6 @@ func TestMultipleRequests(t *testing.T) {
 
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
-	// const msg = "You pinged root"
-	// s.Get("/", func(ctx rweb.Context) error {
-	// 	return ctx.String(msg)
-	// })
-
 	s.Post("/", func(ctx rweb.Context) error {
 		return ctx.String(ctx.Request().GetPostValue("def"))
 	})
@@ -136,6 +133,8 @@ func TestMultipleRequests(t *testing.T) {
 	s.Post("/comment", func(ctx rweb.Context) error {
 		return ctx.String(string(ctx.Request().Body()))
 	})
+
+	s.ListRoutes()
 
 	go func() {
 		defer func() {
@@ -211,6 +210,7 @@ func TestBadRequestHeader(t *testing.T) {
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.String("Hello")
 	})
+	s.ListRoutes()
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)

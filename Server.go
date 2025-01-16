@@ -19,6 +19,9 @@ import (
 )
 
 type ServerOptions struct {
+	// TODO
+	//  - add port here  -- also come up with code for choosing an unused high level port
+	//  - add TLS
 	Verbose bool
 	Debug   bool
 	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
@@ -67,17 +70,11 @@ func NewServer(options ...ServerOptions) *Server {
 			ctx := c.(*context)
 			var hdlr Handler
 
-			// Try exact match first
-			fmt.Printf("Request - method: %q, path: %q\n", ctx.request.method, ctx.request.path)
-			methodMap := s.hashRouter.SelectMethodMap(ctx.request.method)
-			if methodMap != nil {
-				fmt.Println("**-> len(methodMap)", len(methodMap))
-				for k, h := range methodMap {
-					fmt.Printf("method: %q, route key: %q, handler: %v\n", ctx.request.method, k, h)
-				}
-			} else {
-				fmt.Println("Method map is nil for", ctx.request.method)
+			if s.options.Verbose {
+				fmt.Printf("Request - method: %q, path: %q\n", ctx.request.method, ctx.request.path)
 			}
+
+			// Try exact match first
 			hdlr = s.hashRouter.Lookup(ctx.request.method, ctx.request.path)
 			if hdlr == nil {
 				fmt.Println("Route not found in hash router")
@@ -97,31 +94,51 @@ func NewServer(options ...ServerOptions) *Server {
 	return s
 }
 
+func (s *Server) AddMethod(method string, path string, handler Handler) {
+	if strings.IndexByte(path, consts.RuneColon) < 0 {
+		s.hashRouter.Add(method, path, handler)
+	} else {
+		s.radixRouter.Add(method, path, handler)
+	}
+}
+
 // Get registers your function to be called when the given GET path has been requested.
 func (s *Server) Get(path string, handler Handler) {
-	if strings.IndexByte(path, consts.RuneColon) < 0 {
-		s.hashRouter.Add(consts.MethodGet, path, handler)
-	} else {
-		s.radixRouter.Add(consts.MethodGet, path, handler)
-	}
+	s.AddMethod(consts.MethodGet, path, handler)
 }
 
 // Post registers your function to be called when the given POST path has been requested.
 func (s *Server) Post(path string, handler Handler) {
-	if strings.IndexByte(path, consts.RuneColon) < 0 {
-		s.hashRouter.Add(consts.MethodPost, path, handler)
-	} else {
-		s.radixRouter.Add(consts.MethodPost, path, handler)
-	}
+	s.AddMethod(consts.MethodPost, path, handler)
 }
 
 // Put registers your function to be called when the given PUT path has been requested.
 func (s *Server) Put(path string, handler Handler) {
-	if strings.IndexByte(path, consts.RuneColon) < 0 {
-		s.hashRouter.Add(consts.MethodPut, path, handler)
-	} else {
-		s.radixRouter.Add(consts.MethodPut, path, handler)
-	}
+	s.AddMethod(consts.MethodPut, path, handler)
+}
+
+func (s *Server) Patch(path string, handler Handler) {
+	s.AddMethod(consts.MethodPatch, path, handler)
+}
+
+func (s *Server) Delete(path string, handler Handler) {
+	s.AddMethod(consts.MethodDelete, path, handler)
+}
+
+func (s *Server) Head(path string, handler Handler) {
+	s.AddMethod(consts.MethodHead, path, handler)
+}
+
+func (s *Server) Options(path string, handler Handler) {
+	s.AddMethod(consts.MethodOptions, path, handler)
+}
+
+func (s *Server) Connect(path string, handler Handler) {
+	s.AddMethod(consts.MethodConnect, path, handler)
+}
+
+func (s *Server) Trace(path string, handler Handler) {
+	s.AddMethod(consts.MethodTrace, path, handler)
 }
 
 // Request performs a synthetic request and returns the response.
@@ -168,11 +185,20 @@ func (s *Server) Run(address string) error {
 	return nil
 }
 
-/*// Router returns the router used by the server.
-func (s *Server) Router(path string) *rtr.RadRouter[Handler] {
-	return s.radRouter
+// ListRoutes prints all server routes by method in tabular format.
+func (s *Server) ListRoutes() {
+	fmt.Println("\n---- Routes (note that routes with params are not listed) ----")
+	routesList := s.hashRouter.ListRoutes()
+	// TODO can we list routes for radix router? Maybe we will just track the number of Adds
+
+	fmt.Println("Method\t\tPath\t\t\tHandler")
+	fmt.Println("------\t\t----\t\t\t----------")
+
+	for _, route := range routesList {
+		fmt.Printf("%-8s\t%-20s\t%-30s\n", route.Method, route.Path, route.HandlerRef)
+	}
+	fmt.Println()
 }
-*/
 
 // Use adds handlers to your handlers chain.
 func (s *Server) Use(handlers ...Handler) {

@@ -1,6 +1,8 @@
 package rtr
 
 import (
+	"fmt"
+
 	"github.com/rohanthewiz/rweb/consts"
 )
 
@@ -21,8 +23,8 @@ type HashRouter[T any] struct {
 // It is important to use this method when a new hash router is needed
 func NewHashRouter[T any]() *HashRouter[T] {
 	hr := &HashRouter[T]{
-		get:     make(map[string]T),
-		post:    make(map[string]T),
+		get:     make(map[string]T, 16),
+		post:    make(map[string]T, 8),
 		delete:  make(map[string]T),
 		put:     make(map[string]T),
 		patch:   make(map[string]T),
@@ -36,7 +38,7 @@ func NewHashRouter[T any]() *HashRouter[T] {
 
 // Add registers a new handler for the given method and path.
 func (hr *HashRouter[T]) Add(method string, path string, handler T) {
-	hashMap := hr.SelectMethodMap(method)
+	hashMap := hr.selectMethodMap(method)
 	hashMap[path] = handler
 	// Debug
 	// for k, h := range hashMap {
@@ -45,18 +47,49 @@ func (hr *HashRouter[T]) Add(method string, path string, handler T) {
 
 }
 
+func (hr *HashRouter[T]) ListRoutes() (routes []RouteList) {
+	for k, h := range hr.get {
+		routes = append(routes, RouteList{Method: consts.MethodGet, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.post {
+		routes = append(routes, RouteList{Method: consts.MethodPost, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.put {
+		routes = append(routes, RouteList{Method: consts.MethodPut, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.patch {
+		routes = append(routes, RouteList{Method: consts.MethodPatch, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.delete {
+		routes = append(routes, RouteList{Method: consts.MethodDelete, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.head {
+		routes = append(routes, RouteList{Method: consts.MethodHead, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.connect {
+		routes = append(routes, RouteList{Method: consts.MethodConnect, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.trace {
+		routes = append(routes, RouteList{Method: consts.MethodTrace, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	for k, h := range hr.options {
+		routes = append(routes, RouteList{Method: consts.MethodOptions, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
+	}
+	return
+}
+
 // Lookup finds the handler for the given route.
 func (hr *HashRouter[T]) Lookup(method string, path string) T {
 	if method[0] == 'G' {
 		return hr.get[path]
 	}
 
-	hashMap := hr.SelectMethodMap(method)
+	hashMap := hr.selectMethodMap(method)
 	return hashMap[path]
 }
 
-// SelectMethodMap returns the map based on the given HTTP method.
-func (hr *HashRouter[T]) SelectMethodMap(method string) map[string]T {
+// selectMethodMap returns the map based on the given HTTP method.
+func (hr *HashRouter[T]) selectMethodMap(method string) map[string]T {
 	switch method {
 	case consts.MethodGet:
 		return hr.get
