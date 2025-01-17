@@ -198,6 +198,7 @@ func (s *Server) ListRoutes() {
 		fmt.Printf("%-8s\t%-20s\t%-30s\n", route.Method, route.Path, route.HandlerRef)
 	}
 	fmt.Println()
+	// s.radixRouter.PrintRoutes()
 }
 
 // Use adds handlers to your handlers chain.

@@ -1,6 +1,8 @@
 package rtr
 
-import "github.com/rohanthewiz/rweb/consts"
+import (
+	"github.com/rohanthewiz/rweb/consts"
+)
 
 // RadixRouter is a high-performance router.
 type RadixRouter[T any] struct {
