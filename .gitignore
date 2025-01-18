@@ -1,4 +1,7 @@
 .idea/
+.zed
+.vscode/
+
 play/
 testing/
 

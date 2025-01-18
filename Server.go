@@ -70,14 +70,16 @@ func NewServer(options ...ServerOptions) *Server {
 			ctx := c.(*context)
 			var hdlr Handler
 
-			if s.options.Verbose {
+			if s.options.Debug {
 				fmt.Printf("Request - method: %q, path: %q\n", ctx.request.method, ctx.request.path)
 			}
 
 			// Try exact match first
 			hdlr = s.hashRouter.Lookup(ctx.request.method, ctx.request.path)
 			if hdlr == nil {
-				fmt.Println("Route not found in hash router")
+				if s.options.Debug {
+					fmt.Println("Route not found in hash router")
+				}
 				hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
 			}
 
@@ -406,6 +408,12 @@ func (s *Server) handleRequest(ctx *context, method string, url string, writer i
 	tmp := bytes.Buffer{}
 	tmp.WriteString("HTTP/1.1 ")
 	tmp.WriteString(strconv.Itoa(int(ctx.status)))
+
+	if st, ok := consts.StatusTextFromCode[int(ctx.status)]; ok {
+		tmp.WriteByte(consts.RuneSingleSpace)
+		tmp.WriteString(st)
+	}
+
 	tmp.WriteString("\r\nContent-Length: ")
 	tmp.WriteString(strconv.Itoa(len(ctx.response.body)))
 	tmp.WriteString("\r\n")
