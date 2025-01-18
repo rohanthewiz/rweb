@@ -1,7 +1,11 @@
 ## Intro
-**Note**: this is not yet production ready .
+RWeb is a light, high performance web server for Go. It makes a great proxy, for example.
 
-*This is a fork of Akyoto's [web](http://git.akyoto.dev/go/web)*.
+It is a fork of Akyoto's [web](http://git.akyoto.dev/go/web) with some additional features and changes.
+
+## Caution
+- This is still in beta - use with caution.
+- Note that Multipart forms (file upload) is not currently supported.
 
 > Imitation is the sincerest form of flattery.
 
@@ -56,28 +60,7 @@ s.Run(":8080")
 ## Tests
 
 ```
-PASS: TestBytes
-PASS: TestString
-PASS: TestError
-PASS: TestErrorMultiple
-PASS: TestRedirect
-PASS: TestRequest
-PASS: TestRequestHeader
-PASS: TestRequestParam
-PASS: TestWrite
-PASS: TestWriteString
-PASS: TestResponseCompression
-PASS: TestResponseHeader
-PASS: TestResponseHeaderOverwrite
-PASS: TestPanic
-PASS: TestRun
-PASS: TestBadRequest
-PASS: TestBadRequestHeader
-PASS: TestBadRequestMethod
-PASS: TestBadRequestProtocol
-PASS: TestEarlyClose
-PASS: TestUnavailablePort
-coverage: 100.0% of statements
+
 ```
 
 ## Benchmarks
