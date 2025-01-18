@@ -233,6 +233,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 		ctx.handlerCount = 0
 		ctx.status = 200
 
+		// Cleanup any multipart form data
+		ctx.request.CleanupMultipartForm()
 		s.contextPool.Put(ctx)
 	}()
 
@@ -319,6 +321,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if method != consts.MethodHead && method != consts.MethodTrace {
 				ctx.request.body = append(ctx.request.body, body...)
 			}
+
 		} else if isChunked {
 			// Chunked encoding
 			for {
@@ -361,7 +364,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 		}
 
-		if s.options.Verbose && len(ctx.request.body) > 0 {
+		if s.options.Debug && len(ctx.request.body) > 0 {
 			fmt.Printf("** ctx.request.body: %q\n", string(ctx.request.body))
 		}
 
@@ -384,13 +387,22 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 // handleRequest handles the given request.
 func (s *Server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
+	fmt.Println("**-> Server Handling Request...")
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
-	// fmt.Println("**-> ctx.path", ctx.path)
+	// if s.options.Debug {
+	fmt.Println("**-> ctx.ContentType:", string(ctx.ContentType))
+	// }
 
-	// Parse Post Args
+	// Parse Post Args or Multipart Form
 	if len(ctx.request.body) > 0 {
-		if bytes.EqualFold(ctx.ContentType, consts.StrFormData) {
+		if bytes.HasPrefix(ctx.ContentType, consts.StrMultipartFormData) {
+			if err := ctx.request.ParseMultipartForm(); err != nil {
+				fmt.Printf("Error parsing multipart form: %v\n", err)
+			} else {
+				fmt.Println("**-> Parsed Multipart Form")
+			}
+		} else if bytes.EqualFold(ctx.ContentType, consts.StrFormData) {
 			// fmt.Println("**-> Parsing Post Args")
 			ctx.request.parsePostArgs()
 			if s.options.Verbose {
