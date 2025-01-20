@@ -48,9 +48,9 @@ func NewServer(options ...ServerOptions) *Server {
 	if len(options) == 1 {
 		opts.Verbose = options[0].Verbose // Verbose
 
-		// Running Channel
+		// Ready Channel
 		if options[0].ReadyChan != nil && cap(options[0].ReadyChan) < 1 && opts.Verbose {
-			fmt.Println("Running channel capacity should be at least 1, or we may hang")
+			fmt.Println("Ready channel capacity should be at least 1, or we may hang")
 		}
 		// Assign even if it is nil as we will do nil check on use
 		opts.ReadyChan = options[0].ReadyChan
@@ -387,22 +387,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 // handleRequest handles the given request.
 func (s *Server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
-	fmt.Println("**-> Server Handling Request...")
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
-	// if s.options.Debug {
-	fmt.Println("**-> ctx.ContentType:", string(ctx.ContentType))
-	// }
+	if s.options.Debug {
+		fmt.Printf("ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n", string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
+	}
 
 	// Parse Post Args or Multipart Form
 	if len(ctx.request.body) > 0 {
-		if bytes.HasPrefix(ctx.ContentType, consts.StrMultipartFormData) {
+		if bytes.HasPrefix(ctx.ContentType, consts.BytMultipartFormData) {
 			if err := ctx.request.ParseMultipartForm(); err != nil {
 				fmt.Printf("Error parsing multipart form: %v\n", err)
 			} else {
 				fmt.Println("**-> Parsed Multipart Form")
 			}
-		} else if bytes.EqualFold(ctx.ContentType, consts.StrFormData) {
+		} else if bytes.EqualFold(ctx.ContentType, consts.BytFormData) {
 			// fmt.Println("**-> Parsing Post Args")
 			ctx.request.parsePostArgs()
 			if s.options.Verbose {
@@ -418,7 +417,8 @@ func (s *Server) handleRequest(ctx *context, method string, url string, writer i
 	}
 
 	tmp := bytes.Buffer{}
-	tmp.WriteString("HTTP/1.1 ")
+	tmp.WriteString(consts.HTTP1)
+	tmp.WriteString(consts.StrSingleSpace)
 	tmp.WriteString(strconv.Itoa(int(ctx.status)))
 
 	if st, ok := consts.StatusTextFromCode[int(ctx.status)]; ok {

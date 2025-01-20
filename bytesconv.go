@@ -113,7 +113,7 @@ func ParseIPv4(dst net.IP, ipStr []byte) (net.IP, error) {
 // to dst and returns the extended dst.
 func AppendHTTPDate(dst []byte, date time.Time) []byte {
 	dst = date.In(time.UTC).AppendFormat(dst, time.RFC1123)
-	copy(dst[len(dst)-3:], consts.StrGMT)
+	copy(dst[len(dst)-3:], consts.BytGMT)
 	return dst
 }
 

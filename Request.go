@@ -119,7 +119,7 @@ func (req *request) parsePostArgs() {
 	}
 	req.parsedPostArgs = true
 
-	if !bytes.EqualFold(req.ContentType, consts.StrFormData) {
+	if !bytes.EqualFold(req.ContentType, consts.BytFormData) {
 		return
 	}
 	req.postArgs.ParseBytes(req.body)
@@ -132,7 +132,7 @@ func (req *request) ParseMultipartForm() error {
 
 	// Get the Content-Type header
 	contentType := req.ContentType
-	if !bytes.HasPrefix(contentType, consts.StrMultipartFormData) {
+	if !bytes.HasPrefix(contentType, consts.BytMultipartFormData) {
 		return fmt.Errorf("not a multipart form request")
 	}
 

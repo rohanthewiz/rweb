@@ -107,7 +107,7 @@ func TestPost(t *testing.T) {
 		buf := bytes.NewReader([]byte("abc=123&def=456"))
 
 		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1%s", ":8081"),
-			string(consts.StrFormData), buf)
+			string(consts.BytFormData), buf)
 		assert.Nil(t, err)
 		assert.Equal(t, resp.Status, "200")
 
@@ -146,7 +146,7 @@ func TestMultipleRequests(t *testing.T) {
 		// POST
 		buf := bytes.NewReader([]byte("abc=123&def=456"))
 		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1%s/", ":8082"),
-			string(consts.StrFormData), buf)
+			string(consts.BytFormData), buf)
 		assert.Nil(t, err)
 		assert.Equal(t, resp.Status, "200")
 
@@ -167,7 +167,7 @@ func TestMultipleRequests(t *testing.T) {
 		jBody := []byte(`{"key": "value", "count": 20}`)
 		buf.Reset(jBody)
 		resp, err = http.Post(fmt.Sprintf("http://127.0.0.1%s/comment", ":8082"),
-			string(consts.StrJSONData), buf)
+			string(consts.BytJSONData), buf)
 		assert.Nil(t, err)
 		assert.Equal(t, "200", resp.Status)
 
