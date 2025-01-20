@@ -3,10 +3,12 @@ package rweb
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -21,12 +23,19 @@ import (
 type ServerOptions struct {
 	// TODO
 	//  - add port here  -- also come up with code for choosing an unused high level port
-	//  - add TLS
+	//
+	TLS     TLSCfg
 	Verbose bool
 	Debug   bool
 	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
 	// It should be a buffered chan (cap 1 is all that is needed), so there is no chance the server will hang
 	ReadyChan chan struct{}
+}
+
+type TLSCfg struct {
+	CertFile string // Path to certificate file
+	KeyFile  string // Path to private key file
+	UseTLS   bool   // Whether to use TLS
 }
 
 // Server is the HTTP Server.
@@ -47,13 +56,14 @@ func NewServer(options ...ServerOptions) *Server {
 	opts := ServerOptions{}
 	if len(options) == 1 {
 		opts.Verbose = options[0].Verbose // Verbose
+		opts.Debug = options[0].Debug
+		opts.TLS = options[0].TLS
 
 		// Ready Channel
 		if options[0].ReadyChan != nil && cap(options[0].ReadyChan) < 1 && opts.Verbose {
 			fmt.Println("Ready channel capacity should be at least 1, or we may hang")
 		}
-		// Assign even if it is nil as we will do nil check on use
-		opts.ReadyChan = options[0].ReadyChan
+		opts.ReadyChan = options[0].ReadyChan // Assign even if it is nil as we will do nil check on use
 	}
 
 	s := &Server{
@@ -153,18 +163,53 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
+func (s *Server) RunWithHttpsRedirect(httpsAddr, httpAddr string) error {
+	// Start HTTPS server
+	go s.Run(httpsAddr)
+
+	// Start HTTP redirect server
+	return http.ListenAndServe(httpAddr, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpsURL := "https://" + r.Host + r.RequestURI
+		http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
+	}))
+}
+
 // Run starts the server on the given address.
-func (s *Server) Run(address string) error {
-	listener, err := net.Listen(consts.ProtocolTCP, address)
-	if err != nil {
-		return err
+func (s *Server) Run(address string) (err error) {
+	var listener net.Listener
+
+	if s.options.TLS.UseTLS {
+		cert, err := tls.LoadX509KeyPair(s.options.TLS.CertFile, s.options.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("failed to load TLS certificate: %v", err)
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12, // Require TLS 1.2 or higher
+		}
+
+		// Create TLS listener
+		listener, err = tls.Listen("tcp", address, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create TLS listener: %v", err)
+		}
+	} else { // Create regular TCP listener
+		listener, err = net.Listen(consts.ProtocolTCP, address)
+		if err != nil {
+			return err
+		}
 	}
 
 	defer listener.Close()
 
 	go func() {
 		if s.options.Verbose {
-			fmt.Printf("Server is running at %s\n", address)
+			protocol := consts.HTTP
+			if s.options.TLS.UseTLS {
+				protocol = consts.HTTPS
+			}
+			fmt.Printf("Server is running at %s://%s\n", protocol, address)
 		}
 
 		if s.options.ReadyChan != nil { // don't forget nil check!

@@ -12,7 +12,14 @@ import (
 )
 
 func main() {
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, Debug: true})
+	s := rweb.NewServer(rweb.ServerOptions{
+		Verbose: true, Debug: true,
+		TLS: rweb.TLSCfg{
+			UseTLS:   true,
+			KeyFile:  "certs/localhost.key",
+			CertFile: "certs/localhost.crt",
+		},
+	})
 
 	// Middleware
 	s.Use(func(ctx rweb.Context) error {
@@ -93,5 +100,5 @@ func main() {
 	})
 
 	// fmt.Println("Launching server")
-	log.Fatal(s.Run(":8080"))
+	log.Fatal(s.Run(":443"))
 }
