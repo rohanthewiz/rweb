@@ -8,4 +8,5 @@ const (
 	RuneColon       = ':'
 	RuneAsterisk    = '*'
 	CRLF            = "\r\n"
+	ColonSpace      = ": "
 )

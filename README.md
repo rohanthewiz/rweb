@@ -30,17 +30,17 @@ s := web.NewServer()
 
 // Static route
 s.Get("/", func(ctx web.Context) error {
-	return ctx.String("Hello")
+	return ctx.WriteString("Hello")
 })
 
 // Parameter route
 s.Get("/blog/:post", func(ctx web.Context) error {
-	return ctx.String(ctx.Request().Param("post"))
+	return ctx.WriteString(ctx.Request().Param("post"))
 })
 
 // Wildcard route
 s.Get("/images/*file", func(ctx web.Context) error {
-	return ctx.String(ctx.Request().Param("file"))
+	return ctx.WriteString(ctx.Request().Param("file"))
 })
 
 // Middleware

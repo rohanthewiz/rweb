@@ -21,9 +21,10 @@ import (
 )
 
 type ServerOptions struct {
-	// TODO
-	//  - add port here  -- also come up with code for choosing an unused high level port
-	//
+	// Address is the non-TLS  listen address. When UseTLS is true,
+	// this is the address for the HTTP server which will redirect to the HTTPS server.
+	// TCP addresses can be port only or address only in which case a high port is chosen. See: https://pkg.go.dev/net#Listen
+	Address string
 	TLS     TLSCfg
 	Verbose bool
 	Debug   bool
@@ -33,6 +34,7 @@ type ServerOptions struct {
 }
 
 type TLSCfg struct {
+	TLSAddr  string // [Port] to listen on for TLS
 	CertFile string // Path to certificate file
 	KeyFile  string // Path to private key file
 	UseTLS   bool   // Whether to use TLS
@@ -46,6 +48,7 @@ type Server struct {
 	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
 	options      ServerOptions
+	listenAddr   string // the actual listen address used by net.Listen
 }
 
 // NewServer creates a new HTTP server.
@@ -55,9 +58,13 @@ func NewServer(options ...ServerOptions) *Server {
 
 	opts := ServerOptions{}
 	if len(options) == 1 {
+		// Not sure why doing this  (opts := options[0]) instead of individually setting hangs
+		// likely something to do with copy of the ready channel
+
 		opts.Verbose = options[0].Verbose // Verbose
 		opts.Debug = options[0].Debug
 		opts.TLS = options[0].TLS
+		opts.Address = options[0].Address
 
 		// Ready Channel
 		if options[0].ReadyChan != nil && cap(options[0].ReadyChan) < 1 && opts.Verbose {
@@ -163,19 +170,24 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
-func (s *Server) RunWithHttpsRedirect(httpsAddr, httpAddr string) error {
+func (s *Server) RunWithHttpsRedirect() error {
 	// Start HTTPS server
-	go s.Run(httpsAddr)
+	go func() {
+		err := s.Run()
+		if err != nil {
+			fmt.Println("Error starting HTTPS server: ", err)
+		}
+	}()
 
 	// Start HTTP redirect server
-	return http.ListenAndServe(httpAddr, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.ListenAndServe(s.options.Address, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpsURL := "https://" + r.Host + r.RequestURI
 		http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
 	}))
 }
 
 // Run starts the server on the given address.
-func (s *Server) Run(address string) (err error) {
+func (s *Server) Run() (err error) {
 	var listener net.Listener
 
 	if s.options.TLS.UseTLS {
@@ -190,18 +202,20 @@ func (s *Server) Run(address string) (err error) {
 		}
 
 		// Create TLS listener
-		listener, err = tls.Listen("tcp", address, tlsConfig)
+		listener, err = tls.Listen(consts.ProtocolTCP, s.options.TLS.TLSAddr, tlsConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create TLS listener: %v", err)
 		}
+
 	} else { // Create regular TCP listener
-		listener, err = net.Listen(consts.ProtocolTCP, address)
+		listener, err = net.Listen(consts.ProtocolTCP, s.options.Address)
 		if err != nil {
 			return err
 		}
 	}
-
 	defer listener.Close()
+
+	s.listenAddr = listener.Addr().String()
 
 	go func() {
 		if s.options.Verbose {
@@ -209,7 +223,7 @@ func (s *Server) Run(address string) (err error) {
 			if s.options.TLS.UseTLS {
 				protocol = consts.HTTPS
 			}
-			fmt.Printf("Server is running at %s://%s\n", protocol, address)
+			fmt.Printf("Server is running at %s://%s\n", protocol, listener.Addr()) // address
 		}
 
 		if s.options.ReadyChan != nil { // don't forget nil check!
@@ -275,7 +289,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		ctx.response.headers = ctx.response.headers[:0]
 		ctx.response.body = ctx.response.body[:0]
 		ctx.params = ctx.params[:0]
-		ctx.handlerCount = 0
+		ctx.handlerIndex = 0
 		ctx.status = 200
 
 		// Cleanup any multipart form data
@@ -425,17 +439,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 		ctx.response.headers = ctx.response.headers[:0]
 		ctx.response.body = ctx.response.body[:0]
 		ctx.params = ctx.params[:0]
-		ctx.handlerCount = 0
+		ctx.handlerIndex = 0
 		ctx.status = 200
 	}
 }
 
 // handleRequest handles the given request.
-func (s *Server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
+func (s *Server) handleRequest(ctx *context, method string, url string, respWriter io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 	if s.options.Debug {
-		fmt.Printf("ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n", string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
+		fmt.Printf("ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
+			string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
 
 	// Parse Post Args or Multipart Form
@@ -455,36 +470,46 @@ func (s *Server) handleRequest(ctx *context, method string, url string, writer i
 		}
 	}
 
-	// Call the Request handler
+	// Call the first handler in the chain
 	err := s.handlers[0](ctx)
 	if err != nil {
 		s.errorHandler(ctx, err)
 	}
 
 	tmp := bytes.Buffer{}
+	// HTTP1.1 header and status
 	tmp.WriteString(consts.HTTP1)
 	tmp.WriteString(consts.StrSingleSpace)
 	tmp.WriteString(strconv.Itoa(int(ctx.status)))
-
 	if st, ok := consts.StatusTextFromCode[int(ctx.status)]; ok {
 		tmp.WriteByte(consts.RuneSingleSpace)
 		tmp.WriteString(st)
 	}
+	tmp.WriteString(consts.CRLF)
 
-	tmp.WriteString("\r\nContent-Length: ")
+	// Content-Length
+	tmp.WriteString(consts.HeaderContentLength)
+	tmp.WriteString(consts.ColonSpace)
 	tmp.WriteString(strconv.Itoa(len(ctx.response.body)))
-	tmp.WriteString("\r\n")
+	tmp.WriteString(consts.CRLF)
 
+	// Other Headers
 	for _, header := range ctx.response.headers {
 		tmp.WriteString(header.Key)
-		tmp.WriteString(": ")
+		tmp.WriteString(consts.ColonSpace)
 		tmp.WriteString(header.Value)
-		tmp.WriteString("\r\n")
+		tmp.WriteString(consts.CRLF)
 	}
+	tmp.WriteString(consts.CRLF)
 
-	tmp.WriteString("\r\n")
+	// Body
 	tmp.Write(ctx.response.body)
-	writer.Write(tmp.Bytes())
+
+	// Write it all out to the response writer
+	_, err = respWriter.Write(tmp.Bytes())
+	if err != nil {
+		fmt.Println("Error writing response: ", err)
+	}
 }
 
 // newContext allocates a new context with the default state.
@@ -503,4 +528,18 @@ func (s *Server) newContext() *context {
 			status:  200,
 		},
 	}
+}
+
+func (s *Server) GetListenAddr() string {
+	return s.listenAddr
+}
+
+func (s *Server) GetListenPort() (port string) {
+	addr := s.listenAddr
+
+	lastColonIndex := strings.LastIndex(addr, ":")
+	if lastColonIndex != -1 {
+		return addr[lastColonIndex+1:]
+	}
+	return
 }

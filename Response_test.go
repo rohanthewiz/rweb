@@ -75,7 +75,7 @@ func TestResponseHeader(t *testing.T) {
 	s.Get("/", func(ctx rweb.Context) error {
 		ctx.Response().SetHeader("Content-Type", "text/plain")
 		contentType := ctx.Response().Header("Content-Type")
-		return ctx.String(contentType)
+		return ctx.WriteString(contentType)
 	})
 
 	response := s.Request(consts.MethodGet, "/", nil, nil)

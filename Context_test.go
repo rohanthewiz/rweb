@@ -25,7 +25,7 @@ func TestString(t *testing.T) {
 	s := rweb.NewServer()
 
 	s.Get("/", func(ctx rweb.Context) error {
-		return ctx.String("Hello")
+		return ctx.WriteString("Hello")
 	})
 
 	response := s.Request(consts.MethodGet, "/", nil, nil)

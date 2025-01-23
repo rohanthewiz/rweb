@@ -13,9 +13,10 @@ import (
 
 func main() {
 	s := rweb.NewServer(rweb.ServerOptions{
+		Address: "localhost:8080",
 		Verbose: true, Debug: true,
 		TLS: rweb.TLSCfg{
-			UseTLS:   true,
+			UseTLS:   false,
 			KeyFile:  "certs/localhost.key",
 			CertFile: "certs/localhost.crt",
 		},
@@ -38,7 +39,19 @@ func main() {
 	})
 
 	s.Get("/", func(ctx rweb.Context) error {
-		return ctx.String("Welcome home\n")
+		return ctx.WriteString("Welcome\n")
+	})
+
+	s.Get("/home", func(ctx rweb.Context) error {
+		return ctx.WriteHTML("<h1>Welcome home</h1")
+	})
+
+	s.Get("/some-json", func(ctx rweb.Context) error {
+		data := map[string]string{
+			"message": "Hello, World!",
+			"status":  "success",
+		}
+		return ctx.WriteJSON(data)
 	})
 
 	s.Get("/css", func(ctx rweb.Context) error {
@@ -46,7 +59,7 @@ func main() {
 	})
 
 	s.Post("/post-form-data/:form_id", func(ctx rweb.Context) error {
-		return ctx.String("Posted - form_id: " + ctx.Request().Param("form_id"))
+		return ctx.WriteString("Posted - form_id: " + ctx.Request().Param("form_id"))
 	})
 
 	s.Get("/static/my.css", func(ctx rweb.Context) error {
@@ -85,20 +98,19 @@ func main() {
 
 	// Similar URLs, one with a parameter, other without - works great!
 	s.Get("/greet/:name", func(ctx rweb.Context) error {
-		return ctx.String("Hello " + ctx.Request().Param("name"))
+		return ctx.WriteString("Hello " + ctx.Request().Param("name"))
 	})
 	s.Get("/greet/city", func(ctx rweb.Context) error {
-		return ctx.String("Hi big city!")
+		return ctx.WriteString("Hi big city!")
 	})
 
 	// Long URL is not a problem
 	s.Get("/long/long/long/url/:thing", func(ctx rweb.Context) error {
-		return ctx.String("Hello " + ctx.Request().Param("thing"))
+		return ctx.WriteString("Hello " + ctx.Request().Param("thing"))
 	})
 	s.Get("/long/long/long/url/otherthing", func(ctx rweb.Context) error {
-		return ctx.String("Hey other thing!")
+		return ctx.WriteString("Hey other thing!")
 	})
 
-	// fmt.Println("Launching server")
-	log.Fatal(s.Run(":443"))
+	log.Fatal(s.Run())
 }

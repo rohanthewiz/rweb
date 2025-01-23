@@ -13,7 +13,11 @@ type Context interface {
 	Request() IntfRequest
 	Response() Response
 	Status(int) Context
-	String(string) error
+	WriteString(string) error
+	WriteError(error, int) error
+	WriteJSON(interface{}) error
+	WriteHTML(string) error
+	WriteText(string) error
 }
 
 // context contains the request and response data.
@@ -21,7 +25,7 @@ type context struct {
 	request
 	response
 	server       *Server
-	handlerCount uint8
+	handlerIndex uint8
 }
 
 // Bytes adds the raw byte slice to the response body.
@@ -48,8 +52,8 @@ func (ctx *context) Error(messages ...any) error {
 
 // Next executes the next handler in the middleware chain.
 func (ctx *context) Next() error {
-	ctx.handlerCount++
-	return ctx.server.handlers[ctx.handlerCount](ctx)
+	ctx.handlerIndex++
+	return ctx.server.handlers[ctx.handlerIndex](ctx)
 }
 
 // Redirect redirects the client to a different location
@@ -78,7 +82,28 @@ func (ctx *context) Status(status int) Context {
 }
 
 // String adds the given string to the response body.
-func (ctx *context) String(body string) error {
+func (ctx *context) WriteString(body string) error {
 	ctx.response.body = append(ctx.response.body, body...)
 	return nil
+}
+
+func (ctx *context) WriteError(err error, code int) error {
+	ctx.response.SetStatus(code)
+	_, er := ctx.response.WriteString(err.Error())
+	return er
+}
+
+func (ctx *context) WriteJSON(body interface{}) error {
+	_, er := ctx.response.WriteJSON(body)
+	return er
+}
+
+func (ctx *context) WriteHTML(body string) error {
+	_, er := ctx.response.WriteHTML(body)
+	return er
+}
+
+func (ctx *context) WriteText(body string) error {
+	_, er := ctx.response.WriteText(body)
+	return er
 }

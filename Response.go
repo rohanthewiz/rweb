@@ -1,7 +1,10 @@
 package rweb
 
 import (
+	"encoding/json"
 	"io"
+
+	"github.com/rohanthewiz/rweb/consts"
 )
 
 // Response is the interface for an HTTP response.
@@ -29,17 +32,16 @@ func (res *response) Body() []byte {
 }
 
 // Header returns the header value for the given key.
-func (res *response) Header(key string) string {
+func (res *response) Header(key string) (value string) {
 	for _, header := range res.headers {
 		if header.Key == key {
 			return header.Value
 		}
 	}
-
-	return ""
+	return
 }
 
-// SetHeader sets the header value for the given key.
+// SetHeader sets a header
 func (res *response) SetHeader(key string, value string) {
 	for i, header := range res.headers {
 		if header.Key == key {
@@ -47,7 +49,6 @@ func (res *response) SetHeader(key string, value string) {
 			return
 		}
 	}
-
 	res.headers = append(res.headers, Header{Key: key, Value: value})
 }
 
@@ -76,4 +77,35 @@ func (res *response) Write(body []byte) (int, error) {
 func (res *response) WriteString(body string) (int, error) {
 	res.body = append(res.body, body...)
 	return len(body), nil
+}
+
+// ------ Convenience functions ------
+
+// WriteJSON writes the given JSON to the response body
+// also setting the content type to application/json.
+func (res *response) WriteJSON(obj any) (int, error) {
+	byts, err := json.Marshal(obj)
+	if err != nil {
+		return 0, err
+	}
+	res.SetHeader(consts.HeaderContentType, consts.MIMEJSON)
+	return res.Write(byts)
+}
+
+// WriteHTML writes the given HTML to the response body
+// also setting the content type to text/html.
+func (res *response) WriteHTML(body string) (int, error) {
+	return res.writeResponse(body, consts.MIMEHTML)
+}
+
+// WriteText writes the given text to the response body
+// also setting the content type to text/plain.
+func (res *response) WriteText(body string) (int, error) {
+	return res.writeResponse(body, consts.MIMETextPlain)
+}
+
+// writeResponse writes the given body and sets the content type header
+func (res *response) writeResponse(body string, contentType string) (int, error) {
+	res.SetHeader(consts.HeaderContentType, contentType)
+	return res.WriteString(body)
 }

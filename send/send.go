@@ -10,19 +10,19 @@ import (
 // CSS sends the body with the content type set to `text/css`.
 func CSS(ctx rweb.Context, body string) error {
 	ctx.Response().SetHeader("Content-Type", "text/css")
-	return ctx.String(body)
+	return ctx.WriteString(body)
 }
 
 // CSV sends the body with the content type set to `text/csv`.
 func CSV(ctx rweb.Context, body string) error {
 	ctx.Response().SetHeader("Content-Type", "text/csv")
-	return ctx.String(body)
+	return ctx.WriteString(body)
 }
 
 // HTML sends the body with the content type set to `text/html`.
 func HTML(ctx rweb.Context, body string) error {
 	ctx.Response().SetHeader("Content-Type", "text/html")
-	return ctx.String(body)
+	return ctx.WriteString(body)
 }
 
 func File(ctx rweb.Context, filename string, body []byte) error {
@@ -41,7 +41,7 @@ func File(ctx rweb.Context, filename string, body []byte) error {
 // JS sends the body with the content type set to `text/javascript`.
 func JS(ctx rweb.Context, body string) error {
 	ctx.Response().SetHeader("Content-Type", "text/javascript")
-	return ctx.String(body)
+	return ctx.WriteString(body)
 }
 
 // JSON encodes the object in JSON format and sends it with the content type set to `application/json`.
@@ -53,11 +53,11 @@ func JSON(ctx rweb.Context, object any) error {
 // Text sends the body with the content type set to `text/plain`.
 func Text(ctx rweb.Context, body string) error {
 	ctx.Response().SetHeader("Content-Type", "text/plain")
-	return ctx.String(body)
+	return ctx.WriteString(body)
 }
 
 // XML sends the body with the content type set to `text/xml`.
 func XML(ctx rweb.Context, body string) error {
 	ctx.Response().SetHeader("Content-Type", "text/xml")
-	return ctx.String(body)
+	return ctx.WriteString(body)
 }
