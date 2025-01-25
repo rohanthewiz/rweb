@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,7 +96,7 @@ func NewServer(options ...ServerOptions) *Server {
 			hdlr = s.hashRouter.Lookup(ctx.request.method, ctx.request.path)
 			if hdlr == nil {
 				if s.options.Debug {
-					fmt.Println("Route not found in hash router")
+					fmt.Println("Route not found in hash router (it could be a dynamic route)  -- trying radix router")
 				}
 				hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
 			}
@@ -114,7 +115,7 @@ func NewServer(options ...ServerOptions) *Server {
 }
 
 func (s *Server) AddMethod(method string, path string, handler Handler) {
-	if strings.IndexByte(path, consts.RuneColon) < 0 {
+	if strings.IndexByte(path, consts.RuneColon) < 0 && strings.IndexByte(path, consts.RuneAsterisk) < 0 {
 		s.hashRouter.Add(method, path, handler)
 	} else {
 		s.radixRouter.Add(method, path, handler)
@@ -158,6 +159,70 @@ func (s *Server) Connect(path string, handler Handler) {
 
 func (s *Server) Trace(path string, handler Handler) {
 	s.AddMethod(consts.MethodTrace, path, handler)
+}
+
+// StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
+// Examples:
+//  1. s.StaticFiles("static/images/", "/assets/images", 2)
+//  2. s.StaticFiles("/css/", "assets/css", 1)
+//  3. s.StaticFiles("/.well-known/", "/", 0)
+func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
+	// We will match on stripped LHS
+	// e.g. in: StaticFiles("/static/images", "/dist/images", 2)
+
+	if len(reqDir) < 2 {
+		fmt.Println("Static path is too short -- not handling")
+		return
+	}
+
+	// Build wildcard route
+	route := filepath.Join("/", reqDir, "*path")
+	if s.options.Debug {
+		fmt.Println("**-> static route:", route)
+	}
+
+	// Remove any leading "/" so we can properly split below
+	if reqDir[0] == '/' {
+		reqDir = reqDir[1:]
+	}
+
+	// We use the wildcard parameter in the route here
+	s.Get(route, func(ctx Context) error {
+		var rhTokens []string
+		// Strip off the left -- keep the right side tokens here
+		// It is okay if we strip all
+		if s.options.Debug {
+			fmt.Printf("**-> reqPath: %q\n", reqDir)
+		}
+
+		tokens := strings.Split(reqDir, "/")
+		if s.options.Debug {
+			fmt.Printf("**-> tokens: %q", tokens)
+		}
+
+		// Remove unwanted tokens from the request path
+		if len(tokens) >= nbrOfTokensToStrip {
+			rhTokens = tokens[nbrOfTokensToStrip:]
+		}
+		if s.options.Debug {
+			fmt.Printf("**-> rhTokens: %q\n", rhTokens)
+		}
+
+		// Build the actual filepath now
+		wildcardPath := ctx.Request().Param("path")
+		fileSpec := filepath.Join("/", targetDir,
+			strings.Join(rhTokens, "/"), wildcardPath)
+		if s.options.Debug {
+			fmt.Println("**-> fileFullPath", fileSpec)
+		}
+
+		body, err := os.ReadFile("." + fileSpec)
+		if err != nil {
+			return err
+		}
+
+		return File(ctx, filepath.Base(fileSpec), body)
+	})
 }
 
 // Request performs a synthetic request and returns the response.
