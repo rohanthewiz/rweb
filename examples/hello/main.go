@@ -61,6 +61,7 @@ func main() {
 		return ctx.WriteString("Posted - form_id: " + ctx.Request().Param("form_id"))
 	})
 
+	// We could do this for one specific file, but better to use s.StaticFiles to map a whole directory
 	s.Get("/static/my.css", func(ctx rweb.Context) error {
 		body, err := os.ReadFile("assets/my.css")
 		if err != nil {
@@ -69,8 +70,14 @@ func main() {
 		return rweb.File(ctx, "the.css", body)
 	})
 
-	s.StaticFiles("/images/", "artifacts/images", 1)
-	s.StaticFiles("/css/", "artifacts/css", 1)
+	// e.g. http://localhost:8080/static/images/laptop.png
+	s.StaticFiles("static/images/", "/assets/images", 2)
+
+	// e.g. http://localhost:8080/css/my.css
+	s.StaticFiles("/css/", "assets/css", 1)
+
+	// e.g. http://localhost:8080/.well-known/some-file.txt
+	s.StaticFiles("/.well-known/", "/", 0)
 
 	s.Post("/upload", func(c rweb.Context) error {
 		req := c.Request()
