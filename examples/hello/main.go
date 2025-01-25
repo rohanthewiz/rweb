@@ -43,7 +43,7 @@ func main() {
 	})
 
 	s.Get("/home", func(ctx rweb.Context) error {
-		return ctx.WriteHTML("<h1>Welcome home</h1")
+		return ctx.WriteHTML("<h1>Welcome home</h1>")
 	})
 
 	s.Get("/some-json", func(ctx rweb.Context) error {
