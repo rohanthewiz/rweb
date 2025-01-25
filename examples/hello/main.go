@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/rohanthewiz/rweb"
-	"github.com/rohanthewiz/rweb/send"
 )
 
 func main() {
@@ -55,7 +54,7 @@ func main() {
 	})
 
 	s.Get("/css", func(ctx rweb.Context) error {
-		return send.CSS(ctx, "body{}")
+		return rweb.CSS(ctx, "body{}")
 	})
 
 	s.Post("/post-form-data/:form_id", func(ctx rweb.Context) error {
@@ -67,8 +66,11 @@ func main() {
 		if err != nil {
 			return err
 		}
-		return send.File(ctx, "the.css", body)
+		return rweb.File(ctx, "the.css", body)
 	})
+
+	s.StaticFiles("/images/", "artifacts/images", 1)
+	s.StaticFiles("/css/", "artifacts/css", 1)
 
 	s.Post("/upload", func(c rweb.Context) error {
 		req := c.Request()

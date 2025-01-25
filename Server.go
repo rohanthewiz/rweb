@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,6 +159,44 @@ func (s *Server) Connect(path string, handler Handler) {
 
 func (s *Server) Trace(path string, handler Handler) {
 	s.AddMethod(consts.MethodTrace, path, handler)
+}
+
+func (s *Server) StaticFiles(reqPath string /* "/static" */, filesPath string /* "assets/" */, tokensToStrip int) {
+	// We will match on stripped LHS
+
+	if len(reqPath) < 2 {
+		fmt.Println("Static path is too short -- not handling for now")
+		return
+	}
+
+	// We will have to setup a parameter route here, like
+	// /static/:subPath -> /artifacts/:subPath
+	s.Get(reqPath, func(ctx Context) error {
+		/*		// Strip any leading "/" if not root
+				if strings.HasPrefix(reqPath, "/") {
+					if len(reqPath) > 1 {
+						reqPath = reqPath[1:]
+					}
+				}
+		*/
+		var rhTokens []string
+		tokens := strings.Split(reqPath, "/")
+		if len(tokens) >= tokensToStrip {
+			rhTokens = tokens[tokensToStrip:]
+		}
+
+		modPath := filepath.Join("/", filesPath, strings.Join(rhTokens, "/"))
+		fmt.Println("**-> modPath", modPath)
+
+		/*		// Todo restore file  send here
+				body, err := os.ReadFile(modPath)
+				if err != nil {
+					return err
+				}
+		*/
+		return nil // File(ctx, "the.css", body)
+	})
+
 }
 
 // Request performs a synthetic request and returns the response.
