@@ -109,3 +109,9 @@ func (res *response) writeResponse(body string, contentType string) (int, error)
 	res.SetHeader(consts.HeaderContentType, contentType)
 	return res.WriteString(body)
 }
+
+func (res *response) SetSSEHeaders() {
+	res.SetHeader(consts.HeaderContentType, consts.MIMETextEventStream)
+	res.SetHeader(consts.HeaderCacheControl, consts.HeaderNoCache)
+	res.SetHeader(consts.HeaderConnection, consts.HeaderKeepAlive)
+}

@@ -1,7 +1,11 @@
 package rweb
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
+	"io"
+	"time"
 )
 
 // Context is the interface for a request and its response.
@@ -13,11 +17,13 @@ type Context interface {
 	Request() IntfRequest
 	Response() Response
 	Status(int) Context
+	Server() *Server
 	WriteString(string) error
 	WriteError(error, int) error
 	WriteJSON(interface{}) error
 	WriteHTML(string) error
 	WriteText(string) error
+	SetSSE(chan any)
 }
 
 // context contains the request and response data.
@@ -26,6 +32,55 @@ type context struct {
 	response
 	server       *Server
 	handlerIndex uint8
+	sseEvents    chan any // channel for SSE events
+}
+
+func (ctx *context) SetSSE(ch chan any) {
+	ctx.sseEvents = ch
+	ctx.SetSSEHeaders()
+}
+
+func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
+	rw := bufio.NewWriter(respWriter)
+	for {
+		select {
+		case event, ok := <-ctx.sseEvents:
+			if !ok { // Channel closed, clean up and exit
+				_ = rw.Flush()
+				return
+			}
+
+			// Format and send the event
+			switch v := event.(type) {
+			case string:
+				_, err = fmt.Fprintf(rw, "data: %s\n\n", v)
+			default:
+				_, err = fmt.Fprintf(rw, "data: %+v\n\n", v)
+			}
+
+			if err != nil {
+				return err
+			}
+
+			// Important: Flush the buffer to send data immediately
+			if err = rw.Flush(); err != nil {
+				return err
+			}
+
+			// TODO incorporate context Done()
+			/*		case <-ctx.Done():
+					// Context canceled, clean up
+					rw.Flush()
+					return
+			*/
+		}
+		rw.Flush()
+		time.Sleep(4 * time.Second) // slow it down for demo purposes
+	}
+}
+
+func (ctx *context) Server() *Server {
+	return ctx.server
 }
 
 // Bytes adds the raw byte slice to the response body.

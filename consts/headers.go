@@ -37,7 +37,7 @@ const (
 
 	// Connection management.
 	HeaderConnection      = "Connection"
-	HeaderKeepAlive       = "Keep-Alive"
+	HeaderKeepAlive       = "keep-alive"
 	HeaderProxyConnection = "Proxy-Connection"
 
 	// Content negotiation.
@@ -162,4 +162,5 @@ const (
 	HeaderXRequestedWith      = "X-Requested-With"
 	HeaderXRobotsTag          = "X-Robots-Tag"
 	HeaderXUACompatible       = "X-UA-Compatible"
+	HeaderNoCache             = "no-cache"
 )

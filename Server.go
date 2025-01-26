@@ -161,17 +161,21 @@ func (s *Server) Trace(path string, handler Handler) {
 	s.AddMethod(consts.MethodTrace, path, handler)
 }
 
+func (s *Server) SSEHandler(eventChan chan any) Handler {
+	return func(ctx Context) error {
+		ctx.SetSSE(eventChan)
+		return nil
+	}
+}
+
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
 // Examples:
 //  1. s.StaticFiles("static/images/", "/assets/images", 2)
 //  2. s.StaticFiles("/css/", "assets/css", 1)
 //  3. s.StaticFiles("/.well-known/", "/", 0)
 func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
-	// We will match on stripped LHS
-	// e.g. in: StaticFiles("/static/images", "/dist/images", 2)
-
 	if len(reqDir) < 2 {
-		fmt.Println("Static path is too short -- not handling")
+		fmt.Println("Request dir is too short -- not handling")
 		return
 	}
 
@@ -315,7 +319,7 @@ func (s *Server) Run() (err error) {
 func (s *Server) ListRoutes() {
 	fmt.Println("\n---- Routes (note that routes with params are not listed) ----")
 	routesList := s.hashRouter.ListRoutes()
-	// TODO can we list routes for radix router? Maybe we will just track the number of Adds
+	// Can we list routes for radix router? Maybe we will just track the number of Adds
 
 	fmt.Println("Method\t\tPath\t\t\tHandler")
 	fmt.Println("------\t\t----\t\t\t----------")
@@ -552,11 +556,13 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	}
 	tmp.WriteString(consts.CRLF)
 
-	// Content-Length
-	tmp.WriteString(consts.HeaderContentLength)
-	tmp.WriteString(consts.ColonSpace)
-	tmp.WriteString(strconv.Itoa(len(ctx.response.body)))
-	tmp.WriteString(consts.CRLF)
+	if ctx.sseEvents == nil { // For SSE -- don't set content-length
+		// Content-Length
+		tmp.WriteString(consts.HeaderContentLength)
+		tmp.WriteString(consts.ColonSpace)
+		tmp.WriteString(strconv.Itoa(len(ctx.response.body)))
+		tmp.WriteString(consts.CRLF)
+	}
 
 	// Other Headers
 	for _, header := range ctx.response.headers {
@@ -567,13 +573,20 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	}
 	tmp.WriteString(consts.CRLF)
 
-	// Body
-	tmp.Write(ctx.response.body)
-
-	// Write it all out to the response writer
+	// Write what we have so far to the response writer
 	_, err = respWriter.Write(tmp.Bytes())
 	if err != nil {
 		fmt.Println("Error writing response: ", err)
+	}
+
+	// Body
+	if ctx.sseEvents == nil {
+		_, _ = respWriter.Write(ctx.response.body)
+	} else {
+		err = ctx.sendSSE(respWriter)
+		if err != nil {
+			fmt.Println("Error sending SSE events: ", err)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package consts
 const (
 	MIMETextPlain         = "text/plain"
 	MIMEOctetStream       = "application/octet-stream"
+	MIMETextEventStream   = "text/event-stream"
 	MIMEFormData          = "application/x-www-form-urlencoded"
 	MIMEMultipartFormData = "multipart/form-data"
 	MIMEJSON              = "application/json"

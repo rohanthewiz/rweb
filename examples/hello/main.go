@@ -41,6 +41,15 @@ func main() {
 		return ctx.WriteString("Welcome\n")
 	})
 
+	eventsChan := make(chan any, 8)
+	eventsChan <- "event 1"
+	eventsChan <- "event 2"
+	eventsChan <- "event 3"
+	eventsChan <- "event 4"
+	eventsChan <- "event 5"
+
+	s.Get("/events", s.SSEHandler(eventsChan))
+
 	s.Get("/home", func(ctx rweb.Context) error {
 		return ctx.WriteHTML("<h1>Welcome home</h1>")
 	})
