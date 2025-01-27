@@ -3,17 +3,19 @@ RWeb is a light, high performance web server for Go.
 
 It is a fork of Akyoto's [web](http://git.akyoto.dev/go/web) with some additional features and changes.
 
-## Caution
-- This is still in beta - use with caution.
-
 > Imitation is the sincerest form of flattery.
 
 Thanks and credit to Akyoto, especially for the radix tree!
+
+## Caution
+- This is still in beta - use with caution.
 
 ## Features
 
 - High performance
 - Low latency
+- Server Sent Events
+- Flexible static files handling
 - Scales incredibly well with the number of routes
 
 ## Installation
@@ -65,6 +67,9 @@ s.Run(":8080")
 ```
 
 ## Benchmarks
+
+Benchmarks have not been updated.
+TODO: need to re-run these...
 
 ![wrk Benchmark](https://i.imgur.com/6cDeZVA.png)
 
