@@ -317,7 +317,7 @@ func (s *Server) Run() (err error) {
 
 // ListRoutes prints all server routes by method in tabular format.
 func (s *Server) ListRoutes() {
-	fmt.Println("\n---- Routes (note that routes with params are not listed) ----")
+	fmt.Println("\n---- Routes (routes with params are not listed) ----")
 	routesList := s.hashRouter.ListRoutes()
 	// Can we list routes for radix router? Maybe we will just track the number of Adds
 

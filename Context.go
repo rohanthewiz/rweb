@@ -74,7 +74,7 @@ func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 					return
 			*/
 		}
-		rw.Flush()
+		_ = rw.Flush()
 		time.Sleep(4 * time.Second) // slow it down for demo purposes
 	}
 }

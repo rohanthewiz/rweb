@@ -1,15 +1,14 @@
 ## Intro
-RWeb is a light, high performance web server for Go. It makes a great proxy, for example.
+RWeb is a light, high performance web server for Go.
 
 It is a fork of Akyoto's [web](http://git.akyoto.dev/go/web) with some additional features and changes.
 
 ## Caution
 - This is still in beta - use with caution.
-- Note that Multipart forms (file upload) is not currently supported.
 
 > Imitation is the sincerest form of flattery.
 
-All thanks and credit to Akyoto!
+Thanks and credit to Akyoto, especially for the radix tree!
 
 ## Features
 
@@ -24,6 +23,8 @@ go get github.com/rohanthewiz/rweb
 ```
 
 ## Usage
+
+(See examples in examples/hello/main.go)
 
 ```go
 s := web.NewServer()

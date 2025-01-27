@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	testPort = ":8080"
 	HTTP11OK = "HTTP/1.1 200"
 )
 
@@ -65,25 +64,24 @@ func TestGet(t *testing.T) {
 	_ = s.Run()
 }
 
-/*
-	func TestNoRoutes(t *testing.T) {
-		readyChan := make(chan struct{}, 1)
+func TestNoRoutes(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
 
-		s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
 
-		go func() {
-			defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	go func() {
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
-			<-readyChan // wait for server
+		<-readyChan // wait for server
 
-			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", testPort))
-			assert.Nil(t, err)
-			assert.Equal(t, "404", resp.Status)
-		}()
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", s.GetListenPort()))
+		assert.Nil(t, err)
+		assert.Equal(t, "404 Not Found", resp.Status)
+	}()
 
-		_ = s.Run(testPort)
-	}
-*/
+	_ = s.Run()
+}
+
 func TestPost(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
@@ -124,6 +122,11 @@ func TestMultipleRequests(t *testing.T) {
 
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
 
+	const getMsg = "Get root"
+	s.Get("/", func(ctx rweb.Context) error {
+		return ctx.WriteString(getMsg)
+	})
+
 	s.Post("/", func(ctx rweb.Context) error {
 		return ctx.WriteString(ctx.Request().GetPostValue("def"))
 	})
@@ -153,15 +156,15 @@ func TestMultipleRequests(t *testing.T) {
 		_ = resp.Body.Close()
 		assert.Equal(t, string(body), "456")
 
-		/*		// GET
-				resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%s/", testPort))
-				assert.Nil(t, err)
-				assert.Equal(t, resp.Status, "200")
+		// GET
+		resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%s/", s.GetListenPort()))
+		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, consts.OK200)
 
-				body, _ = io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				assert.Equal(t, string(body), msg)
-		*/
+		body, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		assert.Equal(t, string(body), getMsg)
+
 		// POST comment
 		jBody := []byte(`{"key": "value", "count": 20}`)
 		buf.Reset(jBody)
@@ -304,6 +307,8 @@ func TestEarlyClose(t *testing.T) {
 }
 
 func TestUnavailablePort(t *testing.T) {
+	const testPort = ":8080"
+
 	listener, err := net.Listen(consts.ProtocolTCP, testPort)
 	assert.Nil(t, err)
 	defer listener.Close()

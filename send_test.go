@@ -4,38 +4,39 @@ import (
 	"testing"
 
 	"git.akyoto.dev/go/assert"
+	"github.com/rohanthewiz/rweb"
 	"github.com/rohanthewiz/rweb/consts"
 )
 
 func TestContentTypes(t *testing.T) {
-	s := NewServer()
+	s := rweb.NewServer()
 
-	s.Get("/css", func(ctx Context) error {
-		return CSS(ctx, "body{}")
+	s.Get("/css", func(ctx rweb.Context) error {
+		return rweb.CSS(ctx, "body{}")
 	})
 
-	s.Get("/csv", func(ctx Context) error {
-		return CSV(ctx, "ID;Name\n")
+	s.Get("/csv", func(ctx rweb.Context) error {
+		return rweb.CSV(ctx, "ID;Name\n")
 	})
 
-	s.Get("/html", func(ctx Context) error {
-		return HTML(ctx, "<html></html>")
+	s.Get("/html", func(ctx rweb.Context) error {
+		return rweb.HTML(ctx, "<html></html>")
 	})
 
-	s.Get("/js", func(ctx Context) error {
-		return JS(ctx, "console.log(42)")
+	s.Get("/js", func(ctx rweb.Context) error {
+		return rweb.JS(ctx, "console.log(42)")
 	})
 
-	s.Get("/json", func(ctx Context) error {
-		return JSON(ctx, struct{ Name string }{Name: "User 1"})
+	s.Get("/json", func(ctx rweb.Context) error {
+		return rweb.JSON(ctx, struct{ Name string }{Name: "User 1"})
 	})
 
-	s.Get("/text", func(ctx Context) error {
-		return Text(ctx, "Hello")
+	s.Get("/text", func(ctx rweb.Context) error {
+		return rweb.Text(ctx, "Hello")
 	})
 
-	s.Get("/xml", func(ctx Context) error {
-		return XML(ctx, "<xml></xml>")
+	s.Get("/xml", func(ctx rweb.Context) error {
+		return rweb.XML(ctx, "<xml></xml>")
 	})
 
 	tests := []struct {
