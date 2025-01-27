@@ -18,7 +18,7 @@ func TestRequest(t *testing.T) {
 		scheme := req.Scheme()
 		host := req.Host()
 		path := req.Path()
-		return ctx.String(fmt.Sprintf("%s %s %s %s", method, scheme, host, path))
+		return ctx.WriteString(fmt.Sprintf("%s %s %s %s", method, scheme, host, path))
 	})
 
 	response := s.Request(consts.MethodGet, "http://example.com/request?x=1", []rweb.Header{{"Accept", "*/*"}}, nil)
@@ -32,7 +32,7 @@ func TestRequestHeader(t *testing.T) {
 	s.Get("/", func(ctx rweb.Context) error {
 		accept := ctx.Request().Header("Accept")
 		empty := ctx.Request().Header("")
-		return ctx.String(accept + empty)
+		return ctx.WriteString(accept + empty)
 	})
 
 	response := s.Request(consts.MethodGet, "/", []rweb.Header{{"Accept", "*/*"}}, nil)
@@ -46,7 +46,7 @@ func TestRequestParam(t *testing.T) {
 	s.Get("/blog/:article", func(ctx rweb.Context) error {
 		article := ctx.Request().Param("article")
 		empty := ctx.Request().Param("")
-		return ctx.String(article + empty)
+		return ctx.WriteString(article + empty)
 	})
 
 	response := s.Request(consts.MethodGet, "/blog/my-article", nil, nil)

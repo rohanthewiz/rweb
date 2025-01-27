@@ -1,17 +1,21 @@
 ## Intro
-**Note**: this is not yet production ready as everything is not yet tested.
-If you are confident in what you see, feel free to use it.
+RWeb is a light, high performance web server for Go.
 
-*This is a fork of Akyoto's [web](http://git.akyoto.dev/go/web)*.
+It is a fork of Akyoto's [web](http://git.akyoto.dev/go/web) with some additional features and changes.
 
 > Imitation is the sincerest form of flattery.
 
-All thanks and credit to Akyoto!
+Thanks and credit to Akyoto, especially for the radix tree!
+
+## Caution
+- This is still in beta - use with caution.
 
 ## Features
 
 - High performance
 - Low latency
+- Server Sent Events
+- Flexible static files handling
 - Scales incredibly well with the number of routes
 
 ## Installation
@@ -22,22 +26,24 @@ go get github.com/rohanthewiz/rweb
 
 ## Usage
 
+(See examples in examples/hello/main.go)
+
 ```go
 s := web.NewServer()
 
 // Static route
 s.Get("/", func(ctx web.Context) error {
-	return ctx.String("Hello")
+	return ctx.WriteString("Hello")
 })
 
 // Parameter route
 s.Get("/blog/:post", func(ctx web.Context) error {
-	return ctx.String(ctx.Request().Param("post"))
+	return ctx.WriteString(ctx.Request().Param("post"))
 })
 
 // Wildcard route
 s.Get("/images/*file", func(ctx web.Context) error {
-	return ctx.String(ctx.Request().Param("file"))
+	return ctx.WriteString(ctx.Request().Param("file"))
 })
 
 // Middleware
@@ -57,31 +63,13 @@ s.Run(":8080")
 ## Tests
 
 ```
-PASS: TestBytes
-PASS: TestString
-PASS: TestError
-PASS: TestErrorMultiple
-PASS: TestRedirect
-PASS: TestRequest
-PASS: TestRequestHeader
-PASS: TestRequestParam
-PASS: TestWrite
-PASS: TestWriteString
-PASS: TestResponseCompression
-PASS: TestResponseHeader
-PASS: TestResponseHeaderOverwrite
-PASS: TestPanic
-PASS: TestRun
-PASS: TestBadRequest
-PASS: TestBadRequestHeader
-PASS: TestBadRequestMethod
-PASS: TestBadRequestProtocol
-PASS: TestEarlyClose
-PASS: TestUnavailablePort
-coverage: 100.0% of statements
+
 ```
 
 ## Benchmarks
+
+Benchmarks have not been updated.
+TODO: need to re-run these...
 
 ![wrk Benchmark](https://i.imgur.com/6cDeZVA.png)
 

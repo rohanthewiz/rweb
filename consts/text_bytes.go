@@ -1,0 +1,37 @@
+package consts
+
+var (
+	defaultContentType = []byte("text/plain; charset=utf-8")
+)
+
+var (
+	BytSlash                    = []byte("/")
+	BytSlashSlash               = []byte("//")
+	BytSlashDotDot              = []byte("/..")
+	BytSlashDotSlash            = []byte("/./")
+	BytSlashDotDotSlash         = []byte("/../")
+	BytBackSlashDotDot          = []byte(`\..`)
+	BytBackSlashDotBackSlash    = []byte(`\.\`)
+	BytSlashDotDotBackSlash     = []byte(`/..\`)
+	BytBackSlashDotDotBackSlash = []byte(`\..\`)
+	BytCRLF                     = []byte("\r\n")
+	BytColon                    = []byte(":")
+	BytColonSlashSlash          = []byte("://")
+	BytColonSpace               = []byte(": ")
+	BytCommaSpace               = []byte(", ")
+	BytGMT                      = []byte("GMT")
+
+	BytClose       = []byte("close")
+	BytGzip        = []byte("gzip")
+	BytBr          = []byte("br")
+	BytZstd        = []byte("zstd")
+	BytDeflate     = []byte("deflate")
+	BytKeepAlive   = []byte("keep-alive")
+	BytUpgrade     = []byte("Upgrade")
+	BytChunked     = []byte("chunked")
+	BytIdentity    = []byte("identity")
+	Byt100Continue = []byte("100-continue")
+	BytBoundary    = []byte("boundary")
+	BytBytes       = []byte("bytes")
+	BytBasicSpace  = []byte("Basic ")
+)

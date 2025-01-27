@@ -1,3 +1,11 @@
 .idea/
+.zed
+.vscode/
+.DS_Store
+.qodo
+
+play/
+testing/
+certs/
 
 rweb

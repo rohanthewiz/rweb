@@ -1,4 +1,4 @@
-package send_test
+package rweb_test
 
 import (
 	"testing"
@@ -6,38 +6,37 @@ import (
 	"git.akyoto.dev/go/assert"
 	"github.com/rohanthewiz/rweb"
 	"github.com/rohanthewiz/rweb/consts"
-	"github.com/rohanthewiz/rweb/send"
 )
 
 func TestContentTypes(t *testing.T) {
 	s := rweb.NewServer()
 
 	s.Get("/css", func(ctx rweb.Context) error {
-		return send.CSS(ctx, "body{}")
+		return rweb.CSS(ctx, "body{}")
 	})
 
 	s.Get("/csv", func(ctx rweb.Context) error {
-		return send.CSV(ctx, "ID;Name\n")
+		return rweb.CSV(ctx, "ID;Name\n")
 	})
 
 	s.Get("/html", func(ctx rweb.Context) error {
-		return send.HTML(ctx, "<html></html>")
+		return rweb.HTML(ctx, "<html></html>")
 	})
 
 	s.Get("/js", func(ctx rweb.Context) error {
-		return send.JS(ctx, "console.log(42)")
+		return rweb.JS(ctx, "console.log(42)")
 	})
 
 	s.Get("/json", func(ctx rweb.Context) error {
-		return send.JSON(ctx, struct{ Name string }{Name: "User 1"})
+		return rweb.JSON(ctx, struct{ Name string }{Name: "User 1"})
 	})
 
 	s.Get("/text", func(ctx rweb.Context) error {
-		return send.Text(ctx, "Hello")
+		return rweb.Text(ctx, "Hello")
 	})
 
 	s.Get("/xml", func(ctx rweb.Context) error {
-		return send.XML(ctx, "<xml></xml>")
+		return rweb.XML(ctx, "<xml></xml>")
 	})
 
 	tests := []struct {

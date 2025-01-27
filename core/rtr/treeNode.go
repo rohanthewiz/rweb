@@ -2,13 +2,15 @@ package rtr
 
 import (
 	"strings"
+
+	"github.com/rohanthewiz/rweb/consts"
 )
 
 // node types
 const (
-	separator = '/'
-	parameter = ':'
-	wildcard  = '*'
+// separator = '/'
+// parameter = ':'
+// wildcard  = '*'
 )
 
 // treeNode represents a radix tree node.
@@ -121,7 +123,9 @@ func (node *treeNode[T]) addChild(child *treeNode[T]) {
 
 // addTrailingSlash adds a trailing slash with the same data.
 func (node *treeNode[T]) addTrailingSlash(data T) {
-	if strings.HasSuffix(node.prefix, "/") || node.kind == wildcard || (separator >= node.startIndex && separator < node.endIndex && node.indices[separator-node.startIndex] != 0) {
+	if strings.HasSuffix(node.prefix, "/") || node.kind == consts.RuneAsterisk ||
+		(consts.RuneFwdSlash >= node.startIndex && consts.RuneFwdSlash < node.endIndex &&
+			node.indices[consts.RuneFwdSlash-node.startIndex] != 0) {
 		return
 	}
 
@@ -143,10 +147,10 @@ func (node *treeNode[T]) append(path string, data T) {
 			return
 		}
 
-		paramStart := strings.IndexByte(path, parameter)
+		paramStart := strings.IndexByte(path, consts.RuneColon)
 
 		if paramStart == -1 {
-			paramStart = strings.IndexByte(path, wildcard)
+			paramStart = strings.IndexByte(path, consts.RuneAsterisk)
 		}
 
 		// If it's a static route we are adding,
@@ -174,7 +178,7 @@ func (node *treeNode[T]) append(path string, data T) {
 		// If we're directly in front of a parameter,
 		// add a parameter node.
 		if paramStart == 0 {
-			paramEnd := strings.IndexByte(path, separator)
+			paramEnd := strings.IndexByte(path, consts.RuneFwdSlash)
 
 			if paramEnd == -1 {
 				paramEnd = len(path)
@@ -186,14 +190,14 @@ func (node *treeNode[T]) append(path string, data T) {
 			}
 
 			switch child.kind {
-			case parameter:
+			case consts.RuneColon:
 				child.addTrailingSlash(data)
 				node.parameter = child
 				node = child
 				path = path[paramEnd:]
 				continue
 
-			case wildcard:
+			case consts.RuneAsterisk:
 				child.data = data
 				node.wildcard = child
 				return
@@ -252,7 +256,7 @@ func (node *treeNode[T]) end(path string, data T, i int, offset int) (*treeNode[
 
 	// node: /user/|:id
 	// path: /user/|:id/profile
-	if node.parameter != nil && path[i] == parameter {
+	if node.parameter != nil && path[i] == consts.RuneColon {
 		node = node.parameter
 		offset = i
 		return node, offset, flowBegin
