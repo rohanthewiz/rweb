@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 )
 
 // Context is the interface for a request and its response.
@@ -45,7 +44,7 @@ func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 	for {
 		select {
 		case event, ok := <-ctx.sseEvents:
-			if !ok { // Channel closed, clean up and exit
+			if !ok { // Channel closed and drained, clean up and exit
 				_ = rw.Flush()
 				return
 			}
@@ -75,7 +74,7 @@ func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 			*/
 		}
 		_ = rw.Flush()
-		time.Sleep(4 * time.Second) // slow it down for demo purposes
+		// time.Sleep(1 * time.Second) // slow it down for demo purposes
 	}
 }
 
