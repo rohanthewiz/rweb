@@ -168,6 +168,66 @@ func (s *Server) SSEHandler(eventChan chan any) Handler {
 	}
 }
 
+func (s *Server) Proxy(pathPrefix, targetDomain string) (err error) {
+	hdlr := func(ctx Context) error {
+		ctxReq := ctx.Request()
+
+		if s.options.Verbose {
+			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), targetDomain)
+		}
+		var req *http.Request
+
+		if ctxReq.Body() != nil {
+			buf := bytes.NewBuffer(ctxReq.Body())
+			req, err = http.NewRequest(ctx.Request().Method(), filepath.Join(targetDomain, ctx.Request().Path()), buf)
+		} else {
+			req, err = http.NewRequest(ctx.Request().Method(), filepath.Join(targetDomain, ctx.Request().Path()), nil)
+		}
+		if err != nil {
+			return err
+		}
+
+		// Take the original headers too
+		for _, hdr := range ctxReq.Headers() {
+			req.Header.Set(hdr.Key, hdr.Value)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+
+		err = ctx.Bytes(body)
+		if err != nil {
+			return err
+		}
+
+		ctx.Response().SetStatus(resp.StatusCode)
+
+		for hdr, vals := range resp.Header {
+			ctx.Response().SetHeader(hdr, strings.Join(vals, ","))
+		}
+		return nil
+	}
+
+	s.Get(pathPrefix+"/*path", hdlr)
+	s.Post(pathPrefix+"/*path", hdlr)
+	s.Put(pathPrefix+"/*path", hdlr)
+	s.Patch(pathPrefix+"/*path", hdlr)
+	s.Delete(pathPrefix+"/*path", hdlr)
+	s.Head(pathPrefix+"/*path", hdlr)
+	s.Options(pathPrefix+"/*path", hdlr)
+	s.Connect(pathPrefix+"/*path", hdlr)
+	s.Trace(pathPrefix+"/*path", hdlr)
+	return nil
+}
+
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
 // Examples:
 //  1. s.StaticFiles("static/images/", "/assets/images", 2)
@@ -528,10 +588,11 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 			if err := ctx.request.ParseMultipartForm(); err != nil {
 				fmt.Printf("Error parsing multipart form: %v\n", err)
 			} else {
-				fmt.Println("**-> Parsed Multipart Form")
+				if s.options.Verbose {
+					fmt.Println("Parsed Multipart Form")
+				}
 			}
 		} else if bytes.EqualFold(ctx.ContentType, consts.BytFormData) {
-			// fmt.Println("**-> Parsing Post Args")
 			ctx.request.parsePostArgs()
 			if s.options.Verbose {
 				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
@@ -545,7 +606,12 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		s.errorHandler(ctx, err)
 	}
 
+	s.writeResponse(ctx, respWriter)
+}
+
+func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	tmp := bytes.Buffer{}
+
 	// HTTP1.1 header and status
 	tmp.WriteString(consts.HTTP1)
 	tmp.WriteString(consts.StrSingleSpace)
@@ -574,7 +640,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	tmp.WriteString(consts.CRLF)
 
 	// Write what we have so far to the response writer
-	_, err = respWriter.Write(tmp.Bytes())
+	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
 		fmt.Println("Error writing response: ", err)
 	}

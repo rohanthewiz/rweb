@@ -13,6 +13,7 @@ import (
 
 // IntfRequest is an interface for HTTP requests.
 type IntfRequest interface {
+	Headers() []Header
 	Header(string) string
 	Host() string
 	Method() string
@@ -54,8 +55,12 @@ func (req *request) Header(key string) string {
 			return header.Value
 		}
 	}
-
 	return ""
+}
+
+// Headers returns the request headers.
+func (req *request) Headers() []Header {
+	return req.headers
 }
 
 // Host returns the requested host.
