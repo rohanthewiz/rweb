@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -102,6 +103,9 @@ func NewServer(options ...ServerOptions) *Server {
 			}
 
 			if hdlr == nil {
+				if s.options.Verbose {
+					fmt.Println("Route not found in radix router either -- returning 404")
+				}
 				ctx.SetStatus(consts.StatusNotFound)
 				return nil
 			}
@@ -166,6 +170,93 @@ func (s *Server) SSEHandler(eventChan chan any) Handler {
 		ctx.SetSSE(eventChan)
 		return nil
 	}
+}
+
+// Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
+// Returns an error if the setup fails or if the target URL is invalid.
+func (s *Server) Proxy(pathPrefix, targetURL string) (err error) {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return err
+	}
+
+	urlWithoutPath := u.Scheme + "://" + u.Host
+	targetPath := u.Path
+	qry := u.RawQuery
+
+	hdlr := func(ctx Context) (err error) {
+		ctxReq := ctx.Request()
+
+		newPath := filepath.Join("/", targetPath, ctxReq.Path())
+		newURL := urlWithoutPath + newPath
+
+		if qry != "" {
+			newURL = newURL + "?" + qry
+		}
+
+		if s.options.Verbose {
+			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), newURL)
+		}
+
+		var req *http.Request
+
+		if ctxReq.Body() != nil {
+			buf := bytes.NewBuffer(ctxReq.Body())
+			req, err = http.NewRequest(ctx.Request().Method(), newURL, buf)
+		} else {
+			req, err = http.NewRequest(ctx.Request().Method(), newURL, nil)
+		}
+		if err != nil {
+			return err
+		}
+
+		// Take the original headers too
+		for _, hdr := range ctxReq.Headers() {
+			req.Header.Set(hdr.Key, hdr.Value)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+
+		err = ctx.Bytes(body)
+		if err != nil {
+			return err
+		}
+
+		ctx.Response().SetStatus(resp.StatusCode)
+
+		for hdr, vals := range resp.Header {
+			if strings.EqualFold(consts.HeaderContentLength, hdr) { // we auto set content-length - don't set it twice
+				continue
+			}
+			ctx.Response().SetHeader(hdr, strings.Join(vals, ","))
+		}
+		return nil
+	}
+
+	proxyPath := filepath.Join("/", pathPrefix, "*path")
+	if s.options.Verbose {
+		fmt.Println("Setting up proxy handlers to route:", proxyPath)
+	}
+
+	s.Get(proxyPath, hdlr)
+	s.Post(proxyPath, hdlr)
+	s.Put(proxyPath, hdlr)
+	s.Patch(proxyPath, hdlr)
+	s.Delete(proxyPath, hdlr)
+	s.Head(proxyPath, hdlr)
+	s.Options(proxyPath, hdlr)
+	s.Connect(proxyPath, hdlr)
+	s.Trace(proxyPath, hdlr)
+	return nil
 }
 
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
@@ -398,7 +489,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		var contentLen int64
 		var isChunked bool
 
-		// Add headers until we meet an empty line
+		// Read headers until we meet an empty line
 		for {
 			message, err = ctx.reader.ReadString(consts.RuneNewLine) // read a line
 			if err != nil {
@@ -484,7 +575,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				}
 				ctx.request.body = append(ctx.request.body, chunk...)
 
-				// Read chunk CRLF
+				// Read chunk LF
 				_, err = ctx.reader.ReadString(consts.RuneNewLine)
 				if err != nil {
 					return
@@ -528,10 +619,11 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 			if err := ctx.request.ParseMultipartForm(); err != nil {
 				fmt.Printf("Error parsing multipart form: %v\n", err)
 			} else {
-				fmt.Println("**-> Parsed Multipart Form")
+				if s.options.Verbose {
+					fmt.Println("Parsed Multipart Form")
+				}
 			}
 		} else if bytes.EqualFold(ctx.ContentType, consts.BytFormData) {
-			// fmt.Println("**-> Parsing Post Args")
 			ctx.request.parsePostArgs()
 			if s.options.Verbose {
 				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
@@ -545,7 +637,12 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		s.errorHandler(ctx, err)
 	}
 
+	s.writeResponse(ctx, respWriter)
+}
+
+func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	tmp := bytes.Buffer{}
+
 	// HTTP1.1 header and status
 	tmp.WriteString(consts.HTTP1)
 	tmp.WriteString(consts.StrSingleSpace)
@@ -574,7 +671,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	tmp.WriteString(consts.CRLF)
 
 	// Write what we have so far to the response writer
-	_, err = respWriter.Write(tmp.Bytes())
+	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
 		fmt.Println("Error writing response: ", err)
 	}
