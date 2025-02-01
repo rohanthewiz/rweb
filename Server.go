@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -102,6 +103,9 @@ func NewServer(options ...ServerOptions) *Server {
 			}
 
 			if hdlr == nil {
+				if s.options.Verbose {
+					fmt.Println("Route not found in radix router either -- returning 404")
+				}
 				ctx.SetStatus(consts.StatusNotFound)
 				return nil
 			}
@@ -168,20 +172,39 @@ func (s *Server) SSEHandler(eventChan chan any) Handler {
 	}
 }
 
-func (s *Server) Proxy(pathPrefix, targetDomain string) (err error) {
-	hdlr := func(ctx Context) error {
+// Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
+// Returns an error if the setup fails or if the target URL is invalid.
+func (s *Server) Proxy(pathPrefix, targetURL string) (err error) {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return err
+	}
+
+	urlWithoutPath := u.Scheme + "://" + u.Host
+	targetPath := u.Path
+	qry := u.RawQuery
+
+	hdlr := func(ctx Context) (err error) {
 		ctxReq := ctx.Request()
 
-		if s.options.Verbose {
-			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), targetDomain)
+		newPath := filepath.Join("/", targetPath, ctxReq.Path())
+		newURL := urlWithoutPath + newPath
+
+		if qry != "" {
+			newURL = newURL + "?" + qry
 		}
+
+		if s.options.Verbose {
+			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), newURL)
+		}
+
 		var req *http.Request
 
 		if ctxReq.Body() != nil {
 			buf := bytes.NewBuffer(ctxReq.Body())
-			req, err = http.NewRequest(ctx.Request().Method(), filepath.Join(targetDomain, ctx.Request().Path()), buf)
+			req, err = http.NewRequest(ctx.Request().Method(), newURL, buf)
 		} else {
-			req, err = http.NewRequest(ctx.Request().Method(), filepath.Join(targetDomain, ctx.Request().Path()), nil)
+			req, err = http.NewRequest(ctx.Request().Method(), newURL, nil)
 		}
 		if err != nil {
 			return err
@@ -211,20 +234,28 @@ func (s *Server) Proxy(pathPrefix, targetDomain string) (err error) {
 		ctx.Response().SetStatus(resp.StatusCode)
 
 		for hdr, vals := range resp.Header {
+			if strings.EqualFold(consts.HeaderContentLength, hdr) { // we auto set content-length - don't set it twice
+				continue
+			}
 			ctx.Response().SetHeader(hdr, strings.Join(vals, ","))
 		}
 		return nil
 	}
 
-	s.Get(pathPrefix+"/*path", hdlr)
-	s.Post(pathPrefix+"/*path", hdlr)
-	s.Put(pathPrefix+"/*path", hdlr)
-	s.Patch(pathPrefix+"/*path", hdlr)
-	s.Delete(pathPrefix+"/*path", hdlr)
-	s.Head(pathPrefix+"/*path", hdlr)
-	s.Options(pathPrefix+"/*path", hdlr)
-	s.Connect(pathPrefix+"/*path", hdlr)
-	s.Trace(pathPrefix+"/*path", hdlr)
+	proxyPath := filepath.Join("/", pathPrefix, "*path")
+	if s.options.Verbose {
+		fmt.Println("Setting up proxy handlers to route:", proxyPath)
+	}
+
+	s.Get(proxyPath, hdlr)
+	s.Post(proxyPath, hdlr)
+	s.Put(proxyPath, hdlr)
+	s.Patch(proxyPath, hdlr)
+	s.Delete(proxyPath, hdlr)
+	s.Head(proxyPath, hdlr)
+	s.Options(proxyPath, hdlr)
+	s.Connect(proxyPath, hdlr)
+	s.Trace(proxyPath, hdlr)
 	return nil
 }
 
@@ -458,7 +489,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		var contentLen int64
 		var isChunked bool
 
-		// Add headers until we meet an empty line
+		// Read headers until we meet an empty line
 		for {
 			message, err = ctx.reader.ReadString(consts.RuneNewLine) // read a line
 			if err != nil {
@@ -544,7 +575,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				}
 				ctx.request.body = append(ctx.request.body, chunk...)
 
-				// Read chunk CRLF
+				// Read chunk LF
 				_, err = ctx.reader.ReadString(consts.RuneNewLine)
 				if err != nil {
 					return
