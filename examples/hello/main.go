@@ -13,7 +13,7 @@ import (
 func main() {
 	s := rweb.NewServer(rweb.ServerOptions{
 		Address: "localhost:8080",
-		Verbose: true, Debug: false,
+		Verbose: true, Debug: true,
 		TLS: rweb.TLSCfg{
 			UseTLS:   false,
 			KeyFile:  "certs/localhost.key",
@@ -133,13 +133,23 @@ func main() {
 	s.Get("/events", s.SSEHandler(eventsChan))
 
 	// PROXY
+	// Here we are proxying all routes with a prefix of `/admin` to the targetURL (optionally) prefixed with incoming
 	// e.g. curl -X POST http://localhost:8080/admin/post-form-data/330 -d '{"hi": "there"}' -H 'Content-Type: application/json'
 	//
 	err := s.Proxy("/admin", "http://localhost:8081/incoming")
 	if err != nil {
 		log.Fatal(err)
 	}
-	// For proxy this route can be setup on the target server
+
+	/*	// Enable this to proxy from root
+		// You should disable the root route above if doing this
+		err = s.Proxy("/", "http://localhost:8081/")
+		if err != nil {
+			log.Fatal(err)
+		}
+	*/
+
+	// For proxy, this route can be setup on the target server
 	/*	s.Post("/admin/post-form-data/:form_id", func(ctx rweb.Context) error {
 			return ctx.WriteString("Posted to Admin - form_id: " + ctx.Request().Param("form_id") +
 				"\n" + string(ctx.Request().Body()))

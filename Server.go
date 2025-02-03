@@ -26,10 +26,11 @@ type ServerOptions struct {
 	// Address is the non-TLS  listen address. When UseTLS is true,
 	// this is the address for the HTTP server which will redirect to the HTTPS server.
 	// TCP addresses can be port only or address only in which case a high port is chosen. See: https://pkg.go.dev/net#Listen
-	Address string
-	TLS     TLSCfg
-	Verbose bool
-	Debug   bool
+	Address             string
+	TLS                 TLSCfg
+	Verbose             bool
+	Debug               bool
+	DebugRequestContext bool
 	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
 	// It should be a buffered chan (cap 1 is all that is needed), so there is no chance the server will hang
 	ReadyChan chan struct{}
@@ -242,7 +243,13 @@ func (s *Server) Proxy(pathPrefix, targetURL string) (err error) {
 		return nil
 	}
 
-	proxyPath := filepath.Join("/", pathPrefix, "*path")
+	s.setMethodProxyHandler(filepath.Join("/", pathPrefix, "*path"), hdlr)
+	// The wildcard route does not handle the root of the prefix, so have to handle that separately
+	s.setMethodProxyHandler(filepath.Join("/", pathPrefix), hdlr)
+	return nil
+}
+
+func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) (err error)) {
 	if s.options.Verbose {
 		fmt.Println("Setting up proxy handlers to route:", proxyPath)
 	}
@@ -256,7 +263,6 @@ func (s *Server) Proxy(pathPrefix, targetURL string) (err error) {
 	s.Options(proxyPath, hdlr)
 	s.Connect(proxyPath, hdlr)
 	s.Trace(proxyPath, hdlr)
-	return nil
 }
 
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
@@ -478,6 +484,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
+		fmt.Println(strings.Repeat("-", 50))
+
 		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
 
 		if lastSpace == space {
@@ -589,7 +597,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
-		if s.options.Debug {
+		if s.options.DebugRequestContext {
 			fmt.Printf("** ctx -> %#v\n\n", ctx)
 		}
 
@@ -608,7 +616,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 func (s *Server) handleRequest(ctx *context, method string, url string, respWriter io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
-	if s.options.Debug {
+	if s.options.Verbose {
 		fmt.Printf("ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
 			string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
