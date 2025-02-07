@@ -37,14 +37,14 @@ func main() {
 	})
 
 	s.Get("/", func(ctx rweb.Context) error {
-		return ctx.WriteString("Welcome to the Admin Server\n")
+		return ctx.WriteString("Welcome to the Proxy Server Example\n")
 	})
 
-	s.Get("/incoming/admin/home", func(ctx rweb.Context) error {
-		return ctx.WriteHTML("<h1>Welcome Admin's home!</h1>")
+	s.Get("/usa/proxy-incoming", func(ctx rweb.Context) error {
+		return ctx.WriteHTML("<h1>Welcome The Proxy Incoming home!</h1>")
 	})
 
-	s.Get("/incoming/admin/status", func(ctx rweb.Context) error {
+	s.Get("/usa/proxy-incoming/status", func(ctx rweb.Context) error {
 		data := map[string]string{
 			"message": "Everything's good",
 			"status":  "success",
@@ -52,8 +52,8 @@ func main() {
 		return ctx.WriteJSON(data)
 	})
 
-	s.Post("/incoming/admin/post-form-data/:form_id", func(ctx rweb.Context) error {
-		return ctx.WriteString("Posted to Admin - form_id: " + ctx.Request().Param("form_id") +
+	s.Post("/eur/proxy-incoming/post-form-data/:form_id", func(ctx rweb.Context) error {
+		return ctx.WriteString("Posted to Proxy Incoming - form_id: " + ctx.Request().Param("form_id") +
 			"\n" + string(ctx.Request().Body()))
 	})
 

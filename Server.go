@@ -174,38 +174,59 @@ func (s *Server) SSEHandler(eventChan chan any) Handler {
 }
 
 // Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
-// Returns an error if the setup fails or if the target URL is invalid.
-func (s *Server) Proxy(pathPrefix, targetURL string) (err error) {
-	u, err := url.Parse(targetURL)
+// The pathPrefix can help us to distinguish between different proxy targets, from which we can strip any unneeded tokens (from the left)  in the handler
+// If there is any prefix left after stripping, it is added to the leftmost of the target URL.
+// If there is a path specified in the target URL, it is appended after the stripped prefix.
+func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove int) (err error) {
+	tURL, err := url.Parse(targetURL)
 	if err != nil {
 		return err
 	}
 
-	urlWithoutPath := u.Scheme + "://" + u.Host
-	targetPath := u.Path
-	qry := u.RawQuery
+	qry := tURL.RawQuery
+	urlWithoutPath := tURL.Scheme + "://" + tURL.Host
+
+	// Normalize path prefix by removing any leading slashes
+	if strings.HasPrefix(pathPrefix, "/") {
+		pathPrefix = pathPrefix[1:]
+	}
+
+	// Strip off the left (most significant tokens as those can act as a switch between targets) -- keep the right side tokens here
+	strippedPrefix := pathPrefix
+	if prefixTokensToRemove > 0 {
+		tokens := strings.Split(pathPrefix, "/")
+		if len(tokens) >= prefixTokensToRemove {
+			strippedPrefix = strings.Join(tokens[prefixTokensToRemove:], "/")
+		}
+	}
+	// fmt.Println("**-> strippedPrefix", strippedPrefix)
 
 	hdlr := func(ctx Context) (err error) {
 		ctxReq := ctx.Request()
 
-		newPath := filepath.Join("/", targetPath, ctxReq.Path())
-		newURL := urlWithoutPath + newPath
+		// Get the request path minus the prefix, then add back the prefix and the targetPath, minus any dropped tokens
+		pathWoPrefix := ctxReq.Path()
+		if idx := strings.Index(ctxReq.Path(), pathPrefix); idx >= 0 {
+			pathWoPrefix = pathWoPrefix[idx+len(pathPrefix):]
+		}
+
+		proxyURL := urlWithoutPath + filepath.Join("/", strippedPrefix, tURL.Path, pathWoPrefix)
 
 		if qry != "" {
-			newURL = newURL + "?" + qry
+			proxyURL = proxyURL + "?" + qry
 		}
 
 		if s.options.Verbose {
-			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), newURL)
+			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), proxyURL)
 		}
 
 		var req *http.Request
 
 		if ctxReq.Body() != nil {
 			buf := bytes.NewBuffer(ctxReq.Body())
-			req, err = http.NewRequest(ctx.Request().Method(), newURL, buf)
+			req, err = http.NewRequest(ctx.Request().Method(), proxyURL, buf)
 		} else {
-			req, err = http.NewRequest(ctx.Request().Method(), newURL, nil)
+			req, err = http.NewRequest(ctx.Request().Method(), proxyURL, nil)
 		}
 		if err != nil {
 			return err

@@ -135,8 +135,9 @@ func main() {
 	// PROXY
 	// Here we are proxying all routes with a prefix of `/admin` to the targetURL (optionally) prefixed with incoming
 	// e.g. curl -X POST http://localhost:8080/admin/post-form-data/330 -d '{"hi": "there"}' -H 'Content-Type: application/json'
-	//
-	err := s.Proxy("/admin", "http://localhost:8081/incoming")
+	// e.g. curl http://localhost:8080/via-proxy/usa/status
+	// 		- This will proxy to http://localhost:8081/usa/proxy-incoming/status
+	err := s.Proxy("/via-proxy/usa", "http://localhost:8081/proxy-incoming", 1)
 	if err != nil {
 		log.Fatal(err)
 	}
