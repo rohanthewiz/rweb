@@ -21,7 +21,7 @@ Thanks and credit to Akyoto, especially for the radix tree!
 ## Installation
 
 ```shell
-go get -u github.com/rohanthewiz/rweb@dev
+go get -u github.com/rohanthewiz/rweb
 ```
 
 ## Usage

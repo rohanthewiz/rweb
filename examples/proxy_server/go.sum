@@ -1,2 +1,6 @@
 github.com/rohanthewiz/rweb v0.1.1-0.20250201040113-79287cb07e12 h1:VMbyclp3v0UiwQhdfJoxrAsi0OuHFbHKP2Ceda91C+o=
 github.com/rohanthewiz/rweb v0.1.1-0.20250201040113-79287cb07e12/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=
+github.com/rohanthewiz/rweb v0.1.1-0.20250211073115-edd2a7535c86 h1:C9KM2jcu/7eNgRhsuWM7eREt+H75NRnC3kd79lDGzTI=
+github.com/rohanthewiz/rweb v0.1.1-0.20250211073115-edd2a7535c86/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=
+github.com/rohanthewiz/rweb v0.1.2 h1:haMJzg/eyORBkyMUYvUXeND8n95kOFrFnHnWgtMyPb8=
+github.com/rohanthewiz/rweb v0.1.2/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=
