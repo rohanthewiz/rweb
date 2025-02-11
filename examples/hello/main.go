@@ -41,14 +41,21 @@ func main() {
 		return ctx.WriteString("Welcome\n")
 	})
 
-	eventsChan := make(chan any, 8)
-	eventsChan <- "event 1"
-	eventsChan <- "event 2"
-	eventsChan <- "event 3"
-	eventsChan <- "event 4"
-	eventsChan <- "event 5"
+	// Similar URLs, one with a parameter, other without - works great!
+	s.Get("/greet/:name", func(ctx rweb.Context) error {
+		return ctx.WriteString("Hello " + ctx.Request().Param("name"))
+	})
+	s.Get("/greet/city", func(ctx rweb.Context) error {
+		return ctx.WriteString("Hi big city!")
+	})
 
-	s.Get("/events", s.SSEHandler(eventsChan))
+	// Long URL is not a problem
+	s.Get("/long/long/long/url/:thing", func(ctx rweb.Context) error {
+		return ctx.WriteString("Hello " + ctx.Request().Param("thing"))
+	})
+	s.Get("/long/long/long/url/otherthing", func(ctx rweb.Context) error {
+		return ctx.WriteString("Hey other thing!")
+	})
 
 	s.Get("/home", func(ctx rweb.Context) error {
 		return ctx.WriteHTML("<h1>Welcome home</h1>")
@@ -88,6 +95,7 @@ func main() {
 	// e.g. http://localhost:8080/.well-known/some-file.txt
 	s.StaticFiles("/.well-known/", "/", 0)
 
+	// File upload
 	s.Post("/upload", func(c rweb.Context) error {
 		req := c.Request()
 
@@ -114,21 +122,33 @@ func main() {
 		return nil
 	})
 
-	// Similar URLs, one with a parameter, other without - works great!
-	s.Get("/greet/:name", func(ctx rweb.Context) error {
-		return ctx.WriteString("Hello " + ctx.Request().Param("name"))
-	})
-	s.Get("/greet/city", func(ctx rweb.Context) error {
-		return ctx.WriteString("Hi big city!")
-	})
+	// Server Sent Events
+	eventsChan := make(chan any, 8)
+	eventsChan <- "event 1"
+	eventsChan <- "event 2"
+	eventsChan <- "event 3"
+	eventsChan <- "event 4"
+	eventsChan <- "event 5"
 
-	// Long URL is not a problem
-	s.Get("/long/long/long/url/:thing", func(ctx rweb.Context) error {
-		return ctx.WriteString("Hello " + ctx.Request().Param("thing"))
-	})
-	s.Get("/long/long/long/url/otherthing", func(ctx rweb.Context) error {
-		return ctx.WriteString("Hey other thing!")
-	})
+	s.Get("/events", s.SSEHandler(eventsChan))
+
+	// PROXY
+	// Here we are proxying all routes with a prefix of `/admin` to the targetURL (optionally) prefixed with incoming
+	// e.g. curl -X POST http://localhost:8080/admin/post-form-data/330 -d '{"hi": "there"}' -H 'Content-Type: application/json'
+	// e.g. curl http://localhost:8080/via-proxy/usa/status
+	// 		- This will proxy to http://localhost:8081/usa/proxy-incoming/status
+	err := s.Proxy("/via-proxy/usa", "http://localhost:8081/proxy-incoming", 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	/*	// Enable this to proxy from root
+		// You should disable the root route above if doing this
+		err = s.Proxy("/", "http://localhost:8081/")
+		if err != nil {
+			log.Fatal(err)
+		}
+	*/
 
 	log.Fatal(s.Run())
 }
