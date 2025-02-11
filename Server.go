@@ -217,7 +217,7 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		}
 
 		if s.options.Verbose {
-			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), proxyURL)
+			fmt.Printf("Proxying %q to %q\n", ctxReq.Path(), proxyURL)
 		}
 
 		var req *http.Request
@@ -287,13 +287,14 @@ func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) 
 }
 
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
+// If tokens are stripped, the leftmost tokens are removed from the request path before building the file path.
 // Examples:
 //  1. s.StaticFiles("static/images/", "/assets/images", 2)
 //  2. s.StaticFiles("/css/", "assets/css", 1)
 //  3. s.StaticFiles("/.well-known/", "/", 0)
 func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
 	if len(reqDir) < 2 {
-		fmt.Println("Request dir is too short -- not handling")
+		fmt.Println("StaticFiles request dir is too short -- not handling")
 		return
 	}
 
@@ -505,7 +506,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		fmt.Println(strings.Repeat("-", 50))
+		if s.options.Verbose {
+			fmt.Println(strings.Repeat("-", 50))
+		}
 
 		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
 
@@ -544,7 +547,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			})
 
 			// Check for Content-Length and Transfer-Encoding headers
-			if strings.EqualFold(key, "Content-Length") {
+			if strings.EqualFold(key, consts.HeaderContentLength) {
 				contentLen, err = strconv.ParseInt(value, 10, 64)
 				if err != nil {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
@@ -552,7 +555,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 				}
 			} else if strings.EqualFold(key, consts.HeaderContentType) {
 				ctx.request.ContentType = s2b(value)
-			} else if strings.EqualFold(key, "Transfer-Encoding") && strings.Contains(strings.ToLower(value), "chunked") {
+			} else if strings.EqualFold(key, consts.HeaderTransferEncoding) &&
+				strings.Contains(strings.ToLower(value), "chunked") {
 				isChunked = true
 			}
 		}
@@ -638,8 +642,8 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 	if s.options.Verbose {
-		fmt.Printf("ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
-			string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
+		fmt.Printf("Method: %s, ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
+			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
 
 	// Parse Post Args or Multipart Form
@@ -654,7 +658,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 			}
 		} else if bytes.EqualFold(ctx.ContentType, consts.BytFormData) {
 			ctx.request.parsePostArgs()
-			if s.options.Verbose {
+			if s.options.Debug {
 				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
 			}
 		}
