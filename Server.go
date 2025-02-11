@@ -174,38 +174,59 @@ func (s *Server) SSEHandler(eventChan chan any) Handler {
 }
 
 // Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
-// Returns an error if the setup fails or if the target URL is invalid.
-func (s *Server) Proxy(pathPrefix, targetURL string) (err error) {
-	u, err := url.Parse(targetURL)
+// The pathPrefix can help us to distinguish between different proxy targets, from which we can strip any unneeded tokens (from the left)  in the handler
+// If there is any prefix left after stripping, it is added to the leftmost of the target URL.
+// If there is a path specified in the target URL, it is appended after the stripped prefix.
+func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove int) (err error) {
+	tURL, err := url.Parse(targetURL)
 	if err != nil {
 		return err
 	}
 
-	urlWithoutPath := u.Scheme + "://" + u.Host
-	targetPath := u.Path
-	qry := u.RawQuery
+	qry := tURL.RawQuery
+	urlWithoutPath := tURL.Scheme + "://" + tURL.Host
+
+	// Normalize path prefix by removing any leading slashes
+	if strings.HasPrefix(pathPrefix, "/") {
+		pathPrefix = pathPrefix[1:]
+	}
+
+	// Strip off the left (most significant tokens as those can act as a switch between targets) -- keep the right side tokens here
+	strippedPrefix := pathPrefix
+	if prefixTokensToRemove > 0 {
+		tokens := strings.Split(pathPrefix, "/")
+		if len(tokens) >= prefixTokensToRemove {
+			strippedPrefix = strings.Join(tokens[prefixTokensToRemove:], "/")
+		}
+	}
+	// fmt.Println("**-> strippedPrefix", strippedPrefix)
 
 	hdlr := func(ctx Context) (err error) {
 		ctxReq := ctx.Request()
 
-		newPath := filepath.Join("/", targetPath, ctxReq.Path())
-		newURL := urlWithoutPath + newPath
+		// Get the request path minus the prefix, then add back the prefix and the targetPath, minus any dropped tokens
+		pathWoPrefix := ctxReq.Path()
+		if idx := strings.Index(ctxReq.Path(), pathPrefix); idx >= 0 {
+			pathWoPrefix = pathWoPrefix[idx+len(pathPrefix):]
+		}
+
+		proxyURL := urlWithoutPath + filepath.Join("/", strippedPrefix, tURL.Path, pathWoPrefix)
 
 		if qry != "" {
-			newURL = newURL + "?" + qry
+			proxyURL = proxyURL + "?" + qry
 		}
 
 		if s.options.Verbose {
-			fmt.Printf("Proxying request: %q to %q\n", ctxReq.Path(), newURL)
+			fmt.Printf("Proxying %q to %q\n", ctxReq.Path(), proxyURL)
 		}
 
 		var req *http.Request
 
 		if ctxReq.Body() != nil {
 			buf := bytes.NewBuffer(ctxReq.Body())
-			req, err = http.NewRequest(ctx.Request().Method(), newURL, buf)
+			req, err = http.NewRequest(ctx.Request().Method(), proxyURL, buf)
 		} else {
-			req, err = http.NewRequest(ctx.Request().Method(), newURL, nil)
+			req, err = http.NewRequest(ctx.Request().Method(), proxyURL, nil)
 		}
 		if err != nil {
 			return err
@@ -266,13 +287,14 @@ func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) 
 }
 
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
+// If tokens are stripped, the leftmost tokens are removed from the request path before building the file path.
 // Examples:
 //  1. s.StaticFiles("static/images/", "/assets/images", 2)
 //  2. s.StaticFiles("/css/", "assets/css", 1)
 //  3. s.StaticFiles("/.well-known/", "/", 0)
 func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
 	if len(reqDir) < 2 {
-		fmt.Println("Request dir is too short -- not handling")
+		fmt.Println("StaticFiles request dir is too short -- not handling")
 		return
 	}
 
@@ -484,7 +506,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		fmt.Println(strings.Repeat("-", 50))
+		if s.options.Verbose {
+			fmt.Println(strings.Repeat("-", 50))
+		}
 
 		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
 
@@ -523,7 +547,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			})
 
 			// Check for Content-Length and Transfer-Encoding headers
-			if strings.EqualFold(key, "Content-Length") {
+			if strings.EqualFold(key, consts.HeaderContentLength) {
 				contentLen, err = strconv.ParseInt(value, 10, 64)
 				if err != nil {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
@@ -531,7 +555,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 				}
 			} else if strings.EqualFold(key, consts.HeaderContentType) {
 				ctx.request.ContentType = s2b(value)
-			} else if strings.EqualFold(key, "Transfer-Encoding") && strings.Contains(strings.ToLower(value), "chunked") {
+			} else if strings.EqualFold(key, consts.HeaderTransferEncoding) &&
+				strings.Contains(strings.ToLower(value), "chunked") {
 				isChunked = true
 			}
 		}
@@ -617,8 +642,8 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 	if s.options.Verbose {
-		fmt.Printf("ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
-			string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
+		fmt.Printf("Method: %s, ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
+			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
 
 	// Parse Post Args or Multipart Form
@@ -633,7 +658,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 			}
 		} else if bytes.EqualFold(ctx.ContentType, consts.BytFormData) {
 			ctx.request.parsePostArgs()
-			if s.options.Verbose {
+			if s.options.Debug {
 				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
 			}
 		}
