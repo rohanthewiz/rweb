@@ -21,7 +21,7 @@ func TestProxy(t *testing.T) {
 	// US Server
 	usTgtReadyChan := make(chan struct{}, 1)
 	usTgt := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: usTgtReadyChan, Address: "localhost:"})
-	usTgt.Post("/", func(ctx rweb.Context) error {
+	usTgt.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from US server root")
 	})
 
@@ -48,7 +48,8 @@ func TestProxy(t *testing.T) {
 	})
 
 	euTgt.Post("/proxy-incoming/status", func(ctx rweb.Context) error {
-		return ctx.WriteString(ctx.Request().GetPostValue("def"))
+		fv := ctx.Request().FormValue("abc")
+		return ctx.WriteString(ctx.Request().GetPostValue("def") + fv)
 	})
 
 	go func() {
@@ -66,7 +67,7 @@ func TestProxy(t *testing.T) {
 	pxyReadyChan := make(chan struct{}, 1)
 	pxy := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: pxyReadyChan, Address: "localhost:"})
 
-	pxy.Post("/", func(ctx rweb.Context) error {
+	pxy.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from proxy server root")
 	})
 
@@ -122,8 +123,8 @@ func TestProxy(t *testing.T) {
 		assert.Equal(t, string(body), "<h1>Welcome to the US server landing!</h1>")
 
 		// Proxy to EU
-		resp, err = http.Post(fmt.Sprintf("http://127.0.0.1:%s/via-proxy/eu/status", pxy.GetListenPort()),
-			string(consts.BytFormData), bytes.NewReader([]byte("abc=123&def=456")))
+		resp, err = http.Post(fmt.Sprintf("http://127.0.0.1:%s/via-proxy/eu/status?abc=xyz", pxy.GetListenPort()),
+			string(consts.BytFormData), bytes.NewReader([]byte("abc=xyz&def=456")))
 		assert.Nil(t, err)
 		assert.Equal(t, resp.Status, consts.OK200)
 
@@ -131,7 +132,7 @@ func TestProxy(t *testing.T) {
 		defer func() {
 			_ = resp.Body.Close()
 		}()
-		assert.Equal(t, string(body), "456")
+		assert.Equal(t, string(body), "456xyz")
 	}()
 
 	_ = pxy.Run()
