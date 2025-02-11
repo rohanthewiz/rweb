@@ -150,12 +150,5 @@ func main() {
 		}
 	*/
 
-	// For proxy, this route can be setup on the target server
-	/*	s.Post("/admin/post-form-data/:form_id", func(ctx rweb.Context) error {
-			return ctx.WriteString("Posted to Admin - form_id: " + ctx.Request().Param("form_id") +
-				"\n" + string(ctx.Request().Body()))
-		})
-	*/
-
 	log.Fatal(s.Run())
 }
