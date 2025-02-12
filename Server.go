@@ -31,9 +31,15 @@ type ServerOptions struct {
 	Verbose             bool
 	Debug               bool
 	DebugRequestContext bool
+	URLOptions          URLOptions
 	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
 	// It should be a buffered chan (cap 1 is all that is needed), so there is no chance the server will hang
 	ReadyChan chan struct{}
+}
+
+type URLOptions struct {
+	// KeepTrailingSlashes is used to determine if trailing slashes should be kept in the URL path
+	KeepTrailingSlashes bool
 }
 
 type TLSCfg struct {
@@ -501,7 +507,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		method = message[:space]
 
-		if !isRequestMethod(method) {
+		if !isValidRequestMethod(method) {
 			_, _ = io.WriteString(conn, consts.HTTPBadMethod)
 			return
 		}
@@ -640,7 +646,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 // handleRequest handles the given request.
 func (s *Server) handleRequest(ctx *context, method string, url string, respWriter io.Writer) {
 	ctx.method = method
-	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
+	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url, s.options.URLOptions)
 	if s.options.Verbose {
 		fmt.Printf("Method: %s, ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
 			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)

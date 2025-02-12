@@ -6,10 +6,11 @@ import (
 	"github.com/rohanthewiz/rweb/consts"
 )
 
-// isRequestMethod returns true if the given string is a valid HTTP request method.
-func isRequestMethod(method string) bool {
+// isValidRequestMethod returns true if the given string is a valid HTTP request method.
+func isValidRequestMethod(method string) bool {
 	switch method {
-	case consts.MethodGet, consts.MethodHead, consts.MethodPost, consts.MethodPut, consts.MethodDelete, consts.MethodConnect, consts.MethodOptions, consts.MethodTrace, consts.MethodPatch:
+	case consts.MethodGet, consts.MethodHead, consts.MethodPost, consts.MethodPut,
+		consts.MethodDelete, consts.MethodConnect, consts.MethodOptions, consts.MethodTrace, consts.MethodPatch:
 		return true
 	default:
 		return false
@@ -17,29 +18,41 @@ func isRequestMethod(method string) bool {
 }
 
 // parseURL parses a URL and returns the scheme, host, path and query.
-func parseURL(url string) (scheme string, host string, path string, query string) {
-	schemePos := strings.Index(url, "://")
-
-	if schemePos != -1 {
-		scheme = url[:schemePos]
-		url = url[schemePos+len("://"):]
+func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path string, query string) {
+	schemeEndPos := strings.Index(url, consts.SchemeDelimiter)
+	if schemeEndPos != -1 {
+		scheme = url[:schemeEndPos]
+		url = url[schemeEndPos+len(consts.SchemeDelimiter):]
 	}
 
-	pathPos := strings.IndexByte(url, '/')
-
-	if pathPos != -1 {
-		host = url[:pathPos]
-		url = url[pathPos:]
+	pathStartPos := strings.IndexByte(url, consts.RuneFwdSlash)
+	if pathStartPos != -1 {
+		host = url[:pathStartPos]
+		url = url[pathStartPos:]
 	}
 
-	queryPos := strings.IndexByte(url, '?')
-
-	if queryPos != -1 {
+	queryPos := strings.IndexByte(url, consts.RuneQuestion)
+	if queryPos != -1 && queryPos < len(url)+1 /* we will go one past the question sign below */ {
 		path = url[:queryPos]
-		query = url[queryPos+1:]
-		return
+		query = url[queryPos+1:] // check above ensures we don't go past the end of the string
+	} else {
+		path = url
 	}
 
-	path = url
+	// FIXUPS
+
+	if lnPath := len(path); lnPath == 0 {
+		path = "/"
+	} else { // Trailing slash removal
+		if !urlOpts.KeepTrailingSlashes && lnPath > 1 && strings.HasSuffix(path, "/") {
+			path = path[:lnPath-1]
+		}
+	}
+
+	// If the host is empty, set it to "localhost"
+	if host == "" {
+		host = consts.Localhost
+	}
+
 	return
 }

@@ -7,6 +7,7 @@ const (
 	RuneFwdSlash    = '/'
 	RuneColon       = ':'
 	RuneAsterisk    = '*'
+	RuneQuestion    = '?'
 	CRLF            = "\r\n"
 	ColonSpace      = ": "
 )

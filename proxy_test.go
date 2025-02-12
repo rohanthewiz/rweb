@@ -22,6 +22,9 @@ func TestProxy(t *testing.T) {
 	usTgt.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from US server root")
 	})
+	usTgt.Get("/status", func(ctx rweb.Context) error {
+		return ctx.WriteString("Hi from US server '/status'")
+	})
 
 	usTgt.Get("/us/proxy-incoming", func(ctx rweb.Context) error {
 		return ctx.WriteHTML("<h1>Welcome to the US server landing!</h1>")
@@ -78,6 +81,12 @@ func TestProxy(t *testing.T) {
 		log.Fatal(err)
 	}
 
+	err = pxy.Proxy("/us",
+		fmt.Sprintf("http://localhost:%s", usTgt.GetListenPort()), 1)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// e.g. curl http://localhost:8080/via-proxy/eu/status
 	err = pxy.Proxy("/via-proxy/eu",
 		fmt.Sprintf("http://localhost:%s/proxy-incoming", euTgt.GetListenPort()), 2)
@@ -92,7 +101,7 @@ func TestProxy(t *testing.T) {
 
 		<-pxyReadyChan // wait for proxy
 
-		// Proxy to US server status
+		// Proxy some calls
 		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%s/via-proxy/us/status", pxy.GetListenPort()),
 			string(consts.BytFormData), bytes.NewReader([]byte("abc=123&def=456")))
 		assert.Nil(t, err)
@@ -119,6 +128,27 @@ func TestProxy(t *testing.T) {
 			_ = resp.Body.Close()
 		}()
 		assert.Equal(t, string(body), "<h1>Welcome to the US server landing!</h1>")
+
+		// Proxy to US server root (shorter route)
+		resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%s/us", pxy.GetListenPort()))
+		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, consts.OK200)
+		body, _ = io.ReadAll(resp.Body)
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		assert.Equal(t, string(body), "Hi from US server root")
+
+		// Proxy to US server root (shorter route) with trailing slash
+		// For this to pass, server option `KeepTrailingSlash` must be left at default (false)
+		resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%s/us/", pxy.GetListenPort()))
+		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, consts.OK200)
+		body, _ = io.ReadAll(resp.Body)
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+		assert.Equal(t, string(body), "Hi from US server root")
 
 		// Proxy to EU
 		resp, err = http.Post(fmt.Sprintf("http://127.0.0.1:%s/via-proxy/eu/status?abc=xyz", pxy.GetListenPort()),

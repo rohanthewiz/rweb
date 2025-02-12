@@ -19,8 +19,10 @@ const (
 	HTTP2 = "HTTP/2.0"
 	OK200 = "200 OK"
 
-	ProtocolTCP = "tcp"
-	ProtocolUDP = "udp"
+	ProtocolTCP     = "tcp"
+	ProtocolUDP     = "udp"
+	SchemeDelimiter = "://"
+	Localhost       = "localhost"
 
 	HTTPBadRequest = "HTTP/1.1 400 Bad Request\r\n\r\n"
 	HTTPBadMethod  = "BAD-METHOD / HTTP/1.1\r\n\r\n"
