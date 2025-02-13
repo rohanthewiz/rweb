@@ -4,3 +4,5 @@ github.com/rohanthewiz/rweb v0.1.1-0.20250211073115-edd2a7535c86 h1:C9KM2jcu/7eN
 github.com/rohanthewiz/rweb v0.1.1-0.20250211073115-edd2a7535c86/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=
 github.com/rohanthewiz/rweb v0.1.2 h1:haMJzg/eyORBkyMUYvUXeND8n95kOFrFnHnWgtMyPb8=
 github.com/rohanthewiz/rweb v0.1.2/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=
+github.com/rohanthewiz/rweb v0.1.4 h1:IQYKOqzwf1TYkwJXyRQNX3XgUEHEPJLToQjZz3WAQ78=
+github.com/rohanthewiz/rweb v0.1.4/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=

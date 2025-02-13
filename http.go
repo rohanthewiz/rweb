@@ -18,6 +18,8 @@ func isValidRequestMethod(method string) bool {
 }
 
 // parseURL parses a URL and returns the scheme, host, path and query.
+// The URL is expected to be in the format "scheme://host/path?query"
+// Though we could have used the standard URL package we wanted to maintain fine control.
 func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path string, query string) {
 	schemeEndPos := strings.Index(url, consts.SchemeDelimiter)
 	if schemeEndPos != -1 {
