@@ -12,7 +12,7 @@ import (
 
 func main() {
 	s := rweb.NewServer(rweb.ServerOptions{
-		Address: "localhost:8080",
+		Address: ":8080",
 		Verbose: true, Debug: true,
 		TLS: rweb.TLSCfg{
 			UseTLS:   false,
