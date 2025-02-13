@@ -3,6 +3,7 @@ package rweb
 // credit fasthttp
 
 import (
+	"math/rand"
 	"unsafe"
 )
 
@@ -26,3 +27,31 @@ type noCopy struct{}
 
 func (*noCopy) Lock()   {}
 func (*noCopy) Unlock() {}
+
+func genRandString(n int, groupByFours bool) string {
+	var letterRunes = []rune("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
+
+	if groupByFours {
+		n += 1     // bc we add a dash at the beginning
+		n += n / 4 // for every 4, add a dash
+	}
+
+	b := make([]rune, n)
+	for i := range b {
+		if groupByFours && i%5 == 0 {
+			b[i] = '-'
+			continue
+		}
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+
+	if groupByFours {
+		b = b[1:] // remove the first dash
+
+		if b[len(b)-1] == '-' { // remove the last dash
+			b = b[:len(b)-1]
+		}
+	}
+
+	return string(b)
+}

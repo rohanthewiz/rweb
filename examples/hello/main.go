@@ -12,7 +12,7 @@ import (
 
 func main() {
 	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":8080",
+		Address: ":8080", // listen to port 8080 on all interfaces. In docker, don't include a host
 		Verbose: true, Debug: true,
 		TLS: rweb.TLSCfg{
 			UseTLS:   false,
