@@ -28,7 +28,7 @@ type noCopy struct{}
 func (*noCopy) Lock()   {}
 func (*noCopy) Unlock() {}
 
-func genRandString(n int, groupByFours bool) string {
+func GenRandString(n int, groupByFours bool) string {
 	var letterRunes = []rune("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890")
 
 	if groupByFours {

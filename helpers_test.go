@@ -21,7 +21,7 @@ func TestGenerateRandString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := rweb.genRandString(tt.n, tt.groupByFours)
+			result := rweb.GenRandString(tt.n, tt.groupByFours)
 			if len(result) != tt.expectedLen {
 				t.Errorf("expected length %d, got %d", tt.expectedLen, len(result))
 			}

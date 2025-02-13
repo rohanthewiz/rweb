@@ -87,13 +87,14 @@ func NewServer(options ...ServerOptions) *Server {
 		hashRouter:  hashRtr,
 		options:     opts,
 		errorHandler: func(ctx Context, err error) {
-			errCode := genRandString(8, true)
+			errCode := GenRandString(8, true)
 			log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
 
-			ctx.Status(consts.StatusInternalServerError)
-
+			if ctx.Response().Status() == 0 || ctx.Response().Status() == consts.StatusOK {
+				ctx.Status(consts.StatusInternalServerError)
+			}
 			_ = ctx.WriteHTML(fmt.Sprintf("<h3>%d Internal Server Error</h3>\n<p>Error code: %s</p>",
-				consts.StatusInternalServerError, errCode))
+				ctx.Response().Status(), errCode))
 		},
 	}
 
