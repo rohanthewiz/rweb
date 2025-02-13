@@ -11,7 +11,7 @@ import (
 
 func main() {
 	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":8081", // be sure to use a different port that the hello example
+		Address: ":8081", // be sure to use a different port that the hello example.  In docker, don't include a host
 		Verbose: true, Debug: false,
 		// TLS: rweb.TLSCfg{
 		// 	UseTLS:   false,

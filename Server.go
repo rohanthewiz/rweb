@@ -87,7 +87,14 @@ func NewServer(options ...ServerOptions) *Server {
 		hashRouter:  hashRtr,
 		options:     opts,
 		errorHandler: func(ctx Context, err error) {
-			log.Println(ctx.Request().Path(), err)
+			errCode := GenRandString(8, true)
+			log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
+
+			if ctx.Response().Status() == 0 || ctx.Response().Status() == consts.StatusOK {
+				ctx.Status(consts.StatusInternalServerError)
+			}
+			_ = ctx.WriteHTML(fmt.Sprintf("<h3>%d Internal Server Error</h3>\n<p>Error code: %s</p>",
+				ctx.Response().Status(), errCode))
 		},
 	}
 
@@ -647,7 +654,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 func (s *Server) handleRequest(ctx *context, method string, url string, respWriter io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url, s.options.URLOptions)
-	if s.options.Verbose {
+	if s.options.Debug {
 		fmt.Printf("Method: %s, ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
 			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
