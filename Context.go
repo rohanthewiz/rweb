@@ -34,6 +34,19 @@ type context struct {
 	sseEvents    chan any // channel for SSE events
 }
 
+func (ctx *context) Clean() {
+	ctx.request.headers = ctx.request.headers[:0]
+	ctx.request.body = ctx.request.body[:0]
+	ctx.response.headers = ctx.response.headers[:0]
+	ctx.response.body = ctx.response.body[:0]
+	ctx.params = ctx.params[:0]
+	ctx.parsedPostArgs = false
+	ctx.handlerIndex = 0
+	ctx.status = 200
+	// Cleanup any multipart form data
+	ctx.request.CleanupMultipartForm()
+}
+
 func (ctx *context) SetSSE(ch chan any) {
 	ctx.sseEvents = ch
 	ctx.SetSSEHeaders()
