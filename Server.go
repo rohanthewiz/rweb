@@ -418,32 +418,43 @@ func (s *Server) Run() (err error) {
 
 	s.listenAddr = listener.Addr().String()
 
+	// Go accept and handle connections
 	go func() {
 		if s.options.Verbose {
 			protocol := consts.HTTP
 			if s.options.TLS.UseTLS {
 				protocol = consts.HTTPS
 			}
-			fmt.Printf("Server is running at %s://%s\n", protocol, listener.Addr()) // address
+			fmt.Printf("Serving at %s://%s\n", protocol, listener.Addr()) // address
 		}
 
 		if s.options.ReadyChan != nil { // don't forget nil check!
 			s.options.ReadyChan <- struct{}{} // Let the caller know we are running
 		}
 
-		for {
-			conn, err := listener.Accept()
+		for { // maybe TODO optional graceful shutdown based on SIGTERM
+			conn, err := listener.Accept() // accept next client connection
 			if err != nil {
+				if s.options.Debug { // TODO: check deeper into "use of closed network connection"
+					fmt.Println("Error accepting connection:", err)
+				}
 				continue
 			}
+			fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
-			go s.handleConnection(conn)
+			// Handle each connection separately
+			go func(conn *net.Conn) {
+				s.handleConnection(*conn)
+			}(&conn)
 		}
 	}()
 
+	// Handle SIGTERM (like CTRL-C)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
+	listener.Close()
+
 	return nil
 }
 
@@ -473,35 +484,26 @@ func (s *Server) Use(handlers ...Handler) {
 
 // handleConnection handles an accepted connection.
 func (s *Server) handleConnection(conn net.Conn) {
-	var (
-		ctx    = s.contextPool.Get().(*context)
-		method string
-		url    string
-	)
+	var method, url string
+	var ctx = s.contextPool.Get().(*context) // get a new context from the pool
 
-	ctx.reader.Reset(conn)
+	ctx.reader.Reset(conn) // prepare to read from the accepted connection
 
 	defer conn.Close()
 
 	defer func() {
-		// Clean up the context
-		ctx.request.headers = ctx.request.headers[:0]
-		ctx.request.body = ctx.request.body[:0]
-		ctx.response.headers = ctx.response.headers[:0]
-		ctx.response.body = ctx.response.body[:0]
-		ctx.params = ctx.params[:0]
-		ctx.handlerIndex = 0
-		ctx.status = 200
-
-		// Cleanup any multipart form data
-		ctx.request.CleanupMultipartForm()
+		// Clean up the context and return it to the pool
+		ctx.Clean()
 		s.contextPool.Put(ctx)
 	}()
 
 	for {
-		// Read the HTTP request line
+		// Read a line from the connection
 		message, err := ctx.reader.ReadString(consts.RuneNewLine)
 		if err != nil {
+			if s.options.Debug && err.Error() != consts.EOF {
+				fmt.Println("Error reading connection:", err)
+			}
 			return
 		}
 
@@ -580,6 +582,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 			body := make([]byte, contentLen)
 			_, err = io.ReadFull(ctx.reader, body)
 			if err != nil {
+				if s.options.Verbose {
+					fmt.Println("Error reading request body:", err)
+				}
 				return
 			}
 
@@ -639,14 +644,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 			fmt.Printf("** ctx -> %#v\n\n", ctx)
 		}
 
-		// Clean up the context
-		ctx.request.headers = ctx.request.headers[:0]
-		ctx.request.body = ctx.request.body[:0]
-		ctx.response.headers = ctx.response.headers[:0]
-		ctx.response.body = ctx.response.body[:0]
-		ctx.params = ctx.params[:0]
-		ctx.handlerIndex = 0
-		ctx.status = 200
+		// Clean up the context by zeroing some slices, etc
+		ctx.Clean()
 	}
 }
 
@@ -655,7 +654,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url, s.options.URLOptions)
 	if s.options.Debug {
-		fmt.Printf("Method: %s, ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
+		fmt.Printf(" %s - ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
 			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
 
@@ -678,6 +677,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	}
 
 	// Call the first handler in the chain
+	// (which will call any subsequent handlers)
 	err := s.handlers[0](ctx)
 	if err != nil {
 		s.errorHandler(ctx, err)

@@ -10,4 +10,5 @@ const (
 	RuneQuestion    = '?'
 	CRLF            = "\r\n"
 	ColonSpace      = ": "
+	EOF             = "EOF"
 )
