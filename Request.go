@@ -122,12 +122,13 @@ func (req *request) parsePostArgs() {
 	if req.parsedPostArgs {
 		return
 	}
-	req.parsedPostArgs = true
 
 	if !bytes.EqualFold(req.ContentType, consts.BytFormData) {
 		return
 	}
+
 	req.postArgs.ParseBytes(req.body)
+	req.parsedPostArgs = true
 }
 
 func (req *request) ParseMultipartForm() error {
@@ -198,7 +199,7 @@ func (req *request) FormValue(key string) string {
 		if values := req.multipartForm.Value[key]; len(values) > 0 {
 			return values[0]
 		}
-		fmt.Printf("**-> req.multipartForm.Value %v\n", req.multipartForm.Value)
+		fmt.Printf("** req.multipartForm.Value ->  %v\n", req.multipartForm.Value)
 	}
 	return req.GetPostValue(key)
 }
