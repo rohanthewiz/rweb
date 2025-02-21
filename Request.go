@@ -18,6 +18,7 @@ type IntfRequest interface {
 	Host() string
 	Method() string
 	Path() string
+	Query() string
 	Scheme() string
 	Param(string) string
 	GetPostValue(string) string
@@ -91,8 +92,13 @@ func (req *request) Path() string {
 	return req.path
 }
 
+// Query returns the query string.
+func (req *request) Query() string {
+	return req.query
+}
+
 // Scheme returns either `http`, `https` or an empty string.
-func (req request) Scheme() string {
+func (req *request) Scheme() string {
 	return req.scheme
 }
 

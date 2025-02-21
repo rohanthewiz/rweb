@@ -196,8 +196,8 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		return err
 	}
 
-	qry := tURL.RawQuery
 	urlWithoutPath := tURL.Scheme + "://" + tURL.Host
+	// We will not map to the level of the query string // qry := tURL.RawQuery
 
 	// Normalize path prefix by removing any leading slashes
 	if strings.HasPrefix(pathPrefix, "/") {
@@ -212,7 +212,6 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			strippedPrefix = strings.Join(tokens[prefixTokensToRemove:], "/")
 		}
 	}
-	// fmt.Println("**-> strippedPrefix", strippedPrefix)
 
 	hdlr := func(ctx Context) (err error) {
 		ctxReq := ctx.Request()
@@ -225,7 +224,7 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 
 		proxyURL := urlWithoutPath + filepath.Join("/", strippedPrefix, tURL.Path, pathWoPrefix)
 
-		if qry != "" {
+		if qry := ctxReq.Query(); qry != "" {
 			proxyURL = proxyURL + "?" + qry
 		}
 
@@ -440,12 +439,10 @@ func (s *Server) Run() (err error) {
 				}
 				continue
 			}
-			fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
+			// fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
-			// Handle each connection separately
-			go func(conn *net.Conn) {
-				s.handleConnection(*conn)
-			}(&conn)
+			// Each connection separately bc a copy is passed in
+			go s.handleConnection(conn)
 		}
 	}()
 
