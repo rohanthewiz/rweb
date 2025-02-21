@@ -439,7 +439,7 @@ func (s *Server) Run() (err error) {
 				}
 				continue
 			}
-			fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
+			// fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
 			// Handle each connection separately
 			go func(conn *net.Conn) {
