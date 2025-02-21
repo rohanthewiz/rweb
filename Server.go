@@ -441,10 +441,8 @@ func (s *Server) Run() (err error) {
 			}
 			// fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
-			// Handle each connection separately
-			go func(conn *net.Conn) {
-				s.handleConnection(*conn)
-			}(&conn)
+			// Each connection separately bc a copy is passed in
+			go s.handleConnection(conn)
 		}
 	}()
 
