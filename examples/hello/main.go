@@ -26,7 +26,7 @@ func main() {
 		start := time.Now()
 
 		defer func() {
-			fmt.Printf("%s %q -> %d [%s]", ctx.Request().Method(), ctx.Request().Path(), ctx.Response().Status(), time.Since(start))
+			fmt.Printf("%s %q -> %d [%s]\n", ctx.Request().Method(), ctx.Request().Path(), ctx.Response().Status(), time.Since(start))
 		}()
 
 		return ctx.Next()
