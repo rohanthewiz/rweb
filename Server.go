@@ -117,7 +117,7 @@ func NewServer(options ...ServerOptions) *Server {
 			}
 
 			if hdlr == nil {
-				if s.options.Verbose {
+				if s.options.Debug {
 					fmt.Println("Route not found in radix router either -- returning 404")
 				}
 				ctx.SetStatus(consts.StatusNotFound)
