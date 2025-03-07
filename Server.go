@@ -229,7 +229,7 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		}
 
 		if s.options.Verbose {
-			fmt.Printf("Proxying %q to %q\n", ctxReq.Path(), proxyURL)
+			fmt.Printf("PROXY %q -> %q\n", ctxReq.Path(), proxyURL)
 		}
 
 		var req *http.Request
@@ -519,7 +519,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		if s.options.Verbose {
-			fmt.Println(strings.Repeat("-", 50))
+			fmt.Println(strings.Repeat("-", 64))
 		}
 
 		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
