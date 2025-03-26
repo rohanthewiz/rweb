@@ -19,6 +19,7 @@ import (
 )
 
 const (
+	websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 	// WebSocket constants
 	WebSocketVersion           = "13"
 	WebSocketProtocol          = "websocket"
@@ -355,7 +356,7 @@ func generateWebSocketKey() string {
 func computeAcceptKey(key string) string {
 	h := sha1.New()
 	h.Write([]byte(key))
-	h.Write([]byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")) // WebSocket GUID
+	h.Write([]byte(websocketGUID)) // WebSocket GUID
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
