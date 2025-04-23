@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.akyoto.dev/go/assert"
+	"github.com/rohanthewiz/assert"
 	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
 	"github.com/rohanthewiz/rweb/core/rtr/testdata"

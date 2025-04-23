@@ -2,6 +2,4 @@ module github.com/rohanthewiz/rweb
 
 go 1.22
 
-require git.akyoto.dev/go/assert v0.1.3
-
-replace github.com/rohanthewiz/rweb => /Users/RAllison3/projs/go/oneoffs/rweb
+require github.com/rohanthewiz/assert v0.0.0-20250423225556-0306c007a71b
