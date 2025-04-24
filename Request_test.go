@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"git.akyoto.dev/go/assert"
+	"github.com/rohanthewiz/assert"
 	"github.com/rohanthewiz/rweb"
 	"github.com/rohanthewiz/rweb/consts"
 )
