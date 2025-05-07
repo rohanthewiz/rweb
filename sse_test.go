@@ -25,7 +25,7 @@ func TestSSE(t *testing.T) {
 		ReadyChan: readyChan,
 		Address:   "localhost:",
 	})
-	s.Get("/events", s.SSEHandler(eventsChan))
+	s.Get("/events", s.SetupSSE(eventsChan))
 
 	go func() { // Run our SSE client
 		defer close(clientDone)

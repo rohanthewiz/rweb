@@ -22,16 +22,17 @@ type Context interface {
 	WriteJSON(interface{}) error
 	WriteHTML(string) error
 	WriteText(string) error
-	SetSSE(chan any)
+	SetSSE(<-chan any, string) error
 }
 
 // context contains the request and response data.
 type context struct {
 	request
 	response
-	server       *Server
-	handlerIndex uint8
-	sseEvents    chan any // channel for SSE events
+	server        *Server
+	handlerIndex  uint8
+	sseEventsChan <-chan any // channel for SSE events
+	sseEventName  string
 }
 
 func (ctx *context) Clean() {
@@ -47,47 +48,70 @@ func (ctx *context) Clean() {
 	ctx.request.CleanupMultipartForm()
 }
 
-func (ctx *context) SetSSE(ch chan any) {
-	ctx.sseEvents = ch
+func (ctx *context) SetSSE(ch <-chan any, eventName string) error {
+	ctx.sseEventsChan = ch
+	ctx.sseEventName = eventName
 	ctx.SetSSEHeaders()
+	return nil
 }
 
 func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 	rw := bufio.NewWriter(respWriter)
+
+	if ctx.sseEventName == "" {
+		ctx.sseEventName = "message" // Default
+	}
+
+	fmt.Printf("RWEB Serving SSE events on channel: %s...\tStatus code: %d\n", ctx.sseEventName, ctx.status)
+
 	for {
 		select {
-		case event, ok := <-ctx.sseEvents:
-			if !ok { // Channel closed and drained, clean up and exit
+		case event, ok := <-ctx.sseEventsChan:
+			if !ok {
+				fmt.Println("SSE Channel closed and drained, let's clean up and exit...")
 				_ = rw.Flush()
 				return
+			}
+
+			// fmt.Printf("RWEB Received from SSE source: %v\n", event)
+
+			if strEvt, ok := event.(string); ok {
+				if strEvt == "" {
+					// fmt.Println("RWEB Received empty string event, skipping...")
+					continue
+				}
+				if strEvt == "close" {
+					fmt.Println("RWEB Received close event, shutting down SSE...")
+					rw.Flush()
+					return
+				}
 			}
 
 			// Format and send the event
 			switch v := event.(type) {
 			case string:
-				_, err = fmt.Fprintf(rw, "data: %s\n\n", v)
+				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", ctx.sseEventName, v)
 			default:
-				_, err = fmt.Fprintf(rw, "data: %+v\n\n", v)
+				_, err = fmt.Fprintf(rw, "event: %s\ndata: %+v\n\n", ctx.sseEventName, v)
 			}
 
 			if err != nil {
+				fmt.Printf("Error writing SSE event: %v\n", err)
+				rw.Reset(respWriter) // Reset the buffer for the next event
+				continue
+			}
+
+			err = rw.Flush() // Flush the buffer to send data immediately
+			if err != nil {
+				fmt.Printf("Error flushing SSE output: %v\n", err)
+				rw.Reset(respWriter) // Reset the buffer for the next event
 				return err
 			}
 
-			// Important: Flush the buffer to send data immediately
-			if err = rw.Flush(); err != nil {
-				return err
-			}
-
-			// TODO incorporate context Done()
-			/*		case <-ctx.Done():
-					// Context canceled, clean up
-					rw.Flush()
-					return
-			*/
+			fmt.Printf("RWEB Sent event: %s\n", event)
 		}
-		_ = rw.Flush()
-		// time.Sleep(1 * time.Second) // slow it down for demo purposes
+
+		// rw.Reset(respWriter) // Reset the buffer for the next event
 	}
 }
 

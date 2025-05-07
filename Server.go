@@ -179,11 +179,8 @@ func (s *Server) Trace(path string, handler Handler) {
 	s.AddMethod(consts.MethodTrace, path, handler)
 }
 
-func (s *Server) SSEHandler(eventChan chan any) Handler {
-	return func(ctx Context) error {
-		ctx.SetSSE(eventChan)
-		return nil
-	}
+func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventName string) error {
+	return ctx.SetSSE(eventChan, eventName)
 }
 
 // Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
@@ -675,6 +672,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 
 	// Call the first handler in the chain
 	// (which will call any subsequent handlers)
+	// Handlers populate the context, before the response is written
 	err := s.handlers[0](ctx)
 	if err != nil {
 		s.errorHandler(ctx, err)
@@ -696,7 +694,7 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	}
 	tmp.WriteString(consts.CRLF)
 
-	if ctx.sseEvents == nil { // For SSE -- don't set content-length
+	if ctx.sseEventsChan == nil { // For SSE -- don't set content-length
 		// Content-Length
 		tmp.WriteString(consts.HeaderContentLength)
 		tmp.WriteString(consts.ColonSpace)
@@ -720,9 +718,10 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	}
 
 	// Body
-	if ctx.sseEvents == nil {
+	if ctx.sseEventsChan == nil {
 		_, _ = respWriter.Write(ctx.response.body)
 	} else {
+		// fmt.Println("RWEB: SSE events channel is set -- sending events")
 		err = ctx.sendSSE(respWriter)
 		if err != nil {
 			fmt.Println("Error sending SSE events: ", err)

@@ -111,7 +111,8 @@ func (res *response) writeResponse(body string, contentType string) (int, error)
 }
 
 func (res *response) SetSSEHeaders() {
-	res.SetHeader(consts.HeaderContentType, consts.MIMETextEventStream)
+	res.SetHeader(consts.HeaderContentType, consts.MIMETextEventStream+"; charset=utf-8")
 	res.SetHeader(consts.HeaderCacheControl, consts.HeaderNoCache)
 	res.SetHeader(consts.HeaderConnection, consts.HeaderKeepAlive)
+	res.SetHeader(consts.HeaderAccessControlAllowOrigin, "*")
 }
