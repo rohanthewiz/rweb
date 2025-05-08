@@ -62,7 +62,8 @@ func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 		ctx.sseEventName = "message" // Default
 	}
 
-	fmt.Printf("RWEB Serving SSE events on channel: %s...\tStatus code: %d\n", ctx.sseEventName, ctx.status)
+	fmt.Printf("RWEB Serving SSE %q events on channel: %v...\tStatus code: %d\n",
+		ctx.sseEventName, ctx.sseEventsChan, ctx.status)
 
 	for {
 		select {
@@ -81,7 +82,8 @@ func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 					continue
 				}
 				if strEvt == "close" {
-					fmt.Println("RWEB Received close event, shutting down SSE...")
+					fmt.Printf("RWEB Received close event, shutting down SSE %q events on channel: %v...\n",
+						ctx.sseEventName, ctx.sseEventsChan)
 					rw.Flush()
 					return
 				}
@@ -96,19 +98,19 @@ func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
 			}
 
 			if err != nil {
-				fmt.Printf("Error writing SSE event: %v\n", err)
+				fmt.Printf("Error writing SSE event on channel %v: %v\n", ctx.sseEventsChan, err)
 				rw.Reset(respWriter) // Reset the buffer for the next event
 				continue
 			}
 
 			err = rw.Flush() // Flush the buffer to send data immediately
 			if err != nil {
-				fmt.Printf("Error flushing SSE output: %v\n", err)
+				fmt.Printf("Error flushing SSE output on channel %v: %v\n", ctx.sseEventsChan, err)
 				rw.Reset(respWriter) // Reset the buffer for the next event
 				return err
 			}
 
-			fmt.Printf("RWEB Sent event: %s\n", event)
+			fmt.Printf("RWEB Sent (on channel: %v) event: %s\n", ctx.sseEventsChan, event)
 		}
 
 		// rw.Reset(respWriter) // Reset the buffer for the next event
