@@ -424,8 +424,12 @@ func (s *Server) Run() (err error) {
 			fmt.Printf("Serving at %s://%s\n", protocol, listener.Addr()) // address
 		}
 
-		if s.options.ReadyChan != nil { // don't forget nil check!
-			s.options.ReadyChan <- struct{}{} // Let the caller know we are running
+		if s.options.ReadyChan != nil { // remember to nil check!
+			select {
+			// Let the caller know we are running
+			case s.options.ReadyChan <- struct{}{}: // attempt to send to channel
+			default: // Don't block if out can't receive for some reason
+			}
 		}
 
 		for { // maybe TODO optional graceful shutdown based on SIGTERM
@@ -722,11 +726,76 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		_, _ = respWriter.Write(ctx.response.body)
 	} else {
 		// fmt.Println("RWEB: SSE events channel is set -- sending events")
-		err = ctx.sendSSE(respWriter)
+		err = s.sendSSE(ctx, respWriter)
 		if err != nil {
 			fmt.Println("Error sending SSE events: ", err)
 		}
 	}
+}
+
+func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
+	rw := bufio.NewWriter(respWriter)
+
+	if ctx.sseEventName == "" {
+		ctx.sseEventName = "message" // Default
+	}
+
+	if s.options.Verbose {
+		fmt.Printf("RWEB Serving SSE %q events on channel: %v...\tStatus code: %d\n",
+			ctx.sseEventName, ctx.sseEventsChan, ctx.status)
+	}
+
+	for {
+		select {
+		case event, ok := <-ctx.sseEventsChan:
+			if !ok {
+				fmt.Println("SSE Channel closed and drained, let's clean up and exit...")
+				_ = rw.Flush()
+				return
+			}
+
+			// fmt.Printf("RWEB Received from SSE source: %v\n", event)
+
+			if strEvt, ok := event.(string); ok {
+				if strEvt == "" {
+					// fmt.Println("RWEB Received empty string event, skipping...")
+					continue
+				}
+				if strEvt == "close" {
+					fmt.Printf("RWEB Received close event, shutting down SSE %q events on channel: %v...\n",
+						ctx.sseEventName, ctx.sseEventsChan)
+					rw.Flush()
+					return
+				}
+			}
+
+			// Format and send the event
+			switch v := event.(type) {
+			case string:
+				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", ctx.sseEventName, v)
+			default:
+				_, err = fmt.Fprintf(rw, "event: %s\ndata: %+v\n\n", ctx.sseEventName, v)
+			}
+
+			if err != nil {
+				fmt.Printf("Error writing SSE event on channel %v: %v\n", ctx.sseEventsChan, err)
+				rw.Reset(respWriter) // Reset the buffer for the next event
+				continue
+			}
+
+			err = rw.Flush() // Flush the buffer to send data immediately
+			if err != nil {
+				fmt.Printf("Error flushing SSE output on channel %v: %v\n", ctx.sseEventsChan, err)
+				rw.Reset(respWriter) // Reset the buffer for the next event
+				return err
+			}
+
+			if s.options.Verbose {
+				fmt.Printf("RWEB Sent (on channel: %v) event: %s\n", ctx.sseEventsChan, event)
+			}
+		}
+	}
+
 }
 
 // newContext allocates a new context with the default state.

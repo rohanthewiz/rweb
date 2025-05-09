@@ -1,10 +1,7 @@
 package rweb
 
 import (
-	"bufio"
 	"errors"
-	"fmt"
-	"io"
 )
 
 // Context is the interface for a request and its response.
@@ -53,68 +50,6 @@ func (ctx *context) SetSSE(ch <-chan any, eventName string) error {
 	ctx.sseEventName = eventName
 	ctx.SetSSEHeaders()
 	return nil
-}
-
-func (ctx *context) sendSSE(respWriter io.Writer) (err error) {
-	rw := bufio.NewWriter(respWriter)
-
-	if ctx.sseEventName == "" {
-		ctx.sseEventName = "message" // Default
-	}
-
-	fmt.Printf("RWEB Serving SSE %q events on channel: %v...\tStatus code: %d\n",
-		ctx.sseEventName, ctx.sseEventsChan, ctx.status)
-
-	for {
-		select {
-		case event, ok := <-ctx.sseEventsChan:
-			if !ok {
-				fmt.Println("SSE Channel closed and drained, let's clean up and exit...")
-				_ = rw.Flush()
-				return
-			}
-
-			// fmt.Printf("RWEB Received from SSE source: %v\n", event)
-
-			if strEvt, ok := event.(string); ok {
-				if strEvt == "" {
-					// fmt.Println("RWEB Received empty string event, skipping...")
-					continue
-				}
-				if strEvt == "close" {
-					fmt.Printf("RWEB Received close event, shutting down SSE %q events on channel: %v...\n",
-						ctx.sseEventName, ctx.sseEventsChan)
-					rw.Flush()
-					return
-				}
-			}
-
-			// Format and send the event
-			switch v := event.(type) {
-			case string:
-				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", ctx.sseEventName, v)
-			default:
-				_, err = fmt.Fprintf(rw, "event: %s\ndata: %+v\n\n", ctx.sseEventName, v)
-			}
-
-			if err != nil {
-				fmt.Printf("Error writing SSE event on channel %v: %v\n", ctx.sseEventsChan, err)
-				rw.Reset(respWriter) // Reset the buffer for the next event
-				continue
-			}
-
-			err = rw.Flush() // Flush the buffer to send data immediately
-			if err != nil {
-				fmt.Printf("Error flushing SSE output on channel %v: %v\n", ctx.sseEventsChan, err)
-				rw.Reset(respWriter) // Reset the buffer for the next event
-				return err
-			}
-
-			fmt.Printf("RWEB Sent (on channel: %v) event: %s\n", ctx.sseEventsChan, event)
-		}
-
-		// rw.Reset(respWriter) // Reset the buffer for the next event
-	}
 }
 
 func (ctx *context) Server() *Server {
