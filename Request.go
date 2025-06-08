@@ -11,16 +11,20 @@ import (
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
 
-// IntfRequest is an interface for HTTP requests.
-type IntfRequest interface {
+// ItfRequest is an interface for HTTP requests.
+type ItfRequest interface {
 	Headers() []Header
 	Header(string) string
 	Host() string
 	Method() string
 	Path() string
+	// Query returns the whole query string.
 	Query() string
+	// QueryParam returns the value of a particular query param.
+	QueryParam(string) string
 	Scheme() string
 	Param(string) string
+	// GetPostValue retrieves the value of a POST parameter.
 	GetPostValue(string) string
 	FormValue(string) string
 	GetFormFile(string) (multipart.File, *multipart.FileHeader, error)
@@ -44,6 +48,9 @@ type request struct {
 
 	multipartForm         *multipart.Form
 	multipartFormBoundary string
+
+	queryArgs       Args
+	parsedQueryArgs bool
 
 	postArgs       Args
 	parsedPostArgs bool
@@ -97,6 +104,13 @@ func (req *request) Query() string {
 	return req.query
 }
 
+// QueryParam returns the value of a particular query param.
+func (req *request) QueryParam(param string) (value string) {
+	var args Args
+	args.Parse(req.query)
+	return b2s(args.Peek(param))
+}
+
 // Scheme returns either `http`, `https` or an empty string.
 func (req *request) Scheme() string {
 	return req.scheme
@@ -114,6 +128,7 @@ func (req *request) Body() []byte {
 	return req.body
 }
 
+// GetPostValue retrieves the value of a POST parameter.
 func (req *request) GetPostValue(key string) string {
 	return b2s(req.PostArgs().Peek(key))
 }
@@ -213,6 +228,6 @@ func (req *request) FormValue(key string) string {
 // CleanupMultipartForm removes any temporary files
 func (req *request) CleanupMultipartForm() {
 	if req.multipartForm != nil {
-		req.multipartForm.RemoveAll()
+		_ = req.multipartForm.RemoveAll()
 	}
 }
