@@ -10,7 +10,7 @@ type Context interface {
 	Error(...any) error
 	Next() error
 	Redirect(int, string) error
-	Request() IntfRequest
+	Request() ItfRequest
 	Response() Response
 	Status(int) Context
 	Server() *Server
@@ -93,7 +93,7 @@ func (ctx *context) Redirect(status int, location string) error {
 }
 
 // Request returns the HTTP request.
-func (ctx *context) Request() IntfRequest {
+func (ctx *context) Request() ItfRequest {
 	return &ctx.request
 }
 

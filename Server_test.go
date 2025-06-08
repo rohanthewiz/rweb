@@ -129,6 +129,12 @@ func TestMultipleRequests(t *testing.T) {
 		return ctx.WriteString(getMsg)
 	})
 
+	// Testing query string parameters
+	const qryParamForGet = "soda"
+	s.Get("/products", func(ctx rweb.Context) error {
+		return ctx.WriteString(ctx.Request().QueryParam(qryParamForGet))
+	})
+
 	s.Post("/", func(ctx rweb.Context) error {
 		return ctx.WriteString(ctx.Request().GetPostValue("def"))
 	})
@@ -146,26 +152,35 @@ func TestMultipleRequests(t *testing.T) {
 
 		<-readyChan // wait for server
 
-		// POST
-		buf := bytes.NewReader([]byte("abc=123&def=456"))
-
-		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%s", s.GetListenPort()),
-			string(consts.BytFormData), buf)
+		// GET 1
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/", s.GetListenPort()))
 		assert.Nil(t, err)
 		assert.Equal(t, resp.Status, consts.OK200)
 
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		assert.Equal(t, string(body), "456")
+		assert.Equal(t, string(body), getMsg)
 
-		// GET
-		resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%s/", s.GetListenPort()))
+		// GET 2
+		resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%s/products?%s=grape", s.GetListenPort(), qryParamForGet))
 		assert.Nil(t, err)
 		assert.Equal(t, resp.Status, consts.OK200)
 
 		body, _ = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		assert.Equal(t, string(body), getMsg)
+		assert.Equal(t, string(body), "grape")
+
+		// POST
+		buf := bytes.NewReader([]byte("abc=123&def=456"))
+
+		resp, err = http.Post(fmt.Sprintf("http://127.0.0.1:%s", s.GetListenPort()),
+			string(consts.BytFormData), buf)
+		assert.Nil(t, err)
+		assert.Equal(t, resp.Status, consts.OK200)
+
+		body, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		assert.Equal(t, string(body), "456")
 
 		// POST comment
 		jBody := []byte(`{"key": "value", "count": 20}`)
