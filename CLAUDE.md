@@ -52,6 +52,7 @@ curl http://localhost:8080/some-json
 2. **Middleware Pattern**: Use `ctx.Next()` to pass control to next middleware
 3. **Context Interface**: Central abstraction for request/response operations
 4. **Route Parameters**: Access via `ctx.Request().Param("name")`
+5. **Context Data Storage**: Store request-scoped data via `ctx.Set()`, `ctx.Get()`, `ctx.Has()`, `ctx.Delete()`
 
 ### Important Features
 - **Server-Sent Events (SSE)**: Built-in support via `SSEHandler()`
@@ -59,6 +60,47 @@ curl http://localhost:8080/some-json
 - **Reverse Proxy**: `Proxy(urlPrefix, targetURL, stripPrefixSegments)`
 - **File Uploads**: Handled via `GetFormFile()` on Request
 - **Multiple Response Types**: JSON, HTML, Text, CSS, File responses
+- **Context Data Storage**: Request-scoped data storage for auth, sessions, etc.
+
+### Context Data Storage
+
+The Context interface provides request-scoped data storage through a `map[string]any` field. This is useful for:
+- Authentication state (`isLoggedIn`, `userId`, `isAdmin`)
+- Session data
+- Request-specific metadata
+- Passing data between middleware and handlers
+
+**Methods:**
+- `ctx.Set(key string, value any)` - Store a value
+- `ctx.Get(key string) any` - Retrieve a value (returns nil if not found)
+- `ctx.Has(key string) bool` - Check if a key exists
+- `ctx.Delete(key string)` - Remove a value
+
+**Example:**
+```go
+// Auth middleware
+s.Use(func(ctx rweb.Context) error {
+    if validToken {
+        ctx.Set("isLoggedIn", true)
+        ctx.Set("userId", "123")
+    }
+    return ctx.Next()
+})
+
+// Handler
+s.Get("/profile", func(ctx rweb.Context) error {
+    if !ctx.Has("isLoggedIn") || !ctx.Get("isLoggedIn").(bool) {
+        return ctx.Status(401).WriteString("Unauthorized")
+    }
+    userId := ctx.Get("userId").(string)
+    // ... handle request
+})
+```
+
+**Notes:**
+- Data is automatically cleared between requests via `Clean()` method
+- Thread-safe within a request (each context is used by one goroutine)
+- Map is lazily initialized on first `Set()` call
 
 ### Directory Structure
 ```
@@ -74,4 +116,4 @@ curl http://localhost:8080/some-json
 - Minimal dependencies (only test assertion library)
 - Server addresses should use ":8080" format (not "localhost:8080") for Docker compatibility
 - The radix tree router provides O(log n) route matching performance
-- TODO: SSE tests need fixing, Context interface documentation needs updating from implementations
+- TODO: SSE tests need fixing

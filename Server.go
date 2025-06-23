@@ -813,6 +813,7 @@ func (s *Server) newContext() *context {
 			headers: make([]Header, 0, 8),
 			status:  200,
 		},
+		data: make(map[string]any),
 	}
 }
 

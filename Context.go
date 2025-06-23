@@ -20,6 +20,11 @@ type Context interface {
 	WriteHTML(string) error
 	WriteText(string) error
 	SetSSE(<-chan any, string) error
+	// Custom data storage
+	Get(key string) any
+	Set(key string, value any)
+	Has(key string) bool
+	Delete(key string)
 }
 
 // context contains the request and response data.
@@ -30,6 +35,7 @@ type context struct {
 	handlerIndex  uint8
 	sseEventsChan <-chan any // channel for SSE events
 	sseEventName  string
+	data          map[string]any // custom data storage
 }
 
 func (ctx *context) Clean() {
@@ -43,6 +49,10 @@ func (ctx *context) Clean() {
 	ctx.status = 200
 	// Cleanup any multipart form data
 	ctx.request.CleanupMultipartForm()
+	// Clear custom data
+	if ctx.data != nil {
+		ctx.data = make(map[string]any)
+	}
 }
 
 func (ctx *context) SetSSE(ch <-chan any, eventName string) error {
@@ -134,4 +144,36 @@ func (ctx *context) WriteHTML(body string) error {
 func (ctx *context) WriteText(body string) error {
 	_, er := ctx.response.WriteText(body)
 	return er
+}
+
+// Get retrieves a value from the context's custom data storage.
+func (ctx *context) Get(key string) any {
+	if ctx.data == nil {
+		return nil
+	}
+	return ctx.data[key]
+}
+
+// Set stores a value in the context's custom data storage.
+func (ctx *context) Set(key string, value any) {
+	if ctx.data == nil {
+		ctx.data = make(map[string]any)
+	}
+	ctx.data[key] = value
+}
+
+// Has checks if a key exists in the context's custom data storage.
+func (ctx *context) Has(key string) bool {
+	if ctx.data == nil {
+		return false
+	}
+	_, exists := ctx.data[key]
+	return exists
+}
+
+// Delete removes a key from the context's custom data storage.
+func (ctx *context) Delete(key string) {
+	if ctx.data != nil {
+		delete(ctx.data, key)
+	}
 }
