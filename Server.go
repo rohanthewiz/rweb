@@ -183,6 +183,18 @@ func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventName string) e
 	return ctx.SetSSE(eventChan, eventName)
 }
 
+// SSEHandler returns a handler that sets up Server-Sent Events
+func (s *Server) SSEHandler(eventsChan <-chan any, eventName ...string) Handler {
+	name := "message" // default event name
+	if len(eventName) > 0 && eventName[0] != "" {
+		name = eventName[0]
+	}
+	
+	return func(ctx Context) error {
+		return s.SetupSSE(ctx, eventsChan, name)
+	}
+}
+
 // Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
 // The pathPrefix can help us to distinguish between different proxy targets, from which we can strip any unneeded tokens (from the left)  in the handler
 // If there is any prefix left after stripping, it is added to the leftmost of the target URL.
@@ -478,6 +490,15 @@ func (s *Server) Use(handlers ...Handler) {
 	// Re-slice to exclude last and add append the incoming handlers
 	s.handlers = append(s.handlers[:len(s.handlers)-1], handlers...)
 	s.handlers = append(s.handlers, last) // add back the last
+}
+
+// Group creates a new route group with the given prefix and optional middleware
+func (s *Server) Group(prefix string, handlers ...Handler) *Group {
+	return &Group{
+		prefix:   prefix,
+		server:   s,
+		handlers: handlers,
+	}
 }
 
 // handleConnection handles an accepted connection.
