@@ -17,6 +17,7 @@ Thanks and credit to Akyoto, especially for the radix tree!
 - Server Sent Events
 - Flexible static files handling
 - Scales incredibly well with the number of routes
+- Route grouping with middleware support
 
 ## Installation
 
@@ -184,6 +185,33 @@ func main() {
 	log.Fatal(s.Run())
 }
 ```
+
+## Route Groups
+
+Route groups allow you to organize routes with common prefixes and apply middleware to specific sets of routes:
+
+```go
+// Basic group
+api := s.Group("/api")
+api.Get("/users", getUsersHandler)
+api.Post("/users", createUserHandler)
+
+// Group with middleware
+admin := s.Group("/admin", authMiddleware, loggerMiddleware)
+admin.Get("/dashboard", dashboardHandler)
+admin.Delete("/users/:id", deleteUserHandler)
+
+// Nested groups
+v1 := api.Group("/v1")
+v1.Get("/status", statusHandler)  // Available at /api/v1/status
+
+// Add middleware after group creation
+v2 := api.Group("/v2")
+v2.Use(rateLimiterMiddleware)
+v2.Get("/users", v2UsersHandler)
+```
+
+Groups support all HTTP methods (`Get`, `Post`, `Put`, `Patch`, `Delete`, `Head`, `Options`, `Connect`, `Trace`) as well as `StaticFiles` and `Proxy`.
 
 ## Tests
 
