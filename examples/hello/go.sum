@@ -6,3 +6,5 @@ github.com/rohanthewiz/rweb v0.1.12 h1:2C5i6Zxy/2UXRw9gaIQ3RmOuOxfdA9QhIq9IEdPM0
 github.com/rohanthewiz/rweb v0.1.12/go.mod h1:GBeM+x9dq6LY3GCQXRFNxX5sLpBBcZdsCLw39qj2PmA=
 github.com/rohanthewiz/rweb v0.1.14 h1:wmUT0Ae9EC0y0xoOvioYlhdVp6cvZWKtwKeVL+0Fs68=
 github.com/rohanthewiz/rweb v0.1.14/go.mod h1:Ye+1p+Emvyp3TvpmqPWUrTaLWPBbsc4F5gvfI4dz2CI=
+github.com/rohanthewiz/rweb v0.1.15-0.20250627103250-2193106caf44 h1:rH18Baa7fc8p9IihJXUJv2re5vvwuLLBKPiA1dOUrtM=
+github.com/rohanthewiz/rweb v0.1.15-0.20250627103250-2193106caf44/go.mod h1:Ye+1p+Emvyp3TvpmqPWUrTaLWPBbsc4F5gvfI4dz2CI=
