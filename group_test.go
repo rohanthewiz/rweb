@@ -1,3 +1,6 @@
+// Package rweb_test contains tests for the route groups functionality.
+// These tests verify that groups properly organize routes with common prefixes
+// and correctly apply middleware to grouped routes.
 package rweb_test
 
 import (
@@ -9,10 +12,13 @@ import (
 	"github.com/rohanthewiz/rweb"
 )
 
+// TestGroup verifies basic group functionality including route registration
+// with prefixes and proper routing to group handlers.
 func TestGroup(t *testing.T) {
 	s := rweb.NewServer()
 
-	// Test basic group
+	// Create a group with /api prefix
+	// All routes registered on this group will have /api prepended
 	api := s.Group("/api")
 	api.Get("/users", func(ctx rweb.Context) error {
 		return ctx.WriteText("users list")
@@ -21,33 +27,37 @@ func TestGroup(t *testing.T) {
 		return ctx.WriteText("user created")
 	})
 
-	// Test response
+	// Verify GET /api/users works correctly
 	response := s.Request("GET", "/api/users", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "users list", string(response.Body()))
 
+	// Verify POST /api/users works correctly
 	response = s.Request("POST", "/api/users", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "user created", string(response.Body()))
 
-	// Non-existent route
+	// Verify that /users without the /api prefix returns 404
 	response = s.Request("GET", "/users", nil, nil)
 	assert.Equal(t, http.StatusNotFound, response.Status())
 }
 
+// TestGroupMiddleware verifies that middleware applied to groups
+// executes correctly and in the proper order.
 func TestGroupMiddleware(t *testing.T) {
 	s := rweb.NewServer()
 
-	// Track middleware execution
+	// Track middleware execution order to verify correct chaining
 	var executionOrder []string
 
-	// Server-level middleware
+	// Server-level middleware applies to all routes
 	s.Use(func(ctx rweb.Context) error {
 		executionOrder = append(executionOrder, "server-middleware")
 		return ctx.Next()
 	})
 
-	// Group with middleware
+	// Group with middleware that only applies to routes in this group
+	// Middleware can modify response headers or perform auth checks
 	api := s.Group("/api", func(ctx rweb.Context) error {
 		executionOrder = append(executionOrder, "api-middleware")
 		ctx.Response().SetHeader("X-API", "true")
@@ -59,24 +69,32 @@ func TestGroupMiddleware(t *testing.T) {
 		return ctx.WriteText("test response")
 	})
 
-	// Test request
+	// Test request to verify middleware execution order
 	executionOrder = []string{} // Reset
 	response := s.Request("GET", "/api/test", nil, nil)
 	
+	// Verify response is correct
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "test response", string(response.Body()))
 	assert.Equal(t, "true", response.Header("X-API"))
+	
+	// Verify middleware executed in correct order:
+	// server -> group -> handler
 	assert.Equal(t, 3, len(executionOrder))
 	assert.Equal(t, "server-middleware", executionOrder[0])
 	assert.Equal(t, "api-middleware", executionOrder[1])
 	assert.Equal(t, "handler", executionOrder[2])
 }
 
+// TestNestedGroups verifies that groups can be nested to create
+// hierarchical route structures like API versioning.
 func TestNestedGroups(t *testing.T) {
 	s := rweb.NewServer()
 
-	// Create nested groups
+	// Create nested groups for API versioning
+	// api group creates /api prefix
 	api := s.Group("/api")
+	// v1 and v2 groups create /api/v1 and /api/v2 prefixes
 	v1 := api.Group("/v1")
 	v2 := api.Group("/v2")
 
@@ -88,21 +106,24 @@ func TestNestedGroups(t *testing.T) {
 		return ctx.WriteText("v2 status")
 	})
 
-	// Test both versions
+	// Verify v1 endpoint: GET /api/v1/status
 	response := s.Request("GET", "/api/v1/status", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "v1 status", string(response.Body()))
 
+	// Verify v2 endpoint: GET /api/v2/status
 	response = s.Request("GET", "/api/v2/status", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "v2 status", string(response.Body()))
 }
 
+// TestGroupAllMethods verifies that groups support all HTTP methods
+// (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, etc.).
 func TestGroupAllMethods(t *testing.T) {
 	s := rweb.NewServer()
 	api := s.Group("/api")
 
-	// Register all HTTP methods
+	// Register handlers for all supported HTTP methods
 	api.Get("/resource", func(ctx rweb.Context) error {
 		return ctx.WriteText("GET")
 	})
@@ -126,7 +147,7 @@ func TestGroupAllMethods(t *testing.T) {
 		return ctx.WriteText("OPTIONS")
 	})
 
-	// Test each method
+	// Test each method (except HEAD which doesn't return body)
 	methods := []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	for _, method := range methods {
 		response := s.Request(method, "/api/resource", nil, nil)
@@ -134,16 +155,18 @@ func TestGroupAllMethods(t *testing.T) {
 		assert.Equal(t, method, string(response.Body()))
 	}
 
-	// Test HEAD
+	// Test HEAD separately as it only sets headers, no body
 	response := s.Request("HEAD", "/api/resource", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "HEAD", response.Header("X-Method"))
 }
 
+// TestGroupMiddlewareIndependence verifies that middleware applied to one group
+// doesn't affect other groups, ensuring proper isolation.
 func TestGroupMiddlewareIndependence(t *testing.T) {
 	s := rweb.NewServer()
 
-	// Create two groups with different middleware
+	// Create two groups with different middleware to test isolation
 	auth := s.Group("/auth", func(ctx rweb.Context) error {
 		ctx.Response().SetHeader("X-Auth", "required")
 		return ctx.Next()
@@ -162,14 +185,14 @@ func TestGroupMiddlewareIndependence(t *testing.T) {
 		return ctx.WriteText("public info")
 	})
 
-	// Test auth group
+	// Test auth group - should only have X-Auth header
 	response := s.Request("GET", "/auth/profile", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "auth profile", string(response.Body()))
 	assert.Equal(t, "required", response.Header("X-Auth"))
 	assert.Equal(t, "", response.Header("X-Public")) // Should not have public header
 
-	// Test public group
+	// Test public group - should only have X-Public header
 	response = s.Request("GET", "/public/info", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "public info", string(response.Body()))
@@ -177,6 +200,8 @@ func TestGroupMiddlewareIndependence(t *testing.T) {
 	assert.Equal(t, "", response.Header("X-Auth")) // Should not have auth header
 }
 
+// TestGroupUseMethod verifies that the Use() method on groups correctly
+// adds middleware that applies to all routes in the group.
 func TestGroupUseMethod(t *testing.T) {
 	s := rweb.NewServer()
 
@@ -184,7 +209,7 @@ func TestGroupUseMethod(t *testing.T) {
 
 	api := s.Group("/api")
 	
-	// Add middleware after group creation
+	// Add middleware after group creation using Use() method
 	api.Use(func(ctx rweb.Context) error {
 		middlewareOrder = append(middlewareOrder, "first")
 		return ctx.Next()
@@ -200,7 +225,7 @@ func TestGroupUseMethod(t *testing.T) {
 		return ctx.WriteText("done")
 	})
 
-	// Test execution order
+	// Verify middleware executes in the order it was added
 	middlewareOrder = []string{}
 	response := s.Request("GET", "/api/test", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
@@ -210,11 +235,14 @@ func TestGroupUseMethod(t *testing.T) {
 	assert.Equal(t, "handler", middlewareOrder[2])
 }
 
+// TestGroupErrorHandling verifies that errors in group middleware
+// are properly handled and stop the middleware chain.
 func TestGroupErrorHandling(t *testing.T) {
 	s := rweb.NewServer()
 
+	// Group with middleware that returns error for specific path
 	api := s.Group("/api", func(ctx rweb.Context) error {
-		// Middleware that might error
+		// Simulate error condition for /api/error path
 		if ctx.Request().Path() == "/api/error" {
 			return ctx.Error("middleware error")
 		}
@@ -229,48 +257,57 @@ func TestGroupErrorHandling(t *testing.T) {
 		return ctx.WriteText("should not reach here")
 	})
 
-	// Test successful request
+	// Test successful request - middleware passes through
 	response := s.Request("GET", "/api/test", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "success", string(response.Body()))
 
-	// Test error in middleware
+	// Test error in middleware - handler should not be reached
 	response = s.Request("GET", "/api/error", nil, nil)
 	assert.Equal(t, http.StatusInternalServerError, response.Status())
 	// The default error handler should handle it
 	assert.True(t, strings.Contains(string(response.Body()), "Internal Server Error"))
 }
 
+// TestGroupStaticFiles verifies that groups can serve static files
+// with the group prefix applied.
 func TestGroupStaticFiles(t *testing.T) {
 	s := rweb.NewServer()
 
-	// Create a group for assets
+	// Create a group for serving static assets
 	assets := s.Group("/assets")
 	
-	// This would serve files from the local "static" directory
+	// Register static file handler - this would serve files from ./testdata
 	// when requests come to /assets/static/*
-	// Note: We can't test this fully without actual files
+	// The 0 parameter means no path segments are stripped
 	assets.StaticFiles("/static", "./testdata", 0)
 
-	// Just verify the route is registered properly
-	// In a real test, you'd need actual static files to serve
+	// Note: Full testing would require actual static files
+	// This test just verifies the route registration doesn't panic
 }
 
+// TestGroupProxy verifies that groups can set up reverse proxies
+// with the group prefix applied.
 func TestGroupProxy(t *testing.T) {
 	s := rweb.NewServer()
 
-	// Create API group
+	// Create API group for proxying external services
 	api := s.Group("/api")
 	
-	// Set up proxy (this would forward /api/external/* to another server)
-	// Note: We can't test this fully without a target server
+	// Set up proxy - this would forward /api/external/* to http://example.com
+	// The 0 parameter means no path segments are stripped before forwarding
 	err := api.Proxy("/external", "http://example.com", 0)
 	assert.Nil(t, err)
+	
+	// Note: Full testing would require a target server to proxy to
 }
 
+// TestGroupWithParameters verifies that route parameters work correctly
+// within groups, including nested parameters.
 func TestGroupWithParameters(t *testing.T) {
 	s := rweb.NewServer()
 
+	// Create users group for RESTful user endpoints
 	users := s.Group("/users")
 	
 	users.Get("/:id", func(ctx rweb.Context) error {
@@ -284,11 +321,12 @@ func TestGroupWithParameters(t *testing.T) {
 		return ctx.WriteText("user " + userID + " post " + postID)
 	})
 
-	// Test parameter extraction
+	// Test single parameter: /users/:id
 	response := s.Request("GET", "/users/123", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "user 123", string(response.Body()))
 
+	// Test multiple parameters: /users/:id/posts/:postId
 	response = s.Request("GET", "/users/123/posts/456", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "user 123 post 456", string(response.Body()))

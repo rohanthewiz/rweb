@@ -183,13 +183,19 @@ func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventName string) e
 	return ctx.SetSSE(eventChan, eventName)
 }
 
-// SSEHandler returns a handler that sets up Server-Sent Events
+// SSEHandler returns a handler that sets up Server-Sent Events.
+// This is a convenience method that creates a handler function for SSE endpoints.
+// The eventsChan parameter is the channel from which events will be sent to the client.
+// The optional eventName parameter specifies the event type (defaults to "message").
+// Usage: s.Get("/events", s.SSEHandler(eventsChan, "update"))
 func (s *Server) SSEHandler(eventsChan <-chan any, eventName ...string) Handler {
+	// Default to "message" event type if not specified
 	name := "message" // default event name
 	if len(eventName) > 0 && eventName[0] != "" {
 		name = eventName[0]
 	}
 	
+	// Return a handler that sets up SSE for the given context
 	return func(ctx Context) error {
 		return s.SetupSSE(ctx, eventsChan, name)
 	}
@@ -492,7 +498,12 @@ func (s *Server) Use(handlers ...Handler) {
 	s.handlers = append(s.handlers, last) // add back the last
 }
 
-// Group creates a new route group with the given prefix and optional middleware
+// Group creates a new route group with the given prefix and optional middleware.
+// Groups allow organizing routes under a common URL prefix and applying middleware
+// that only affects routes within the group.
+// Example: api := s.Group("/api", authMiddleware) creates a group where all routes
+// will be prefixed with "/api" and use the authMiddleware.
+// Groups can be nested: v1 := api.Group("/v1") creates "/api/v1" prefix.
 func (s *Server) Group(prefix string, handlers ...Handler) *Group {
 	return &Group{
 		prefix:   prefix,
