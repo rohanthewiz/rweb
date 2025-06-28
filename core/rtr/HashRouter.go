@@ -6,7 +6,16 @@ import (
 	"github.com/rohanthewiz/rweb/consts"
 )
 
-// HashRouter is a fast lookup router.
+// HashRouter is a fast lookup router that uses hash maps for O(1) route matching.
+// Unlike the radix tree router, this router only supports exact path matching
+// without parameters or wildcards. It's ideal for applications with many static
+// routes where parameter extraction is not needed.
+//
+// Design considerations:
+// - Each HTTP method has its own hash map to avoid key collisions
+// - Pre-allocated map capacities optimize for typical REST API patterns
+//   (more GET routes than other methods)
+// - Generic type T allows storing any handler type (functions, structs, etc.)
 type HashRouter[T any] struct {
 	get     map[string]T
 	post    map[string]T
@@ -20,7 +29,14 @@ type HashRouter[T any] struct {
 }
 
 // NewHashRouter creates a new router containing initialized hashmaps for every HTTP method.
-// It is important to use this method when a new hash router is needed
+// It is important to use this method when a new hash router is needed.
+//
+// Map capacity allocation strategy:
+// - GET: 16 (most common in REST APIs)
+// - POST: 8 (second most common)
+// - Others: default capacity (less frequently used)
+//
+// This pre-allocation reduces map growth overhead for typical usage patterns.
 func NewHashRouter[T any]() *HashRouter[T] {
 	hr := &HashRouter[T]{
 		get:     make(map[string]T, 16),
@@ -37,6 +53,9 @@ func NewHashRouter[T any]() *HashRouter[T] {
 }
 
 // Add registers a new handler for the given method and path.
+// This operation is O(1) and will overwrite any existing handler for the same method/path combination.
+//
+// Note: Unlike the radix router, paths must match exactly - no parameter or wildcard support.
 func (hr *HashRouter[T]) Add(method string, path string, handler T) {
 	hashMap := hr.selectMethodMap(method)
 	hashMap[path] = handler
@@ -47,6 +66,13 @@ func (hr *HashRouter[T]) Add(method string, path string, handler T) {
 
 }
 
+// ListRoutes returns a slice of all registered routes across all HTTP methods.
+// This is useful for debugging, documentation generation, or route inspection.
+//
+// Implementation notes:
+// - Routes are not returned in any guaranteed order due to map iteration
+// - HandlerRef uses fmt.Sprintf to get a string representation of the handler
+// - This method iterates through all method maps, so performance is O(n) where n is total routes
 func (hr *HashRouter[T]) ListRoutes() (routes []RouteList) {
 	for k, h := range hr.get {
 		routes = append(routes, RouteList{Method: consts.MethodGet, Path: k, HandlerRef: fmt.Sprintf("%v", h)})
@@ -79,6 +105,12 @@ func (hr *HashRouter[T]) ListRoutes() (routes []RouteList) {
 }
 
 // Lookup finds the handler for the given route.
+// Returns the zero value of T if no handler is found.
+//
+// Performance optimization:
+// - GET requests are optimized with a direct check (most common HTTP method)
+// - Single character comparison avoids full string comparison
+// - Direct map access provides O(1) lookup time
 func (hr *HashRouter[T]) Lookup(method string, path string) T {
 	if method[0] == 'G' {
 		return hr.get[path]
@@ -89,6 +121,12 @@ func (hr *HashRouter[T]) Lookup(method string, path string) T {
 }
 
 // selectMethodMap returns the map based on the given HTTP method.
+// This centralizes method-to-map mapping logic for consistency.
+//
+// Design choice:
+// - Uses string constants from consts package for type safety
+// - Returns nil for unknown methods rather than panicking
+// - Switch statement compiles to efficient jump table
 func (hr *HashRouter[T]) selectMethodMap(method string) map[string]T {
 	switch method {
 	case consts.MethodGet:
