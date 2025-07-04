@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/rohanthewiz/element"
 	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
@@ -861,4 +862,50 @@ func (s *Server) GetListenPort() (port string) {
 		return addr[lastColonIndex+1:]
 	}
 	return
+}
+
+// AddElementDebugRoutes adds debug routes for the element package under the /debug prefix.
+// This is a convenience method that sets up routes to enable/disable debug mode and view
+// collected HTML generation issues. Debug mode helps identify unclosed tags, unpaired attributes,
+// and other HTML generation problems by adding data-ele-id attributes to elements.
+//
+// Routes added:
+//   - GET /debug/set - Enable debug mode
+//   - GET /debug/show - Display collected issues in formatted table
+//   - GET /debug/clear - Disable debug mode and clear all issues  
+//   - GET /debug/clear-issues - Clear issues but keep debug mode active
+//
+// Example usage:
+//   s := rweb.NewServer()
+//   s.AddElementDebugRoutes()
+func (s *Server) AddElementDebugRoutes() {
+	// Group debug routes under /debug prefix for cleaner URL organization
+	debugGrp := s.Group("/debug")
+
+	// Enable debug mode - this adds data-ele-id attributes to elements
+	// and tracks any HTML generation issues. After enabling, refresh any page
+	// you want to check, then visit /debug/show to see collected issues
+	debugGrp.Get("/set", func(c Context) error {
+		element.DebugSet()
+		return c.WriteHTML("<h3>Debug mode is set.</h3> <a href='/'>Home</a>")
+	})
+
+	// Display collected issues in a formatted table with HTML and Markdown views
+	// This shows any HTML generation problems detected while debug mode was active
+	debugGrp.Get("/show", func(c Context) error {
+		err := c.WriteHTML(element.DebugShow())
+		return err
+	})
+
+	// Disable debug mode completely (stops tracking and clears all issues)
+	debugGrp.Get("/clear", func(c Context) error {
+		element.DebugClear()
+		return c.WriteHTML("<h3>Issues are cleared and Debug mode is off.</h3> <a href='/'>Home</a>")
+	})
+
+	// Clear collected issues but keep debug mode active for continued tracking
+	debugGrp.Get("/clear-issues", func(c Context) error {
+		element.DebugClearIssues()
+		return c.WriteHTML("<h3>Issues cleared (debug mode still active).</h3> <a href='/'>Home</a> | <a href='/debug/show'>View Debug</a>")
+	})
 }
