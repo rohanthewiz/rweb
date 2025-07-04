@@ -195,7 +195,7 @@ func (s *Server) SSEHandler(eventsChan <-chan any, eventName ...string) Handler 
 	if len(eventName) > 0 && eventName[0] != "" {
 		name = eventName[0]
 	}
-	
+
 	// Return a handler that sets up SSE for the given context
 	return func(ctx Context) error {
 		return s.SetupSSE(ctx, eventsChan, name)
@@ -864,7 +864,7 @@ func (s *Server) GetListenPort() (port string) {
 	return
 }
 
-// AddElementDebugRoutes adds debug routes for the element package under the /debug prefix.
+// ElementDebugRoutes adds debug routes for the element package under the /debug prefix.
 // This is a convenience method that sets up routes to enable/disable debug mode and view
 // collected HTML generation issues. Debug mode helps identify unclosed tags, unpaired attributes,
 // and other HTML generation problems by adding data-ele-id attributes to elements.
@@ -872,13 +872,14 @@ func (s *Server) GetListenPort() (port string) {
 // Routes added:
 //   - GET /debug/set - Enable debug mode
 //   - GET /debug/show - Display collected issues in formatted table
-//   - GET /debug/clear - Disable debug mode and clear all issues  
+//   - GET /debug/clear - Disable debug mode and clear all issues
 //   - GET /debug/clear-issues - Clear issues but keep debug mode active
 //
 // Example usage:
-//   s := rweb.NewServer()
-//   s.AddElementDebugRoutes()
-func (s *Server) AddElementDebugRoutes() {
+//
+//	s := rweb.NewServer()
+//	s.ElementDebugRoutes()
+func (s *Server) ElementDebugRoutes() {
 	// Group debug routes under /debug prefix for cleaner URL organization
 	debugGrp := s.Group("/debug")
 
