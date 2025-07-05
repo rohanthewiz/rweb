@@ -888,7 +888,7 @@ func (s *Server) ElementDebugRoutes() {
 	// you want to check, then visit /debug/show to see collected issues
 	debugGrp.Get("/set", func(c Context) error {
 		element.DebugSet()
-		return c.WriteHTML("<h3>Debug mode is set.</h3> <a href='/'>Home</a>")
+		return c.WriteHTML("<h3>Debug mode is set.</h3> <a href='/'>Home</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href='/debug/show'>Show Issues</a>")
 	})
 
 	// Display collected issues in a formatted table with HTML and Markdown views
@@ -907,6 +907,6 @@ func (s *Server) ElementDebugRoutes() {
 	// Clear collected issues but keep debug mode active for continued tracking
 	debugGrp.Get("/clear-issues", func(c Context) error {
 		element.DebugClearIssues()
-		return c.WriteHTML("<h3>Issues cleared (debug mode still active).</h3> <a href='/'>Home</a> | <a href='/debug/show'>View Debug</a>")
+		return c.WriteHTML("<h3>Issues cleared (debug mode still active).</h3> <a href='/'>Home</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href='/debug/show'>Show Issues</a>")
 	})
 }
