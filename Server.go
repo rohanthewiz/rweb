@@ -43,6 +43,13 @@ type URLOptions struct {
 	KeepTrailingSlashes bool
 }
 
+// SSEvent when received from a source channel will set the Type into the event return to the client,
+// otherwise the Type will be set from whatever is in the context, set by SetupSSE() or SSEHandler()
+type SSEvent struct {
+	Type string // or event name
+	Data interface{}
+}
+
 type TLSCfg struct {
 	TLSAddr  string // [Port] to listen on for TLS
 	CertFile string // Path to certificate file
@@ -180,20 +187,28 @@ func (s *Server) Trace(path string, handler Handler) {
 	s.AddMethod(consts.MethodTrace, path, handler)
 }
 
-func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventName string) error {
-	return ctx.SetSSE(eventChan, eventName)
+// SetupSSE sets the source channel for SSE events and allows you to either
+// send the event to the source channel as an rweb.SSEvent from which the event type will be pulled,
+// or explicitly state the (single) eventType here -- not flexible, but here if you need it.
+// So if you are sending from the source rweb.SSEvent(s), you don't need to set eventTypeOption here
+func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventTypeOption ...string) error {
+	evtType := ""
+	if len(eventTypeOption) > 0 {
+		evtType = eventTypeOption[0]
+	}
+	return ctx.SetSSE(eventChan, evtType)
 }
 
-// SSEHandler returns a handler that sets up Server-Sent Events.
-// This is a convenience method that creates a handler function for SSE endpoints.
-// The eventsChan parameter is the channel from which events will be sent to the client.
+// SSEHandler is a convenience method that creates a handler function for Server-Sent Events of a certain type.
+// Note: SSEvent data from the source will override the event type set here.
+// The eventsChan parameter is the channel from which events will be sourced.
 // The optional eventName parameter specifies the event type (defaults to "message").
 // Usage: s.Get("/events", s.SSEHandler(eventsChan, "update"))
-func (s *Server) SSEHandler(eventsChan <-chan any, eventName ...string) Handler {
+func (s *Server) SSEHandler(eventsChan <-chan any, eventType ...string) Handler {
 	// Default to "message" event type if not specified
 	name := "message" // default event name
-	if len(eventName) > 0 && eventName[0] != "" {
-		name = eventName[0]
+	if len(eventType) > 0 && eventType[0] != "" {
+		name = eventType[0]
 	}
 
 	// Return a handler that sets up SSE for the given context
@@ -804,6 +819,8 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 
 			// Format and send the event
 			switch v := event.(type) {
+			case SSEvent: // get the eventName from the data (rweb.SSEvent) received
+				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", v.Type, v.Data)
 			case string:
 				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", ctx.sseEventName, v)
 			default:
