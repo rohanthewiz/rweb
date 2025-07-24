@@ -11,22 +11,32 @@ import (
 	"github.com/rohanthewiz/rweb/core/rtr"
 )
 
-// ItfRequest is an interface for HTTP requests.
+// ItfRequest is the Request interface
 type ItfRequest interface {
+	// Headers returns the request headers.
 	Headers() []Header
+	// Header returns the header value for the given key.
 	Header(string) string
 	Host() string
+	// Method returns the HTTP method of the request
 	Method() string
+	// Path  returns the request path
 	Path() string
 	// Query returns the whole query string.
 	Query() string
-	// QueryParam returns the value of a particular query param.
+	// QueryParam returns the value of a particular query string param.
 	QueryParam(string) string
 	Scheme() string
+	// Param retrieves a Path parameter's value.
 	Param(string) string
-	// GetPostValue retrieves the value of a POST parameter.
+	// PathParam retrieves a Path parameter's value.
+	PathParam(string) string
+	// GetPostValue retrieves the value of POST param - cannot be used for non-multipart forms
+	// use FormValue for multipart form values.
 	GetPostValue(string) string
+	// FormValue retrieves multipart form parameter values
 	FormValue(string) string
+	// GetFormFile returns the first file for the provided form key
 	GetFormFile(string) (multipart.File, *multipart.FileHeader, error)
 	Body() []byte
 }
@@ -81,20 +91,27 @@ func (req *request) Method() string {
 	return req.method
 }
 
-// Param retrieves a parameter.
-func (req *request) Param(name string) string {
+// Param retrieves a Path parameter's value.
+func (req *request) Param(name string) (value string) {
 	for i := range len(req.params) {
-		p := req.params[i]
-
-		if p.Key == name {
-			return p.Value
+		if req.params[i].Key == name {
+			return req.params[i].Value
 		}
 	}
-
-	return ""
+	return
 }
 
-// Path returns the requested path.
+// PathParam retrieves a Path parameter's value.
+func (req *request) PathParam(name string) (value string) {
+	for i := range len(req.params) {
+		if req.params[i].Key == name {
+			return req.params[i].Value
+		}
+	}
+	return
+}
+
+// Path returns the request path.
 func (req *request) Path() string {
 	return req.path
 }
@@ -128,7 +145,7 @@ func (req *request) Body() []byte {
 	return req.body
 }
 
-// GetPostValue retrieves the value of a POST parameter.
+// GetPostValue retrieves the value of a non-multipart form POST parameter.
 func (req *request) GetPostValue(key string) string {
 	return b2s(req.PostArgs().Peek(key))
 }
