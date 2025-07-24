@@ -79,7 +79,7 @@ func main() {
 	s.Get("/greet/:name", func(ctx rweb.Context) error {
 		// Access route parameters using ctx.Request().Param("paramName")
 		// The :name parameter captures any value in that URL segment
-		return ctx.WriteString("Hello " + ctx.Request().Param("name"))
+		return ctx.WriteString("Hello " + ctx.Request().PathParam("name"))
 	})
 
 	// Static route takes precedence over parameterized route when exact match
@@ -91,7 +91,7 @@ func main() {
 	// Deep nested routes are handled efficiently by the radix tree router
 	// Test with: curl http://localhost:8080/long/long/long/url/something
 	s.Get("/long/long/long/url/:thing", func(ctx rweb.Context) error {
-		return ctx.WriteString("Hello " + ctx.Request().Param("thing"))
+		return ctx.WriteString("Hello " + ctx.Request().PathParam("thing"))
 	})
 
 	// Again, static routes have priority over parameterized ones
@@ -131,7 +131,7 @@ func main() {
 	// Demonstrates that route parameters work with all HTTP methods
 	// Test with: curl -X POST http://localhost:8080/post-form-data/123
 	s.Post("/post-form-data/:form_id", func(ctx rweb.Context) error {
-		return ctx.WriteString("Posted - form_id: " + ctx.Request().Param("form_id"))
+		return ctx.WriteString("Posted - form_id: " + ctx.Request().PathParam("form_id"))
 	})
 
 	// Manual file serving example (not recommended for multiple files)
@@ -208,23 +208,33 @@ func main() {
 	// Server-Sent Events (SSE) example
 	// SSE allows the server to push real-time updates to the client
 	// Unlike WebSockets, SSE is unidirectional (server to client only)
+	// Test with: curl http://localhost:8080/events
+	// Or in browser: new EventSource('http://localhost:8080/events')
 
-	// Create a buffered channel to hold events
-	// Buffer size 8 prevents blocking when sending events
-	eventsChan := make(chan any, 8)
+	// Create a buffered channel to hold some events
+	eventsChan := make(chan any, 4)
 
-	// Pre-populate some events for demonstration
-	// In a real application, events would be sent as they occur
+	// Use SetupSSE (recommended) as you can receive multiple event types
+	s.Get("/events", func(c rweb.Context) error {
+		return s.SetupSSE(c, eventsChan)
+	})
+
+	// Populate some events for demonstration
 	eventsChan <- "event 1"
 	eventsChan <- "event 2"
 	eventsChan <- "event 3"
 	eventsChan <- "event 4"
-	eventsChan <- "event 5"
 
-	// SSEHandler creates a handler that streams events from the channel
-	// Test with: curl http://localhost:8080/events
-	// Or in browser: new EventSource('http://localhost:8080/events')
-	s.Get("/events", s.SSEHandler(eventsChan))
+	eventsChan2 := make(chan any, 4)
+
+	// SSEHandler is a convenience method for creating a handler that streams events from the channel
+	s.Get("/events2", s.SSEHandler(eventsChan2))
+
+	// Populate some events for demonstration
+	eventsChan2 <- "event2 1"
+	eventsChan2 <- "event2 2"
+	eventsChan2 <- "event2 3"
+	eventsChan2 <- "event2 4"
 
 	// Reverse proxy configuration
 	// Forwards requests matching a URL prefix to another server

@@ -76,10 +76,10 @@ func main() {
 	})
 
 	// POST endpoint with URL parameters
-	// The :form_id syntax creates a route parameter that can be accessed via ctx.Request().Param()
+	// The :form_id syntax creates a route parameter that can be accessed via ctx.Request().PathParam()
 	// This endpoint also demonstrates accessing the raw request body
 	s.Post("/eur/proxy-incoming/post-form-data/:form_id", func(ctx rweb.Context) error {
-		return ctx.WriteString("Posted to Proxy Incoming - form_id: " + ctx.Request().Param("form_id") +
+		return ctx.WriteString("Posted to Proxy Incoming - form_id: " + ctx.Request().PathParam("form_id") +
 			"\n" + string(ctx.Request().Body()))
 	})
 

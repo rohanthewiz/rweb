@@ -43,9 +43,9 @@ func main() {
 	// Creates routes like: GET /api/v1/users, GET /api/v1/users/:id, etc.
 	users := v1.Group("/users", authMiddleware)
 	users.Get("/", listUsers)        // GET /api/v1/users
-	users.Get("/:id", getUser)      // GET /api/v1/users/:id
+	users.Get("/:id", getUser)       // GET /api/v1/users/:id
 	users.Post("/", createUser)      // POST /api/v1/users
-	users.Put("/:id", updateUser)   // PUT /api/v1/users/:id
+	users.Put("/:id", updateUser)    // PUT /api/v1/users/:id
 	users.Delete("/:id", deleteUser) // DELETE /api/v1/users/:id
 
 	// Admin routes - require both authentication AND admin privileges
@@ -66,7 +66,7 @@ func main() {
 	})
 	// Admin user deletion: DELETE /admin/users/:id
 	admin.Delete("/users/:id", func(ctx rweb.Context) error {
-		id := ctx.Request().Param("id")
+		id := ctx.Request().PathParam("id")
 		return ctx.WriteJSON(map[string]string{
 			"message": fmt.Sprintf("User %s deleted by admin", id),
 		})
@@ -155,7 +155,7 @@ func listUsers(ctx rweb.Context) error {
 // Returns details for a specific user
 func getUser(ctx rweb.Context) error {
 	// Extract URL parameter
-	id := ctx.Request().Param("id")
+	id := ctx.Request().PathParam("id")
 	return ctx.WriteJSON(map[string]string{
 		"id":    id,
 		"name":  "John Doe",
@@ -179,7 +179,7 @@ func createUser(ctx rweb.Context) error {
 // updateUser handles PUT /api/v1/users/:id
 // Updates an existing user
 func updateUser(ctx rweb.Context) error {
-	id := ctx.Request().Param("id")
+	id := ctx.Request().PathParam("id")
 	// In real app: parse body, validate, update database
 	return ctx.WriteJSON(map[string]string{
 		"id":      id,
@@ -190,7 +190,7 @@ func updateUser(ctx rweb.Context) error {
 // deleteUser handles DELETE /api/v1/users/:id
 // Deletes a user (mock implementation)
 func deleteUser(ctx rweb.Context) error {
-	id := ctx.Request().Param("id")
+	id := ctx.Request().PathParam("id")
 	// In real app: check permissions, delete from database
 	return ctx.WriteJSON(map[string]string{
 		"id":      id,
