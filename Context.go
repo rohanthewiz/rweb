@@ -2,6 +2,7 @@ package rweb
 
 import (
 	"errors"
+	"net/http"
 )
 
 // Context is the interface for a request and its response.
@@ -83,6 +84,36 @@ type Context interface {
 
 	// Delete removes a key-value pair from request-scoped storage.
 	Delete(key string)
+
+	// Cookie operations for managing HTTP cookies.
+	// These methods provide a simple, secure API for cookie handling.
+
+	// SetCookie sets a cookie with the given name and value using secure defaults.
+	// The cookie will have HttpOnly=true, SameSite=Lax, and Path="/" by default.
+	// For session cookies that expire when the browser closes, this is the simplest method.
+	SetCookie(name, value string) error
+
+	// SetCookieWithOptions sets a cookie with custom options.
+	// Use this when you need fine-grained control over cookie attributes
+	// like expiration time, domain, or stricter SameSite settings.
+	SetCookieWithOptions(cookie *Cookie) error
+
+	// GetCookie retrieves a cookie value by name.
+	// Returns an error if the cookie doesn't exist.
+	GetCookie(name string) (string, error)
+
+	// GetCookieAndClear retrieves a cookie value and immediately deletes it.
+	// This is useful for flash messages that should only be read once.
+	// Returns an error if the cookie doesn't exist.
+	GetCookieAndClear(name string) (string, error)
+
+	// DeleteCookie removes a cookie by setting MaxAge=-1 and expired time.
+	// The cookie is removed on the client side when the response is sent.
+	DeleteCookie(name string) error
+
+	// HasCookie checks if a cookie exists without retrieving its value.
+	// Useful for conditional logic based on cookie presence.
+	HasCookie(name string) bool
 }
 
 // context is the concrete implementation of the Context interface.
@@ -104,6 +135,10 @@ type context struct {
 	sseEventName string
 	// Request-scoped key-value storage for passing data between handlers
 	data map[string]any
+	// Parsed cookies from request (lazy-loaded)
+	parsedCookies map[string]*Cookie
+	// Whether cookies have been parsed from the request
+	cookiesParsed bool
 }
 
 // Clean resets the context for reuse in the next request.
@@ -133,6 +168,15 @@ func (ctx *context) Clean() {
 	// Clear custom data map but keep it allocated if it exists
 	if ctx.data != nil {
 		ctx.data = make(map[string]any)
+	}
+
+	// Reset cookie state
+	ctx.cookiesParsed = false
+	if ctx.parsedCookies != nil {
+		// clear the map but keep it allocated for reuse
+		for k := range ctx.parsedCookies {
+			delete(ctx.parsedCookies, k)
+		}
 	}
 }
 
@@ -304,4 +348,173 @@ func (ctx *context) Delete(key string) {
 	if ctx.data != nil {
 		delete(ctx.data, key)
 	}
+}
+
+// parseCookies lazily parses cookies from the request headers.
+// This is called automatically by cookie getter methods.
+func (ctx *context) parseCookies() {
+	if ctx.cookiesParsed {
+		return
+	}
+	
+	ctx.cookiesParsed = true
+	cookieHeader := ctx.request.Header("Cookie")
+	if cookieHeader == "" {
+		return
+	}
+	
+	// parse cookies using net/http for compatibility
+	header := make(http.Header)
+	header.Add("Cookie", cookieHeader)
+	request := http.Request{Header: header}
+	
+	cookies := request.Cookies()
+	if len(cookies) == 0 {
+		return
+	}
+	
+	// lazy initialize the parsed cookies map
+	if ctx.parsedCookies == nil {
+		ctx.parsedCookies = make(map[string]*Cookie)
+	}
+	
+	// convert standard cookies to rweb cookies
+	for _, c := range cookies {
+		ctx.parsedCookies[c.Name] = newCookieFromStd(c)
+	}
+}
+
+// SetCookie sets a cookie with the given name and value using secure defaults.
+// The cookie will have HttpOnly=true, SameSite=Lax, and Path="/" by default.
+func (ctx *context) SetCookie(name, value string) error {
+	cookie := &Cookie{
+		Name:     name,
+		Value:    value,
+		HttpOnly: true,
+		// Path and SameSite will be set by SetCookieWithOptions based on server config
+	}
+	return ctx.SetCookieWithOptions(cookie)
+}
+
+// SetCookieWithOptions sets a cookie with custom options.
+func (ctx *context) SetCookieWithOptions(cookie *Cookie) error {
+	if cookie.Name == "" {
+		return errors.New("cookie name cannot be empty")
+	}
+	
+	// apply server defaults
+	useTLS := ctx.server != nil && ctx.server.options.TLS.UseTLS
+	
+	// apply defaults based on server configuration
+	if cookie.Path == "" {
+		if ctx.server != nil && ctx.server.options.Cookie.Path != "" {
+			cookie.Path = ctx.server.options.Cookie.Path
+		} else {
+			cookie.Path = "/"
+		}
+	}
+	
+	// only set secure if not already set and we're using TLS or config says so
+	if !cookie.Secure && ctx.server != nil && (ctx.server.options.Cookie.Secure || useTLS) {
+		cookie.Secure = true
+	}
+	
+	// set SameSite default only if not specified
+	if cookie.SameSite == 0 {
+		if ctx.server != nil && ctx.server.options.Cookie.SameSite != 0 {
+			cookie.SameSite = ctx.server.options.Cookie.SameSite
+		} else {
+			cookie.SameSite = SameSiteLaxMode
+		}
+	}
+	
+	// apply HttpOnly from server config if set
+	// NOTE: HttpOnly in server config is a preference, not a requirement
+	// Individual cookies can still explicitly set HttpOnly=false
+	
+	// samesite=none requires secure=true
+	if cookie.SameSite == SameSiteNoneMode && !cookie.Secure {
+		cookie.Secure = true
+	}
+	
+	// convert to standard cookie and add header (multiple Set-Cookie headers are allowed)
+	stdCookie := cookie.ToStdCookie()
+	ctx.response.AddHeader("Set-Cookie", stdCookie.String())
+	
+	return nil
+}
+
+// GetCookie retrieves a cookie value by name.
+func (ctx *context) GetCookie(name string) (string, error) {
+	ctx.parseCookies()
+	
+	if ctx.parsedCookies == nil {
+		return "", errors.New("cookie not found")
+	}
+	
+	cookie, exists := ctx.parsedCookies[name]
+	if !exists {
+		return "", errors.New("cookie not found")
+	}
+	
+	return cookie.Value, nil
+}
+
+// GetCookieAndClear retrieves a cookie value and immediately deletes it.
+func (ctx *context) GetCookieAndClear(name string) (string, error) {
+	value, err := ctx.GetCookie(name)
+	if err != nil {
+		return "", err
+	}
+	
+	// delete the cookie
+	err = ctx.DeleteCookie(name)
+	if err != nil {
+		// still return the value even if delete fails
+		return value, err
+	}
+	
+	return value, nil
+}
+
+// DeleteCookie removes a cookie by setting MaxAge=-1.
+func (ctx *context) DeleteCookie(name string) error {
+	// get the existing cookie to preserve path and domain
+	ctx.parseCookies()
+	
+	var path, domain string
+	if ctx.parsedCookies != nil {
+		if existing, ok := ctx.parsedCookies[name]; ok {
+			path = existing.Path
+			domain = existing.Domain
+		}
+	}
+	
+	// if no existing cookie found, use defaults
+	if path == "" {
+		path = "/"
+	}
+	
+	// create a deletion cookie
+	cookie := &Cookie{
+		Name:   name,
+		Value:  "",
+		Path:   path,
+		Domain: domain,
+		MaxAge: -1,
+	}
+	
+	return ctx.SetCookieWithOptions(cookie)
+}
+
+// HasCookie checks if a cookie exists without retrieving its value.
+func (ctx *context) HasCookie(name string) bool {
+	ctx.parseCookies()
+	
+	if ctx.parsedCookies == nil {
+		return false
+	}
+	
+	_, exists := ctx.parsedCookies[name]
+	return exists
 }

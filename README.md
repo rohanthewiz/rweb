@@ -213,11 +213,100 @@ v2.Get("/users", v2UsersHandler)
 
 Groups support all HTTP methods (`Get`, `Post`, `Put`, `Patch`, `Delete`, `Head`, `Options`, `Connect`, `Trace`) as well as `StaticFiles` and `Proxy`.
 
-## Tests
+## Cookies
 
+RWeb provides built-in cookie support with secure defaults and a simple API:
+
+### Basic Usage
+
+```go
+// Set a simple session cookie (expires when browser closes)
+s.Get("/set-cookie", func(ctx rweb.Context) error {
+    err := ctx.SetCookie("session_id", "abc123")
+    return ctx.WriteString("Cookie set!")
+})
+
+// Read a cookie value
+s.Get("/get-cookie", func(ctx rweb.Context) error {
+    value, err := ctx.GetCookie("session_id")
+    if err != nil {
+        return ctx.WriteString("No cookie found")
+    }
+    return ctx.WriteString("Session ID: " + value)
+})
+
+// Check if a cookie exists
+s.Get("/check-cookie", func(ctx rweb.Context) error {
+    if ctx.HasCookie("session_id") {
+        return ctx.WriteString("You have a session")
+    }
+    return ctx.WriteString("No session found")
+})
+
+// Delete a cookie
+s.Post("/logout", func(ctx rweb.Context) error {
+    ctx.DeleteCookie("session_id")
+    return ctx.WriteString("Logged out")
+})
+
+// Flash messages pattern (read once and delete)
+s.Post("/save", func(ctx rweb.Context) error {
+    // Set flash message
+    ctx.SetCookie("flash", "Settings saved successfully!")
+    return ctx.Redirect(302, "/settings")
+})
+
+s.Get("/settings", func(ctx rweb.Context) error {
+    // Get and immediately clear flash message
+    flash, _ := ctx.GetCookieAndClear("flash")
+    return ctx.WriteHTML("<h1>Settings</h1><p>" + flash + "</p>")
+})
 ```
 
+### Advanced Options
+
+```go
+// Set cookie with custom options
+s.Post("/remember-me", func(ctx rweb.Context) error {
+    cookie := &rweb.Cookie{
+        Name:     "remember_token",
+        Value:    "unique_token_here",
+        Path:     "/",
+        Domain:   "example.com",
+        Expires:  time.Now().Add(30 * 24 * time.Hour), // 30 days
+        MaxAge:   30 * 24 * 60 * 60,                    // 30 days in seconds
+        Secure:   true,                                  // HTTPS only
+        HttpOnly: true,                                  // No JavaScript access
+        SameSite: rweb.SameSiteStrictMode,              // CSRF protection
+    }
+    return ctx.SetCookieWithOptions(cookie)
+})
+
+// Configure server-wide cookie defaults
+s := rweb.NewServer(rweb.ServerOptions{
+    Address: ":8080",
+    Cookie: rweb.CookieConfig{
+        HttpOnly: true,                  // Default for all cookies
+        SameSite: rweb.SameSiteLaxMode, // Default CSRF protection
+        Path:     "/",                   // Default path
+        Secure:   true,                  // Force HTTPS (auto-detected with TLS)
+    },
+})
 ```
+
+### Cookie Security
+
+By default, RWeb cookies are secure:
+- `HttpOnly: true` - Prevents JavaScript access (XSS protection)
+- `SameSite: Lax` - CSRF protection
+- `Secure: true` - Automatically enabled when using TLS
+- `Path: "/"` - Available site-wide by default
+
+### Complete Example
+
+For a comprehensive example including session management, login/logout, flash messages, and remember me functionality, see [examples/cookies/main.go](examples/cookies/main.go).
+
+
 
 ## Benchmarks
 
@@ -232,5 +321,4 @@ Please see the [license documentation](https://akyoto.dev/license).
 
 ## Copyright
 
-© 2024 Eduard Urbach
-© 2024 Rohan Allison
+© 2025 Rohan Allison
