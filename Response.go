@@ -52,6 +52,11 @@ func (res *response) SetHeader(key string, value string) {
 	res.headers = append(res.headers, Header{Key: key, Value: value})
 }
 
+// AddHeader adds a header (allows multiple values for the same key, like Set-Cookie)
+func (res *response) AddHeader(key string, value string) {
+	res.headers = append(res.headers, Header{Key: key, Value: value})
+}
+
 // SetBody replaces the response body with the new contents.
 func (res *response) SetBody(body []byte) {
 	res.body = body

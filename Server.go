@@ -36,6 +36,8 @@ type ServerOptions struct {
 	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
 	// It should be a buffered chan (cap 1 is all that is needed), so there is no chance the server will hang
 	ReadyChan chan struct{}
+	// Cookie holds server-wide default settings for cookies
+	Cookie CookieConfig
 }
 
 type URLOptions struct {
@@ -82,6 +84,7 @@ func NewServer(options ...ServerOptions) *Server {
 		opts.Debug = options[0].Debug
 		opts.TLS = options[0].TLS
 		opts.Address = options[0].Address
+		opts.Cookie = options[0].Cookie
 
 		// Ready Channel
 		if options[0].ReadyChan != nil && cap(options[0].ReadyChan) < 1 && opts.Verbose {
