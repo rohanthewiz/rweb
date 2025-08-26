@@ -220,6 +220,29 @@ func (s *Server) SSEHandler(eventsChan <-chan any, eventType ...string) Handler 
 	}
 }
 
+// WebSocketHandler is a type that handles WebSocket connections
+// The handler receives a WebSocket connection for bidirectional communication
+type WebSocketHandler func(*WSConn) error
+
+// WebSocket registers a WebSocket handler for the given path
+// The handler function receives a WebSocket connection after successful upgrade
+// Usage: s.WebSocket("/ws", func(ws *WSConn) error { ... })
+func (s *Server) WebSocket(path string, handler WebSocketHandler) {
+	s.Get(path, func(ctx Context) error {
+		// Upgrade the connection to WebSocket
+		ws, err := ctx.UpgradeWebSocket()
+		if err != nil {
+			fmt.Printf("Failed to upgrade connection to WebSocket: %v\n", err)
+			// If upgrade fails, return error (will send appropriate HTTP error response)
+			return err
+		}
+
+		// Call the WebSocket handler with the upgraded connection
+		// The handler is responsible for managing the WebSocket communication
+		return handler(ws)
+	})
+}
+
 // Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
 // The pathPrefix can help us to distinguish between different proxy targets, from which we can strip any unneeded tokens (from the left)  in the handler
 // If there is any prefix left after stripping, it is added to the leftmost of the target URL.
@@ -537,6 +560,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 	var ctx = s.contextPool.Get().(*context) // get a new context from the pool
 
 	ctx.reader.Reset(conn) // prepare to read from the accepted connection
+	ctx.conn = conn        // store connection for WebSocket upgrades
 
 	defer conn.Close()
 
@@ -693,6 +717,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 			fmt.Printf("** ctx -> %#v\n\n", ctx)
 		}
 
+		// If the connection was upgraded to WebSocket, exit the HTTP loop
+		if ctx.wsUpgraded {
+			// The WebSocket handler is responsible for managing the connection now
+			return
+		}
+
 		// Clean up the context by zeroing some slices, etc
 		ctx.Clean()
 	}
@@ -736,7 +766,40 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	s.writeResponse(ctx, respWriter)
 }
 
+// writeWebSocketUpgradeResponse writes the WebSocket upgrade response immediately
+func (s *Server) writeWebSocketUpgradeResponse(ctx *context, respWriter io.Writer) {
+	tmp := bytes.Buffer{}
+
+	// HTTP1.1 header and status
+	tmp.WriteString(consts.HTTP1)
+	tmp.WriteString(consts.StrSingleSpace)
+	tmp.WriteString(strconv.Itoa(int(ctx.status)))
+	if st, ok := consts.StatusTextFromCode[int(ctx.status)]; ok {
+		tmp.WriteByte(consts.RuneSingleSpace)
+		tmp.WriteString(st)
+	}
+	tmp.WriteString(consts.CRLF)
+
+	// Write headers
+	for _, header := range ctx.response.headers {
+		tmp.WriteString(header.Key)
+		tmp.WriteString(consts.ColonSpace)
+		tmp.WriteString(header.Value)
+		tmp.WriteString(consts.CRLF)
+	}
+	tmp.WriteString(consts.CRLF)
+
+	// Write the upgrade response immediately
+	_, _ = respWriter.Write(tmp.Bytes())
+}
+
 func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
+	// Skip normal response writing if connection was upgraded to WebSocket
+	// The upgrade response has already been written in UpgradeWebSocket()
+	if ctx.wsUpgraded {
+		return
+	}
+
 	tmp := bytes.Buffer{}
 
 	// HTTP1.1 header and status

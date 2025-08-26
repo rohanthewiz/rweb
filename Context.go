@@ -2,7 +2,9 @@ package rweb
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"strings"
 )
 
 // Context is the interface for a request and its response.
@@ -114,6 +116,23 @@ type Context interface {
 	// HasCookie checks if a cookie exists without retrieving its value.
 	// Useful for conditional logic based on cookie presence.
 	HasCookie(name string) bool
+
+	// WebSocket operations for upgrading HTTP connections to WebSocket protocol.
+	// These methods enable real-time bidirectional communication.
+
+	// UpgradeWebSocket upgrades the HTTP connection to WebSocket protocol.
+	// Returns a WebSocket connection that can be used for bidirectional communication.
+	// The upgrade performs the WebSocket handshake and returns an error if it fails.
+	UpgradeWebSocket() (*WSConn, error)
+
+	// IsWebSocketUpgrade checks if the request is a WebSocket upgrade request.
+	// Returns true if the required WebSocket headers are present.
+	IsWebSocketUpgrade() bool
+
+	// GetConn returns the underlying network connection.
+	// This is useful for advanced operations like protocol upgrades.
+	// Use with caution as it bypasses the framework's abstractions.
+	GetConn() net.Conn
 }
 
 // context is the concrete implementation of the Context interface.
@@ -139,6 +158,12 @@ type context struct {
 	parsedCookies map[string]*Cookie
 	// Whether cookies have been parsed from the request
 	cookiesParsed bool
+	// Underlying network connection (for WebSocket upgrades)
+	conn net.Conn
+	// WebSocket connection (set after successful upgrade)
+	wsConn *WSConn
+	// Flag indicating if connection was upgraded to WebSocket
+	wsUpgraded bool
 }
 
 // Clean resets the context for reuse in the next request.
@@ -178,6 +203,11 @@ func (ctx *context) Clean() {
 			delete(ctx.parsedCookies, k)
 		}
 	}
+
+	// Reset WebSocket state
+	ctx.wsUpgraded = false
+	ctx.wsConn = nil
+	ctx.conn = nil
 }
 
 // SetSSE configures the context for Server-Sent Events streaming.
@@ -356,28 +386,28 @@ func (ctx *context) parseCookies() {
 	if ctx.cookiesParsed {
 		return
 	}
-	
+
 	ctx.cookiesParsed = true
 	cookieHeader := ctx.request.Header("Cookie")
 	if cookieHeader == "" {
 		return
 	}
-	
+
 	// parse cookies using net/http for compatibility
 	header := make(http.Header)
 	header.Add("Cookie", cookieHeader)
 	request := http.Request{Header: header}
-	
+
 	cookies := request.Cookies()
 	if len(cookies) == 0 {
 		return
 	}
-	
+
 	// lazy initialize the parsed cookies map
 	if ctx.parsedCookies == nil {
 		ctx.parsedCookies = make(map[string]*Cookie)
 	}
-	
+
 	// convert standard cookies to rweb cookies
 	for _, c := range cookies {
 		ctx.parsedCookies[c.Name] = newCookieFromStd(c)
@@ -401,10 +431,10 @@ func (ctx *context) SetCookieWithOptions(cookie *Cookie) error {
 	if cookie.Name == "" {
 		return errors.New("cookie name cannot be empty")
 	}
-	
+
 	// apply server defaults
 	useTLS := ctx.server != nil && ctx.server.options.TLS.UseTLS
-	
+
 	// apply defaults based on server configuration
 	if cookie.Path == "" {
 		if ctx.server != nil && ctx.server.options.Cookie.Path != "" {
@@ -413,12 +443,12 @@ func (ctx *context) SetCookieWithOptions(cookie *Cookie) error {
 			cookie.Path = "/"
 		}
 	}
-	
+
 	// only set secure if not already set and we're using TLS or config says so
 	if !cookie.Secure && ctx.server != nil && (ctx.server.options.Cookie.Secure || useTLS) {
 		cookie.Secure = true
 	}
-	
+
 	// set SameSite default only if not specified
 	if cookie.SameSite == 0 {
 		if ctx.server != nil && ctx.server.options.Cookie.SameSite != 0 {
@@ -427,36 +457,36 @@ func (ctx *context) SetCookieWithOptions(cookie *Cookie) error {
 			cookie.SameSite = SameSiteLaxMode
 		}
 	}
-	
+
 	// apply HttpOnly from server config if set
 	// NOTE: HttpOnly in server config is a preference, not a requirement
 	// Individual cookies can still explicitly set HttpOnly=false
-	
+
 	// samesite=none requires secure=true
 	if cookie.SameSite == SameSiteNoneMode && !cookie.Secure {
 		cookie.Secure = true
 	}
-	
+
 	// convert to standard cookie and add header (multiple Set-Cookie headers are allowed)
 	stdCookie := cookie.ToStdCookie()
 	ctx.response.AddHeader("Set-Cookie", stdCookie.String())
-	
+
 	return nil
 }
 
 // GetCookie retrieves a cookie value by name.
 func (ctx *context) GetCookie(name string) (string, error) {
 	ctx.parseCookies()
-	
+
 	if ctx.parsedCookies == nil {
 		return "", errors.New("cookie not found")
 	}
-	
+
 	cookie, exists := ctx.parsedCookies[name]
 	if !exists {
 		return "", errors.New("cookie not found")
 	}
-	
+
 	return cookie.Value, nil
 }
 
@@ -466,14 +496,14 @@ func (ctx *context) GetCookieAndClear(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	// delete the cookie
 	err = ctx.DeleteCookie(name)
 	if err != nil {
 		// still return the value even if delete fails
 		return value, err
 	}
-	
+
 	return value, nil
 }
 
@@ -481,7 +511,7 @@ func (ctx *context) GetCookieAndClear(name string) (string, error) {
 func (ctx *context) DeleteCookie(name string) error {
 	// get the existing cookie to preserve path and domain
 	ctx.parseCookies()
-	
+
 	var path, domain string
 	if ctx.parsedCookies != nil {
 		if existing, ok := ctx.parsedCookies[name]; ok {
@@ -489,12 +519,12 @@ func (ctx *context) DeleteCookie(name string) error {
 			domain = existing.Domain
 		}
 	}
-	
+
 	// if no existing cookie found, use defaults
 	if path == "" {
 		path = "/"
 	}
-	
+
 	// create a deletion cookie
 	cookie := &Cookie{
 		Name:   name,
@@ -503,18 +533,80 @@ func (ctx *context) DeleteCookie(name string) error {
 		Domain: domain,
 		MaxAge: -1,
 	}
-	
+
 	return ctx.SetCookieWithOptions(cookie)
 }
 
 // HasCookie checks if a cookie exists without retrieving its value.
 func (ctx *context) HasCookie(name string) bool {
 	ctx.parseCookies()
-	
+
 	if ctx.parsedCookies == nil {
 		return false
 	}
-	
+
 	_, exists := ctx.parsedCookies[name]
 	return exists
+}
+
+// UpgradeWebSocket upgrades the HTTP connection to WebSocket protocol.
+// This performs the WebSocket handshake and returns a WebSocket connection.
+func (ctx *context) UpgradeWebSocket() (*WSConn, error) {
+	// Check if already upgraded
+	if ctx.wsUpgraded {
+		return ctx.wsConn, nil
+	}
+
+	// Check if this is a WebSocket upgrade request
+	if !ctx.IsWebSocketUpgrade() {
+		return nil, ErrWebSocketNotUpgraded
+	}
+
+	// Perform the WebSocket handshake
+	if err := performHandshake(ctx); err != nil {
+		return nil, err
+	}
+
+	// Write the upgrade response immediately
+	// This must happen before any WebSocket frames are sent
+	ctx.server.writeWebSocketUpgradeResponse(ctx, ctx.conn)
+
+	// Create WebSocket connection
+	ctx.wsConn = NewWSConn(ctx.conn, true)
+	ctx.wsUpgraded = true
+
+	return ctx.wsConn, nil
+}
+
+// IsWebSocketUpgrade checks if the request is a WebSocket upgrade request.
+// It verifies the presence and values of required WebSocket headers.
+func (ctx *context) IsWebSocketUpgrade() bool {
+	// Check Upgrade header
+	if ctx.request.Header("Upgrade") != "websocket" {
+		return false
+	}
+
+	// Check Connection header (case-insensitive contains check)
+	connection := strings.ToLower(ctx.request.Header("Connection"))
+	if !strings.Contains(connection, "upgrade") {
+		return false
+	}
+
+	// Check for WebSocket key
+	if ctx.request.Header("Sec-WebSocket-Key") == "" {
+		return false
+	}
+
+	// Check WebSocket version
+	if ctx.request.Header("Sec-WebSocket-Version") != "13" {
+		return false
+	}
+
+	return true
+}
+
+// GetConn returns the underlying network connection.
+// This should be used with caution as it bypasses the framework's abstractions.
+func (ctx *context) GetConn() net.Conn {
+	return ctx.conn
 }

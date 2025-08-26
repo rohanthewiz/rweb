@@ -1,10 +1,12 @@
 module github.com/rohanthewiz/rweb
 
-go 1.22
+go 1.23.0
+
+toolchain go1.23.4
 
 require (
 	github.com/rohanthewiz/assert v0.1.2
 	github.com/rohanthewiz/element v0.5.4
 )
 
-require github.com/rohanthewiz/serr v1.2.6 // indirect
+require github.com/rohanthewiz/serr v1.2.16 // indirect
