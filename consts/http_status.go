@@ -1,6 +1,10 @@
 package consts
 
 const ( // HTTP status codes
+	// 1xx Informational
+	StatusSwitchingProtocols = 101
+
+	// 2xx Success
 	StatusOK              = 200
 	StatusCreated         = 201
 	StatusAccepted        = 202
@@ -41,6 +45,10 @@ const ( // HTTP status codes
 )
 
 var StatusTextFromCode = map[int]string{
+	// 1xx Informational
+	StatusSwitchingProtocols: "Switching Protocols",
+
+	// 2xx Success
 	StatusOK:              "OK",
 	StatusCreated:         "Created",
 	StatusAccepted:        "Accepted",
