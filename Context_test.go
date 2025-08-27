@@ -37,7 +37,7 @@ func TestError(t *testing.T) {
 	s := rweb.NewServer()
 
 	s.Get("/", func(ctx rweb.Context) error {
-		return ctx.Status(401).Error("Not logged in")
+		return ctx.SetStatus(401).Error("Not logged in")
 	})
 
 	response := s.Request(consts.MethodGet, "/", nil, nil)
@@ -50,7 +50,7 @@ func TestErrorMultiple(t *testing.T) {
 	s := rweb.NewServer()
 
 	s.Get("/", func(ctx rweb.Context) error {
-		return ctx.Status(401).Error("Not logged in", errors.New("Missing auth token"))
+		return ctx.SetStatus(401).Error("Not logged in", errors.New("Missing auth token"))
 	})
 
 	response := s.Request(consts.MethodGet, "/", nil, nil)

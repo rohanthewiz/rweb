@@ -90,7 +90,7 @@ s.Use(func(ctx rweb.Context) error {
 // Handler
 s.Get("/profile", func(ctx rweb.Context) error {
     if !ctx.Has("isLoggedIn") || !ctx.Get("isLoggedIn").(bool) {
-        return ctx.Status(401).WriteString("Unauthorized")
+        return ctx.SetStatus(401).WriteString("Unauthorized")
     }
     userId := ctx.Get("userId").(string)
     // ... handle request

@@ -35,16 +35,16 @@ func TestContextDataIntegration(t *testing.T) {
 	// Handler that uses the context data
 	s.Get("/protected", func(ctx rweb.Context) error {
 		if !ctx.Has("isAuthenticated") || !ctx.Get("isAuthenticated").(bool) {
-			return ctx.Status(401).WriteString("Unauthorized")
+			return ctx.SetStatus(401).WriteString("Unauthorized")
 		}
 
 		userId := ctx.Get("userId").(string)
 		session := ctx.Get("session").(map[string]string)
-		
+
 		return ctx.WriteJSON(map[string]any{
-			"userId":  userId,
-			"theme":   session["theme"],
-			"lang":    session["lang"],
+			"userId": userId,
+			"theme":  session["theme"],
+			"lang":   session["lang"],
 		})
 	})
 
@@ -64,18 +64,18 @@ func TestContextDataIntegration(t *testing.T) {
 
 func TestContextDataCleanup(t *testing.T) {
 	s := rweb.NewServer()
-	
+
 	requestCount := 0
-	
+
 	s.Get("/", func(ctx rweb.Context) error {
 		requestCount++
-		
+
 		// Verify context is clean on each request
 		assert.False(t, ctx.Has("previousData"))
-		
+
 		// Set some data for this request
 		ctx.Set("previousData", requestCount)
-		
+
 		return ctx.WriteString("OK")
 	})
 
@@ -84,6 +84,6 @@ func TestContextDataCleanup(t *testing.T) {
 		response := s.Request(consts.MethodGet, "/", nil, nil)
 		assert.Equal(t, response.Status(), 200)
 	}
-	
+
 	assert.Equal(t, requestCount, 3)
 }

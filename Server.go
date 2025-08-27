@@ -102,7 +102,7 @@ func NewServer(options ...ServerOptions) *Server {
 			log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
 
 			if ctx.Response().Status() == 0 || ctx.Response().Status() == consts.StatusOK {
-				ctx.Status(consts.StatusInternalServerError)
+				ctx.SetStatus(consts.StatusInternalServerError)
 			}
 			_ = ctx.WriteHTML(fmt.Sprintf("<h3>%d Internal Server Error</h3>\n<p>Error code: %s</p>",
 				ctx.Response().Status(), errCode))

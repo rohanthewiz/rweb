@@ -39,11 +39,11 @@ type Context interface {
 	Response() Response
 
 	// SetStatus sets the HTTP status code and returns the context
-	// for method chaining (e.g., ctx.Status(404).WriteString("Not Found")).
+	// for method chaining (e.g., ctx.SetStatus(404).WriteString("Not Found")).
 	SetStatus(int) Context
 
 	// Status sets the HTTP status code and returns the context
-	// for method chaining (e.g., ctx.Status(404).WriteString("Not Found")).
+	// for method chaining (e.g., ctx.SetStatus(404).WriteString("Not Found")).
 	// This method is deprecated. Use SetStatus instead as it is more consistent
 	// as Status() normally means "get status".
 	Status(int) Context

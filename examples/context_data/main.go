@@ -17,7 +17,7 @@ func main() {
 	s.Use(func(ctx rweb.Context) error {
 		// Simulate checking auth token from header
 		authHeader := ctx.Request().Header("Authorization")
-		
+
 		if authHeader == "Bearer admin-token" {
 			ctx.Set("isLoggedIn", true)
 			ctx.Set("userId", "123")
@@ -29,7 +29,7 @@ func main() {
 			ctx.Set("username", "john")
 			ctx.Set("isAdmin", false)
 		}
-		
+
 		return ctx.Next()
 	})
 
@@ -53,12 +53,12 @@ func main() {
 	// Protected route
 	s.Get("/profile", func(ctx rweb.Context) error {
 		if !ctx.Has("isLoggedIn") || !ctx.Get("isLoggedIn").(bool) {
-			return ctx.Status(401).WriteString("Unauthorized")
+			return ctx.SetStatus(401).WriteString("Unauthorized")
 		}
 
 		username := ctx.Get("username").(string)
 		userId := ctx.Get("userId").(string)
-		
+
 		return ctx.WriteJSON(map[string]any{
 			"userId":   userId,
 			"username": username,
@@ -69,7 +69,7 @@ func main() {
 	// Admin-only route
 	s.Get("/admin", func(ctx rweb.Context) error {
 		if !ctx.Has("isAdmin") || !ctx.Get("isAdmin").(bool) {
-			return ctx.Status(403).WriteString("Forbidden")
+			return ctx.SetStatus(403).WriteString("Forbidden")
 		}
 
 		return ctx.WriteString("Welcome to admin panel!")
@@ -78,7 +78,7 @@ func main() {
 	// Route that modifies context data
 	s.Post("/settings", func(ctx rweb.Context) error {
 		if !ctx.Has("isLoggedIn") || !ctx.Get("isLoggedIn").(bool) {
-			return ctx.Status(401).WriteString("Unauthorized")
+			return ctx.SetStatus(401).WriteString("Unauthorized")
 		}
 
 		// Update session data

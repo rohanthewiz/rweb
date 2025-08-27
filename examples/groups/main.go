@@ -100,7 +100,7 @@ func authMiddleware(ctx rweb.Context) error {
 	// Check for auth token in Authorization header
 	authHeader := ctx.Request().Header("Authorization")
 	if authHeader == "" {
-		return ctx.Status(401).WriteJSON(map[string]string{
+		return ctx.SetStatus(401).WriteJSON(map[string]string{
 			"error": "Authentication required",
 		})
 	}
@@ -108,7 +108,7 @@ func authMiddleware(ctx rweb.Context) error {
 	// Simple token validation for demo purposes
 	// Real implementation would decode/verify JWT or lookup session
 	if authHeader != "Bearer valid-token" {
-		return ctx.Status(401).WriteJSON(map[string]string{
+		return ctx.SetStatus(401).WriteJSON(map[string]string{
 			"error": "Invalid token",
 		})
 	}
@@ -130,7 +130,7 @@ func adminMiddleware(ctx rweb.Context) error {
 	// Check if user is admin (in real app, check from DB or JWT claims)
 	// For demo, we'll check a specific header
 	if ctx.Request().Header("X-Admin") != "true" {
-		return ctx.Status(403).WriteJSON(map[string]string{
+		return ctx.SetStatus(403).WriteJSON(map[string]string{
 			"error": "Admin access required",
 		})
 	}

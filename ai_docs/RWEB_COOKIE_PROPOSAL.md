@@ -121,7 +121,7 @@ func loginHandler(ctx rweb.Context) error {
 func protectedHandler(ctx rweb.Context) error {
     sessionKey, err := ctx.GetCookie("session_id")
     if err != nil {
-        return ctx.Status(401).WriteString("Not authenticated")
+        return ctx.SetStatus(401).WriteString("Not authenticated")
     }
     
     // Validate session in Redis...
@@ -219,7 +219,7 @@ Cookie operations should work seamlessly in middleware:
 ```go
 func authMiddleware(ctx rweb.Context) error {
     if !ctx.HasCookie("session_id") {
-        return ctx.Status(401).WriteString("Authentication required")
+        return ctx.SetStatus(401).WriteString("Authentication required")
     }
     
     sessionId, _ := ctx.GetCookie("session_id")
