@@ -38,8 +38,14 @@ type Context interface {
 	// response headers and other low-level operations.
 	Response() Response
 
+	// SetStatus sets the HTTP status code and returns the context
+	// for method chaining (e.g., ctx.Status(404).WriteString("Not Found")).
+	SetStatus(int) Context
+
 	// Status sets the HTTP status code and returns the context
 	// for method chaining (e.g., ctx.Status(404).WriteString("Not Found")).
+	// This method is deprecated. Use SetStatus instead as it is more consistent
+	// as Status() normally means "get status".
 	Status(int) Context
 
 	// Server returns the server instance, useful for accessing
@@ -291,6 +297,13 @@ func (ctx *context) Response() Response {
 // Status sets the HTTP status of the response
 // and returns the context for method chaining.
 func (ctx *context) Status(status int) Context {
+	ctx.response.SetStatus(status)
+	return ctx
+}
+
+// SetStatus sets the HTTP status of the response
+// and returns the context for method chaining.
+func (ctx *context) SetStatus(status int) Context {
 	ctx.response.SetStatus(status)
 	return ctx
 }
