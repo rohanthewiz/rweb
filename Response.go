@@ -119,5 +119,7 @@ func (res *response) SetSSEHeaders() {
 	res.SetHeader(consts.HeaderContentType, consts.MIMETextEventStream+"; charset=utf-8")
 	res.SetHeader(consts.HeaderCacheControl, consts.HeaderNoCache)
 	res.SetHeader(consts.HeaderConnection, consts.HeaderKeepAlive)
+	res.SetHeader(consts.HeaderContentEncoding, consts.MIMETextPlain) // no compression for now
+	res.SetHeader(consts.HeaderXAccelBuffering, "no")
 	res.SetHeader(consts.HeaderAccessControlAllowOrigin, "*")
 }

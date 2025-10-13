@@ -38,6 +38,11 @@ type ServerOptions struct {
 	ReadyChan chan struct{}
 	// Cookie holds server-wide default settings for cookies
 	Cookie CookieConfig
+	SSECfg SSECfg
+}
+
+type SSECfg struct {
+	SendConnectedEvent bool // Whether to send "Connected" event to clients
 }
 
 type URLOptions struct {
@@ -829,10 +834,10 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	}
 	tmp.WriteString(consts.CRLF)
 
-	// Write what we have so far to the response writer
+	// Write headers to the response writer
 	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
-		fmt.Println("Error writing response: ", err)
+		fmt.Println("Error writing headers: ", err)
 	}
 
 	// Body
@@ -848,6 +853,15 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 }
 
 func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
+	// Send a connect event -- not required per SSE standard, but may be helpful
+	if s.options.SSECfg.SendConnectedEvent {
+		_, err = fmt.Fprint(respWriter, "event: message\ndata: Connected\n\n")
+		if err != nil {
+			fmt.Println("Error writing connect message: ", err)
+			// carry on anyway
+		}
+	}
+
 	rw := bufio.NewWriter(respWriter)
 
 	if ctx.sseEventName == "" {

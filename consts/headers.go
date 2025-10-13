@@ -162,5 +162,6 @@ const (
 	HeaderXRequestedWith      = "X-Requested-With"
 	HeaderXRobotsTag          = "X-Robots-Tag"
 	HeaderXUACompatible       = "X-UA-Compatible"
+	HeaderXAccelBuffering     = "X-Accel-Buffering"
 	HeaderNoCache             = "no-cache"
 )
