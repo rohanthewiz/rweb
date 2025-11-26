@@ -72,12 +72,12 @@ func TestGroupMiddleware(t *testing.T) {
 	// Test request to verify middleware execution order
 	executionOrder = []string{} // Reset
 	response := s.Request("GET", "/api/test", nil, nil)
-	
+
 	// Verify response is correct
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "test response", string(response.Body()))
 	assert.Equal(t, "true", response.Header("X-API"))
-	
+
 	// Verify middleware executed in correct order:
 	// server -> group -> handler
 	assert.Equal(t, 3, len(executionOrder))
@@ -208,7 +208,7 @@ func TestGroupUseMethod(t *testing.T) {
 	var middlewareOrder []string
 
 	api := s.Group("/api")
-	
+
 	// Add middleware after group creation using Use() method
 	api.Use(func(ctx rweb.Context) error {
 		middlewareOrder = append(middlewareOrder, "first")
@@ -276,7 +276,7 @@ func TestGroupStaticFiles(t *testing.T) {
 
 	// Create a group for serving static assets
 	assets := s.Group("/assets")
-	
+
 	// Register static file handler - this would serve files from ./testdata
 	// when requests come to /assets/static/*
 	// The 0 parameter means no path segments are stripped
@@ -293,40 +293,61 @@ func TestGroupProxy(t *testing.T) {
 
 	// Create API group for proxying external services
 	api := s.Group("/api")
-	
+
 	// Set up proxy - this would forward /api/external/* to http://example.com
 	// The 0 parameter means no path segments are stripped before forwarding
 	err := api.Proxy("/external", "http://example.com", 0)
 	assert.Nil(t, err)
-	
+
 	// Note: Full testing would require a target server to proxy to
 }
 
 // TestGroupWithParameters verifies that route parameters work correctly
-// within groups, including nested parameters.
+// within groups, including consecutive parameters.
 func TestGroupWithParameters(t *testing.T) {
 	s := rweb.NewServer()
 
 	// Create users group for RESTful user endpoints
 	users := s.Group("/users")
-	
-	users.Get("/:id", func(ctx rweb.Context) error {
-		id := ctx.Request().Param("id")
-		return ctx.WriteText("user " + id)
+
+	// Consecutive parameters test: /users/:year/:title
+	users.Get("/:year/:title", func(ctx rweb.Context) error {
+		year := ctx.Request().Param("year")
+		title := ctx.Request().Param("title")
+		return ctx.WriteText("sermon " + year + " " + title)
 	})
 
-	users.Get("/:id/posts/:postId", func(ctx rweb.Context) error {
-		userID := ctx.Request().Param("id")
+	// Nested parameters with static segment: /users/:year/posts/:postId
+	// Note: Since this route shares the same first parameter position as /:year/:title,
+	// **we must use the same parameter name "year" for the first parameter**
+	users.Get("/:year/posts/:postId", func(ctx rweb.Context) error {
+		userID := ctx.Request().Param("year")
 		postID := ctx.Request().Param("postId")
 		return ctx.WriteText("user " + userID + " post " + postID)
 	})
 
-	// Test single parameter: /users/:id
-	response := s.Request("GET", "/users/123", nil, nil)
-	assert.Equal(t, http.StatusOK, response.Status())
-	assert.Equal(t, "user 123", string(response.Body()))
+	// TO BE NOTED: First Parameter cannot have different names - below does not work
+	/*	ser := s.Group("/sermons", authctlr.UseCustomContextRWeb)
+		// ser.Get("", sermon_controller.ListSermonsRWeb)
+		ser.Get("/:id", sermon_controller.ShowSermonRWeb) //"/:id" -> conflicts with "/:year/:filename") - the lookup algo needs words to determine direction
+		ser.Get("/:year/:filename", func(ctx rweb.Context) error {
+			year := ctx.Request().Param("year")
+			filename := ctx.Request().Param("filename")
+			fmt.Println("**->> year:", year, "filename:", filename)
+		})
+	*/
 
-	// Test multiple parameters: /users/:id/posts/:postId
+	// Test consecutive parameters: /users/:year/:title
+	response := s.Request("GET", "/users/2024/easter-message", nil, nil)
+	assert.Equal(t, http.StatusOK, response.Status())
+	assert.Equal(t, "sermon 2024 easter-message", string(response.Body()))
+
+	// Test with file extension in parameter
+	response = s.Request("GET", "/users/2020/1SAM8-08-16-15.MP3", nil, nil)
+	assert.Equal(t, http.StatusOK, response.Status())
+	assert.Equal(t, "sermon 2020 1SAM8-08-16-15.MP3", string(response.Body()))
+
+	// Test multiple parameters with static segment: /users/:id/posts/:postId
 	response = s.Request("GET", "/users/123/posts/456", nil, nil)
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "user 123 post 456", string(response.Body()))

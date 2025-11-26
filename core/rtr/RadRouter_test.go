@@ -281,3 +281,44 @@ func TestMemoryUsage(t *testing.T) {
 
 	t.Logf("%d bytes", result.MemBytes)
 }
+
+// TestConsecutiveParameters tests routes with consecutive parameter segments
+// without any static segments in between (e.g., /sermons/:year/:title)
+func TestConsecutiveParameters(t *testing.T) {
+	r := rtr.New[string]()
+
+	// Route with two consecutive parameters
+	r.Add(consts.MethodGet, "/sermons/:year/:title", "Sermon")
+
+	// Route with three consecutive parameters
+	r.Add(consts.MethodGet, "/path/:a/:b/:c", "Triple")
+
+	// Test two consecutive parameters
+	data, params := r.Lookup(consts.MethodGet, "/sermons/2024/easter-message")
+	assert.Equal(t, len(params), 2)
+	assert.Equal(t, params[0].Key, "year")
+	assert.Equal(t, params[0].Value, "2024")
+	assert.Equal(t, params[1].Key, "title")
+	assert.Equal(t, params[1].Value, "easter-message")
+	assert.Equal(t, data, "Sermon")
+
+	// Test another two consecutive parameters
+	data, params = r.Lookup(consts.MethodGet, "/sermons/2020/1SAM8-08-16-15.MP3")
+	assert.Equal(t, len(params), 2)
+	assert.Equal(t, params[0].Key, "year")
+	assert.Equal(t, params[0].Value, "2020")
+	assert.Equal(t, params[1].Key, "title")
+	assert.Equal(t, params[1].Value, "1SAM8-08-16-15.MP3")
+	assert.Equal(t, data, "Sermon")
+
+	// Test three consecutive parameters
+	data, params = r.Lookup(consts.MethodGet, "/path/first/second/third")
+	assert.Equal(t, len(params), 3)
+	assert.Equal(t, params[0].Key, "a")
+	assert.Equal(t, params[0].Value, "first")
+	assert.Equal(t, params[1].Key, "b")
+	assert.Equal(t, params[1].Value, "second")
+	assert.Equal(t, params[2].Key, "c")
+	assert.Equal(t, params[2].Value, "third")
+	assert.Equal(t, data, "Triple")
+}

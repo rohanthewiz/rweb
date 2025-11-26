@@ -82,6 +82,14 @@ func main() {
 		return ctx.WriteString("Hello " + ctx.Request().PathParam("name"))
 	})
 
+	// Consecutive parameters test
+	// Test with: curl http://localhost:8080/sermons/2024/easter-message
+	s.Get("/sermons/:year/:title", func(ctx rweb.Context) error {
+		year := ctx.Request().Param("year")
+		title := ctx.Request().Param("title")
+		return ctx.WriteString(fmt.Sprintf("Sermon - Year: %s, Title: %s\n", year, title))
+	})
+
 	// Static route takes precedence over parameterized route when exact match
 	// Test with: curl http://localhost:8080/greet/city
 	s.Get("/greet/city", func(ctx rweb.Context) error {
