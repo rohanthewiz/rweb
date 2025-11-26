@@ -53,3 +53,27 @@ func TestRequestParam(t *testing.T) {
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "my-article")
 }
+
+func TestUserAgent(t *testing.T) {
+	s := rweb.NewServer()
+
+	s.Get("/", func(ctx rweb.Context) error {
+		userAgent := ctx.UserAgent()
+		return ctx.WriteString(userAgent)
+	})
+
+	// Test with standard User-Agent header
+	response := s.Request(consts.MethodGet, "/", []rweb.Header{{"User-Agent", "Mozilla/5.0"}}, nil)
+	assert.Equal(t, response.Status(), 200)
+	assert.Equal(t, string(response.Body()), "Mozilla/5.0")
+
+	// Test with lowercase user-agent header (case-insensitive matching)
+	response2 := s.Request(consts.MethodGet, "/", []rweb.Header{{"user-agent", "Chrome/100.0"}}, nil)
+	assert.Equal(t, response2.Status(), 200)
+	assert.Equal(t, string(response2.Body()), "Chrome/100.0")
+
+	// Test with User-Agent header absent (should return empty string)
+	response3 := s.Request(consts.MethodGet, "/", []rweb.Header{}, nil)
+	assert.Equal(t, response3.Status(), 200)
+	assert.Equal(t, string(response3.Body()), "")
+}

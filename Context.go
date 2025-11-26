@@ -139,6 +139,10 @@ type Context interface {
 	// This is useful for advanced operations like protocol upgrades.
 	// Use with caution as it bypasses the framework's abstractions.
 	GetConn() net.Conn
+
+	// UserAgent returns the User-Agent header value from the request.
+	// Returns an empty string if the User-Agent header is not present.
+	UserAgent() string
 }
 
 // context is the concrete implementation of the Context interface.
@@ -622,4 +626,18 @@ func (ctx *context) IsWebSocketUpgrade() bool {
 // This should be used with caution as it bypasses the framework's abstractions.
 func (ctx *context) GetConn() net.Conn {
 	return ctx.conn
+}
+
+// UserAgent returns the User-Agent header value from the request.
+// This method performs case-insensitive header matching to handle variations
+// like "User-Agent", "user-agent", or "USER-AGENT".
+// Returns an empty string if the User-Agent header is not present.
+func (ctx *context) UserAgent() string {
+	// Perform case-insensitive search through headers
+	for _, header := range ctx.request.headers {
+		if strings.EqualFold(header.Key, "User-Agent") {
+			return header.Value
+		}
+	}
+	return ""
 }
