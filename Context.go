@@ -72,6 +72,14 @@ type Context interface {
 	// the text/plain content-type header.
 	WriteText(string) error
 
+	// WriteHTMLBytes writes HTML content from bytes to the response with
+	// the text/html content-type header.
+	WriteHTMLBytes([]byte) error
+
+	// WriteTextBytes writes plain text from bytes to the response with
+	// the text/plain content-type header.
+	WriteTextBytes([]byte) error
+
 	// SetSSE configures Server-Sent Events for real-time data streaming.
 	// Takes a channel for events and an event name for the SSE protocol.
 	SetSSE(<-chan any, string) error
@@ -351,6 +359,22 @@ func (ctx *context) WriteHTML(body string) error {
 // Use this for returning simple text responses.
 func (ctx *context) WriteText(body string) error {
 	_, er := ctx.response.WriteText(body)
+	return er
+}
+
+// WriteHTMLBytes writes HTML content from bytes to the response.
+// It automatically sets the Content-Type header to "text/html; charset=utf-8".
+// Use this for returning HTML from []byte to avoid string conversion overhead.
+func (ctx *context) WriteHTMLBytes(body []byte) error {
+	_, er := ctx.response.WriteHTMLBytes(body)
+	return er
+}
+
+// WriteTextBytes writes plain text from bytes to the response.
+// It automatically sets the Content-Type header to "text/plain; charset=utf-8".
+// Use this for returning text from []byte to avoid string conversion overhead.
+func (ctx *context) WriteTextBytes(body []byte) error {
+	_, er := ctx.response.WriteTextBytes(body)
 	return er
 }
 
