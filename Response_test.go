@@ -99,3 +99,29 @@ func TestResponseHeaderOverwrite(t *testing.T) {
 	assert.Equal(t, response.Header("Content-Type"), "text/html")
 	assert.Equal(t, string(response.Body()), "")
 }
+
+func TestWriteHTMLBytes(t *testing.T) {
+	s := rweb.NewServer()
+
+	s.Get("/", func(ctx rweb.Context) error {
+		return ctx.WriteHTMLBytes([]byte("<h1>Hello</h1>"))
+	})
+
+	response := s.Request(consts.MethodGet, "/", nil, nil)
+	assert.Equal(t, response.Status(), 200)
+	assert.Equal(t, response.Header("Content-Type"), consts.MIMEHTML)
+	assert.Equal(t, string(response.Body()), "<h1>Hello</h1>")
+}
+
+func TestWriteTextBytes(t *testing.T) {
+	s := rweb.NewServer()
+
+	s.Get("/", func(ctx rweb.Context) error {
+		return ctx.WriteTextBytes([]byte("Hello, World!"))
+	})
+
+	response := s.Request(consts.MethodGet, "/", nil, nil)
+	assert.Equal(t, response.Status(), 200)
+	assert.Equal(t, response.Header("Content-Type"), consts.MIMETextPlain)
+	assert.Equal(t, string(response.Body()), "Hello, World!")
+}

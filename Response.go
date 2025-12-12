@@ -109,10 +109,28 @@ func (res *response) WriteText(body string) (int, error) {
 	return res.writeResponse(body, consts.MIMETextPlain)
 }
 
+// WriteHTMLBytes writes the given HTML bytes to the response body
+// also setting the content type to text/html.
+func (res *response) WriteHTMLBytes(body []byte) (int, error) {
+	return res.writeResponseBytes(body, consts.MIMEHTML)
+}
+
+// WriteTextBytes writes the given text bytes to the response body
+// also setting the content type to text/plain.
+func (res *response) WriteTextBytes(body []byte) (int, error) {
+	return res.writeResponseBytes(body, consts.MIMETextPlain)
+}
+
 // writeResponse writes the given body and sets the content type header
 func (res *response) writeResponse(body string, contentType string) (int, error) {
 	res.SetHeader(consts.HeaderContentType, contentType)
 	return res.WriteString(body)
+}
+
+// writeResponseBytes writes the given body bytes and sets the content type header
+func (res *response) writeResponseBytes(body []byte, contentType string) (int, error) {
+	res.SetHeader(consts.HeaderContentType, contentType)
+	return res.Write(body)
 }
 
 func (res *response) SetSSEHeaders() {
