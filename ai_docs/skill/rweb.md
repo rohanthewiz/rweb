@@ -1,6 +1,8 @@
 ---
-name: rweb
+name: rweb-light-webserver-in-go
 description: Build HTTP web servers with the rweb Go framework. Covers routing, middleware, cookies, groups, SSE, WebSockets, static files, proxying, and file uploads.
+globs: ["**/*.go"]
+enabled: true
 ---
 
 # RWeb Framework Skill
@@ -75,9 +77,9 @@ s.Get("/orgs/:org/repos/:repo", func(ctx rweb.Context) error {
 })
 ```
 
-### Static vs Parameterized Routes
+### Fixed vs Parameterized Routes
 
-Static routes take precedence over parameterized ones when there's an exact match:
+Fixed routes take precedence over parameterized ones when there's an exact match:
 
 ```go
 s.Get("/greet/:name", handler)    // Matches /greet/john, /greet/mary
@@ -127,7 +129,7 @@ s.Use(func(ctx rweb.Context) error {
     return ctx.Next()
 })
 
-// Built-in request info logger
+// Built-in request info logger -- highly recommended
 s.Use(rweb.RequestInfo)
 ```
 
