@@ -1,13 +1,11 @@
 ---
-name: rweb-light-webserver-in-go
-description: Build HTTP web servers with the rweb Go framework. Covers routing, middleware, cookies, groups, SSE, WebSockets, static files, proxying, and file uploads.
-globs: ["**/*.go"]
-enabled: true
+name: rweb-light-go-webserver
+description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, WebSockets, static files, proxying, and file uploads.
 ---
 
 # RWeb Framework Skill
 
-RWeb is a high-performance, lightweight HTTP web server framework for Go featuring a custom radix tree router.
+RWeb is a high-performance, lightweight HTTP web server framework for Go featuring a custom radix tree router and practically zero third party dependencies.
 
 ## Getting Started
 
