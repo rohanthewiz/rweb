@@ -7,8 +7,8 @@ It is a fork of Akyoto's [web](http://git.akyoto.dev/go/web) with some additiona
 
 Thanks and credit to Akyoto, especially for the radix tree!
 
-## Caution
-- This is still in beta - use with caution.
+- **This library includes AI-agent documentation at `ai_oocs/SKILL.md`**.
+- Can we make this a standard, so there is **one, easily discoverable, source of truth for a library's SKILL**?
 
 ## Features
 
