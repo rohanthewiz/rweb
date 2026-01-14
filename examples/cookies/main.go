@@ -57,16 +57,16 @@ func (f flashMessage) Render(b *element.Builder) any {
 }
 
 func main() {
-	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":8080",
-		Verbose: true,
+	s := rweb.NewServer(
+		rweb.WithAddress(":8080"),
+		rweb.WithVerbose(),
 		// set server-wide cookie defaults
-		Cookie: rweb.CookieConfig{
+		rweb.WithCookie(rweb.CookieConfig{
 			HttpOnly: true,                 // prevent JavaScript access by default
 			SameSite: rweb.SameSiteLaxMode, // CSRF protection
 			Path:     "/",                  // cookies available site-wide
-		},
-	})
+		}),
+	)
 
 	// session middleware - runs for all routes
 	s.Use(sessionMiddleware)

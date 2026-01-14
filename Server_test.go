@@ -39,7 +39,7 @@ func TestPanic(t *testing.T) {
 func TestGet(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	const msg = "You pinged root"
 	s.Get("/", func(ctx rweb.Context) error {
@@ -51,8 +51,8 @@ func TestGet(t *testing.T) {
 
 		<-readyChan // wait for server
 
-		// Also testing localhost short URL here
-		resp, err := http.Get(fmt.Sprintf("http://:%s", s.GetListenPort()))
+		// Use full localhost URL for compatibility
+		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s", s.GetListenPort()))
 		assert.Nil(t, err)
 		assert.Equal(t, resp.Status, consts.OK200)
 
@@ -69,7 +69,7 @@ func TestGet(t *testing.T) {
 func TestNoRoutes(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -87,7 +87,7 @@ func TestNoRoutes(t *testing.T) {
 func TestPost(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	s.Post("/", func(ctx rweb.Context) error {
 		return ctx.WriteString(ctx.Request().GetPostValue("def"))
@@ -122,7 +122,7 @@ func TestPost(t *testing.T) {
 func TestMultipleRequests(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	const getMsg = "Get root"
 	s.Get("/", func(ctx rweb.Context) error {
@@ -200,7 +200,7 @@ func TestMultipleRequests(t *testing.T) {
 
 func TestBadRequest(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -224,7 +224,7 @@ func TestBadRequest(t *testing.T) {
 
 func TestBadRequestHeader(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hello")
@@ -253,7 +253,7 @@ func TestBadRequestHeader(t *testing.T) {
 
 func TestBadRequestMethod(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"}))
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -276,7 +276,7 @@ func TestBadRequestMethod(t *testing.T) {
 
 func TestBadRequestProtocol(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan}))
 
 	s.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hello")
@@ -304,7 +304,7 @@ func TestBadRequestProtocol(t *testing.T) {
 
 func TestEarlyClose(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan}))
 
 	go func() {
 		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
@@ -330,6 +330,6 @@ func TestUnavailablePort(t *testing.T) {
 	assert.Nil(t, err)
 	defer listener.Close()
 
-	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, Address: testPort})
+	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, Address: testPort}))
 	_ = s.Run()
 }

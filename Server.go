@@ -50,6 +50,116 @@ type URLOptions struct {
 	KeepTrailingSlashes bool
 }
 
+// ServerOption is a functional option for configuring a Server.
+type ServerOption func(*ServerOptions)
+
+// WithAddress sets the non-TLS listen address for the server.
+// When UseTLS is true, this is the address for the HTTP server which will redirect to the HTTPS server.
+// TCP addresses can be port only or address only in which case a high port is chosen.
+// Example: WithAddress(":8080")
+func WithAddress(addr string) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.Address = addr
+	}
+}
+
+// WithTLS configures TLS/HTTPS for the server.
+// Example: WithTLS(":8443", "cert.pem", "key.pem")
+func WithTLS(tlsAddr, certFile, keyFile string) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.TLS = TLSCfg{
+			UseTLS:   true,
+			TLSAddr:  tlsAddr,
+			CertFile: certFile,
+			KeyFile:  keyFile,
+		}
+	}
+}
+
+// WithTLSConfig sets a custom TLS configuration.
+func WithTLSConfig(cfg TLSCfg) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.TLS = cfg
+	}
+}
+
+// WithVerbose enables verbose logging for the server.
+func WithVerbose() ServerOption {
+	return func(opts *ServerOptions) {
+		opts.Verbose = true
+	}
+}
+
+// WithDebug enables debug mode for the server.
+func WithDebug() ServerOption {
+	return func(opts *ServerOptions) {
+		opts.Debug = true
+	}
+}
+
+// WithDebugRequestContext enables debug logging for request context.
+func WithDebugRequestContext() ServerOption {
+	return func(opts *ServerOptions) {
+		opts.DebugRequestContext = true
+	}
+}
+
+// WithKeepTrailingSlashes configures whether to keep trailing slashes in URL paths.
+func WithKeepTrailingSlashes() ServerOption {
+	return func(opts *ServerOptions) {
+		opts.URLOptions.KeepTrailingSlashes = true
+	}
+}
+
+// WithReadyChan sets a channel that will receive a signal when the server is ready to accept connections.
+// The channel should be buffered with capacity of at least 1 to avoid blocking.
+// Example: readyCh := make(chan struct{}, 1); WithReadyChan(readyCh)
+func WithReadyChan(ch chan struct{}) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.ReadyChan = ch
+	}
+}
+
+// WithCookie sets server-wide default cookie configuration.
+// Example: WithCookie(rweb.CookieConfig{HttpOnly: true, SameSite: rweb.SameSiteLaxMode})
+func WithCookie(cfg CookieConfig) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.Cookie = cfg
+	}
+}
+
+// WithSSEConfig sets the SSE (Server-Sent Events) configuration.
+func WithSSEConfig(cfg SSECfg) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.SSECfg = cfg
+	}
+}
+
+// WithSSESendConnectedEvent configures whether to send a "Connected" event to SSE clients.
+func WithSSESendConnectedEvent() ServerOption {
+	return func(opts *ServerOptions) {
+		opts.SSECfg.SendConnectedEvent = true
+	}
+}
+
+// WithOptions creates a ServerOption from a ServerOptions struct.
+// This is provided for backwards compatibility with the old configuration style.
+// Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
+func WithOptions(serverOpts ServerOptions) ServerOption {
+	return func(opts *ServerOptions) {
+		// Copy fields individually to avoid issues with channel copying
+		opts.Address = serverOpts.Address
+		opts.TLS = serverOpts.TLS
+		opts.Verbose = serverOpts.Verbose
+		opts.Debug = serverOpts.Debug
+		opts.DebugRequestContext = serverOpts.DebugRequestContext
+		opts.URLOptions = serverOpts.URLOptions
+		opts.ReadyChan = serverOpts.ReadyChan
+		opts.Cookie = serverOpts.Cookie
+		opts.SSECfg = serverOpts.SSECfg
+	}
+}
+
 // SSEvent when received from a source channel will set the Type into the event return to the client,
 // otherwise the Type will be set from whatever is in the context, set by SetupSSE() or SSEHandler()
 type SSEvent struct {
@@ -75,27 +185,28 @@ type Server struct {
 	listenAddr   string // the actual listen address used by net.Listen
 }
 
-// NewServer creates a new HTTP server.
-func NewServer(options ...ServerOptions) *Server {
+// NewServer creates a new HTTP server with functional options.
+// Example:
+//   s := rweb.NewServer(
+//       rweb.WithAddress(":8080"),
+//       rweb.WithVerbose(),
+//       rweb.WithTLS(":8443", "cert.pem", "key.pem"),
+//   )
+func NewServer(options ...ServerOption) *Server {
 	radRtr := &rtr.RadixRouter[Handler]{}
 	hashRtr := rtr.NewHashRouter[Handler]()
 
+	// Initialize with default options
 	opts := ServerOptions{}
-	if len(options) == 1 {
-		// Not sure why doing this  (opts := options[0]) instead of individually setting hangs
-		// likely something to do with copy of the ready channel
 
-		opts.Verbose = options[0].Verbose // Verbose
-		opts.Debug = options[0].Debug
-		opts.TLS = options[0].TLS
-		opts.Address = options[0].Address
-		opts.Cookie = options[0].Cookie
+	// Apply functional options
+	for _, option := range options {
+		option(&opts)
+	}
 
-		// Ready Channel
-		if options[0].ReadyChan != nil && cap(options[0].ReadyChan) < 1 && opts.Verbose {
-			fmt.Println("Ready channel capacity should be at least 1, or we may hang")
-		}
-		opts.ReadyChan = options[0].ReadyChan // Assign even if it is nil as we will do nil check on use
+	// Validate ready channel capacity
+	if opts.ReadyChan != nil && cap(opts.ReadyChan) < 1 && opts.Verbose {
+		fmt.Println("Ready channel capacity should be at least 1, or we may hang")
 	}
 
 	s := &Server{

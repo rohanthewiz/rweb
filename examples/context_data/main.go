@@ -8,10 +8,10 @@ import (
 )
 
 func main() {
-	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":8080",
-		Verbose: true,
-	})
+	s := rweb.NewServer(
+		rweb.WithAddress(":8080"),
+		rweb.WithVerbose(),
+	)
 
 	// Authentication middleware
 	s.Use(func(ctx rweb.Context) error {
