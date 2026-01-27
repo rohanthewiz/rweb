@@ -185,23 +185,27 @@ type Server struct {
 	listenAddr   string // the actual listen address used by net.Listen
 }
 
-// NewServer creates a new HTTP server with functional options.
+// NewServer creates a new HTTP server with an optional ServerOptions struct.
 // Example:
-//   s := rweb.NewServer(
-//       rweb.WithAddress(":8080"),
-//       rweb.WithVerbose(),
-//       rweb.WithTLS(":8443", "cert.pem", "key.pem"),
-//   )
-func NewServer(options ...ServerOption) *Server {
+//
+//	s := rweb.NewServer(rweb.ServerOptions{
+//	    Address: ":8080",
+//	    Verbose: true,
+//	})
+//
+// Or without options for defaults:
+//
+//	s := rweb.NewServer()
+func NewServer(options ...ServerOptions) *Server {
 	radRtr := &rtr.RadixRouter[Handler]{}
 	hashRtr := rtr.NewHashRouter[Handler]()
 
 	// Initialize with default options
 	opts := ServerOptions{}
 
-	// Apply functional options
-	for _, option := range options {
-		option(&opts)
+	// Apply options if provided
+	if len(options) > 0 {
+		opts = options[0]
 	}
 
 	// Validate ready channel capacity
@@ -257,6 +261,28 @@ func NewServer(options ...ServerOption) *Server {
 
 	s.contextPool.New = func() any { return s.newContext() }
 	return s
+}
+
+// NewServerWithOptions creates a new HTTP server with functional options.
+// This allows for a more flexible configuration style using option functions.
+// Example:
+//
+//	s := rweb.NewServerWithOptions(
+//	    rweb.WithAddress(":8080"),
+//	    rweb.WithVerbose(),
+//	    rweb.WithTLS(":8443", "cert.pem", "key.pem"),
+//	)
+func NewServerWithOptions(options ...ServerOption) *Server {
+	// Initialize with default options
+	opts := ServerOptions{}
+
+	// Apply functional options
+	for _, option := range options {
+		option(&opts)
+	}
+
+	// Use NewServer with the built options
+	return NewServer(opts)
 }
 
 func (s *Server) AddMethod(method string, path string, handler Handler) {

@@ -12,8 +12,8 @@ import (
 
 func main() {
 	// Create server with verbose logging to see request handling
-	// Using the new functional options pattern for cleaner configuration
-	s := rweb.NewServer(
+	// Using the functional options pattern for cleaner configuration
+	s := rweb.NewServerWithOptions(
 		rweb.WithAddress(":8080"),
 		rweb.WithVerbose(),
 	)

@@ -15,8 +15,8 @@ import (
 
 func main() {
 	// Create a new rweb server instance using functional options
-	// This is the new recommended configuration style
-	s := rweb.NewServer(
+	// NewServerWithOptions accepts functional options for flexible configuration
+	s := rweb.NewServerWithOptions(
 		// Listen on port 8080 on all network interfaces
 		// Use ":8080" format (not "localhost:8080") for Docker compatibility
 		rweb.WithAddress(":8080"),
