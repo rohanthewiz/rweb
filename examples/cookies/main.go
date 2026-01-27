@@ -57,7 +57,7 @@ func (f flashMessage) Render(b *element.Builder) any {
 }
 
 func main() {
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithAddress(":8080"),
 		rweb.WithVerbose(),
 		// set server-wide cookie defaults

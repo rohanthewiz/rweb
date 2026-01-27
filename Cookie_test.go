@@ -246,13 +246,13 @@ func TestCookieInMiddleware(t *testing.T) {
 
 // TestCookieDefaults tests server-wide cookie defaults
 func TestCookieDefaults(t *testing.T) {
-	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{
+	s := rweb.NewServer(rweb.ServerOptions{
 		Cookie: rweb.CookieConfig{
 			Path:     "/app",
 			HttpOnly: false,
 			SameSite: rweb.SameSiteStrictMode,
 		},
-	}))
+	})
 
 	s.Get("/default-cookie", func(ctx rweb.Context) error {
 		// explicitly set HttpOnly=false to respect server config
@@ -275,11 +275,11 @@ func TestCookieDefaults(t *testing.T) {
 // TestCookieWithTLS tests automatic Secure flag with TLS
 func TestCookieWithTLS(t *testing.T) {
 	// test that cookies are automatically secure when server has TLS
-	s := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{
+	s := rweb.NewServer(rweb.ServerOptions{
 		TLS: rweb.TLSCfg{
 			UseTLS: true,
 		},
-	}))
+	})
 
 	s.Get("/tls-cookie", func(ctx rweb.Context) error {
 		// even without explicitly setting Secure, it should be true with TLS

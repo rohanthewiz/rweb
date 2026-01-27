@@ -16,7 +16,7 @@ import (
 func TestWithAddress(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithAddress("localhost:"),
 		rweb.WithVerbose(),
 		rweb.WithReadyChan(readyChan),
@@ -48,7 +48,7 @@ func TestWithAddress(t *testing.T) {
 
 // TestWithDebug tests the WithDebug functional option
 func TestWithDebug(t *testing.T) {
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithDebug(),
 		rweb.WithVerbose(),
 	)
@@ -69,7 +69,7 @@ func TestWithCookie(t *testing.T) {
 		Path:     "/",
 	}
 
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithCookie(cookieConfig),
 	)
 
@@ -84,7 +84,7 @@ func TestWithCookie(t *testing.T) {
 
 // TestWithKeepTrailingSlashes tests the WithKeepTrailingSlashes functional option
 func TestWithKeepTrailingSlashes(t *testing.T) {
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithKeepTrailingSlashes(),
 	)
 
@@ -98,7 +98,7 @@ func TestWithKeepTrailingSlashes(t *testing.T) {
 
 // TestWithSSESendConnectedEvent tests the WithSSESendConnectedEvent functional option
 func TestWithSSESendConnectedEvent(t *testing.T) {
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithSSESendConnectedEvent(),
 	)
 
@@ -114,7 +114,7 @@ func TestWithSSESendConnectedEvent(t *testing.T) {
 func TestMultipleOptions(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithAddress(":0"),
 		rweb.WithVerbose(),
 		rweb.WithDebug(),
@@ -140,15 +140,13 @@ func TestMultipleOptions(t *testing.T) {
 func TestWithOptions(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 
-	// Old style configuration wrapped in WithOptions
-	s := rweb.NewServer(
-		rweb.WithOptions(rweb.ServerOptions{
-			Address:   "localhost:",
-			Verbose:   true,
-			Debug:     true,
-			ReadyChan: readyChan,
-		}),
-	)
+	// Direct struct configuration (restored original API)
+	s := rweb.NewServer(rweb.ServerOptions{
+		Address:   "localhost:",
+		Verbose:   true,
+		Debug:     true,
+		ReadyChan: readyChan,
+	})
 
 	const msg = "Backwards compatibility works"
 	s.Get("/", func(ctx rweb.Context) error {
