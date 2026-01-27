@@ -1,6 +1,10 @@
 module admin_svr
 
-go 1.23
+go 1.23.0
+
+toolchain go1.23.4
+
+replace github.com/rohanthewiz/rweb => ../..
 
 require github.com/rohanthewiz/rweb v0.1.19-0.20250724033211-0709f777d0de
 
