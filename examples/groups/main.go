@@ -12,10 +12,11 @@ import (
 
 func main() {
 	// Create server with verbose logging to see request handling
-	s := rweb.NewServer(rweb.ServerOptions{
-		Address: ":8080",
-		Verbose: true,
-	})
+	// Using the new functional options pattern for cleaner configuration
+	s := rweb.NewServer(
+		rweb.WithAddress(":8080"),
+		rweb.WithVerbose(),
+	)
 
 	// Global middleware - applies to all routes in the server
 	s.Use(rweb.RequestInfo) // Logs all requests

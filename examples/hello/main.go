@@ -14,25 +14,23 @@ import (
 )
 
 func main() {
-	// Create a new rweb server instance with configuration options
-	s := rweb.NewServer(rweb.ServerOptions{
+	// Create a new rweb server instance using functional options
+	// This is the new recommended configuration style
+	s := rweb.NewServer(
 		// Listen on port 8080 on all network interfaces
 		// Use ":8080" format (not "localhost:8080") for Docker compatibility
-		Address: ":8080",
+		rweb.WithAddress(":8080"),
 
 		// Enable verbose logging to see detailed request/response information
-		Verbose: true,
+		rweb.WithVerbose(),
 
 		// Debug mode is disabled (would show additional debugging information)
-		Debug: false,
+		// rweb.WithDebug(),
 
 		// TLS configuration (currently disabled, but shows how to configure HTTPS)
-		TLS: rweb.TLSCfg{
-			UseTLS:   false,                 // Set to true to enable HTTPS
-			KeyFile:  "certs/localhost.key", // Path to TLS private key
-			CertFile: "certs/localhost.crt", // Path to TLS certificate
-		},
-	})
+		// Uncomment to enable TLS:
+		// rweb.WithTLS(":8443", "certs/localhost.crt", "certs/localhost.key"),
+	)
 
 	// Middleware 1: Request logging middleware
 	// This middleware logs each request's method, path, response status, and duration

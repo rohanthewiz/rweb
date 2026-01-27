@@ -18,7 +18,7 @@ import (
 func TestProxy(t *testing.T) {
 	// US Server
 	usTgtReadyChan := make(chan struct{}, 1)
-	usTgt := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: usTgtReadyChan, Address: "localhost:"})
+	usTgt := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: usTgtReadyChan, Address: "localhost:"}))
 	usTgt.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from US server root")
 	})
@@ -39,7 +39,7 @@ func TestProxy(t *testing.T) {
 
 	// Euro Server
 	euTgtReadyChan := make(chan struct{}, 1)
-	euTgt := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: euTgtReadyChan, Address: "localhost:"})
+	euTgt := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: euTgtReadyChan, Address: "localhost:"}))
 	euTgt.Post("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from EU server root")
 	})
@@ -66,7 +66,7 @@ func TestProxy(t *testing.T) {
 
 	// Proxy
 	pxyReadyChan := make(chan struct{}, 1)
-	pxy := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: pxyReadyChan, Address: "localhost:"})
+	pxy := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: pxyReadyChan, Address: "localhost:"}))
 
 	pxy.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from proxy server root")
@@ -170,9 +170,9 @@ func TestProxy(t *testing.T) {
 func TestProxySkewed(t *testing.T) {
 	// Init US Server
 	usTgtReadyChan := make(chan struct{}, 1)
-	usTgt := rweb.NewServer(rweb.ServerOptions{
+	usTgt := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{
 		Verbose: true, ReadyChan: usTgtReadyChan, Address: "localhost:", // run with high-order port
-	})
+	}))
 	usTgt.Get("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from US server root")
 	})
@@ -190,7 +190,7 @@ func TestProxySkewed(t *testing.T) {
 
 	// Init Euro Server
 	euTgtReadyChan := make(chan struct{}, 1)
-	euTgt := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: euTgtReadyChan, Address: "localhost:"})
+	euTgt := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: euTgtReadyChan, Address: "localhost:"}))
 	euTgt.Post("/", func(ctx rweb.Context) error {
 		return ctx.WriteString("Hi from EU server root")
 	})
@@ -217,7 +217,7 @@ func TestProxySkewed(t *testing.T) {
 
 	// Init Proxy
 	pxyReadyChan := make(chan struct{}, 1)
-	pxy := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: pxyReadyChan, Address: "localhost:"})
+	pxy := rweb.NewServer(rweb.WithOptions(rweb.ServerOptions{Verbose: true, ReadyChan: pxyReadyChan, Address: "localhost:"}))
 
 	// e.g. curl http://localhost:8080/via-proxy/us/status
 	// 		- This will proxy to http://localhost:8081/usa/proxy-incoming/status
