@@ -15,8 +15,15 @@ func main() {
 
 	// Authentication middleware
 	s.Use(func(ctx rweb.Context) error {
+		// Debug - show me all headers
+		// for _, h := range ctx.Request().Headers() {
+		// 	fmt.Printf("Header: %s = %v\n", h.Key, h.Value)
+		// }
+
 		// Simulate checking auth token from header
 		authHeader := ctx.Request().Header("Authorization")
+
+		fmt.Println("**-> authHeader", authHeader)
 
 		if authHeader == "Bearer admin-token" {
 			ctx.Set("isLoggedIn", true)

@@ -40,6 +40,36 @@ func TestRequestHeader(t *testing.T) {
 	assert.Equal(t, string(response.Body()), "*/*")
 }
 
+func TestRequestHeaderLowercaseFallback(t *testing.T) {
+	s := rweb.NewServer()
+
+	s.Get("/", func(ctx rweb.Context) error {
+		// Test case-sensitive match (priority)
+		contentType := ctx.Request().Header("Content-Type")
+		// Test lowercase fallback when exact match not found
+		accept := ctx.Request().Header("Accept")
+		return ctx.WriteString(contentType + "|" + accept)
+	})
+
+	// Headers stored in lowercase - should still match when queried with mixed case
+	response := s.Request(consts.MethodGet, "/", []rweb.Header{
+		{"content-type", "application/json"},
+		{"accept", "text/html"},
+	}, nil)
+	assert.Equal(t, response.Status(), 200)
+	assert.Equal(t, string(response.Body()), "application/json|text/html")
+
+	// Test exact case-sensitive match takes priority
+	s2 := rweb.NewServer()
+	s2.Get("/", func(ctx rweb.Context) error {
+		return ctx.WriteString(ctx.Request().Header("X-Custom"))
+	})
+
+	response2 := s2.Request(consts.MethodGet, "/", []rweb.Header{{"X-Custom", "exact"}}, nil)
+	assert.Equal(t, response2.Status(), 200)
+	assert.Equal(t, string(response2.Body()), "exact")
+}
+
 func TestRequestParam(t *testing.T) {
 	s := rweb.NewServer()
 

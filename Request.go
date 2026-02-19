@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"mime"
 	"mime/multipart"
+	"strings"
 
 	"github.com/rohanthewiz/rweb/consts"
 	"github.com/rohanthewiz/rweb/core/rtr"
@@ -16,6 +17,7 @@ type ItfRequest interface {
 	// Headers returns the request headers.
 	Headers() []Header
 	// Header returns the header value for the given key.
+	// Performs case-sensitive match first, then falls back to lowercase match if not found.
 	Header(string) string
 	Host() string
 	// Method returns the HTTP method of the request
@@ -67,16 +69,22 @@ type request struct {
 }
 
 // Header returns the header value for the given key.
+// Performs case-sensitive match first (priority), then falls back to lowercase match if not found.
 func (req *request) Header(key string) string {
 	for _, header := range req.headers {
+		// Give priority to case-sensitive match
 		if header.Key == key {
+			return header.Value
+		}
+		// Otherwise, try lowercase match
+		if header.Key == strings.ToLower(key) {
 			return header.Value
 		}
 	}
 	return ""
 }
 
-// Headers returns the request headers.
+// Headers returns all the request headers.
 func (req *request) Headers() []Header {
 	return req.headers
 }
