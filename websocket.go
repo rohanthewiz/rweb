@@ -54,10 +54,11 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // Default WebSocket configuration values
 const (
-	defaultMaxMessageSize = 1024 * 1024 * 10 // 10MB
-	defaultPingInterval   = 30 * time.Second
-	defaultPongTimeout    = 10 * time.Second
-	defaultWriteTimeout   = 10 * time.Second
+	defaultMaxMessageSize  = 1024 * 1024 * 10 // 10MB
+	defaultPingInterval    = 30 * time.Second
+	defaultPongTimeout     = 10 * time.Second
+	defaultWriteTimeout    = 10 * time.Second
+	closeHandshakeTimeout  = 2 * time.Second  // max wait for peer's close frame response
 )
 
 // WSMessage represents a WebSocket message
@@ -96,6 +97,11 @@ type WSConn struct {
 	readDeadline   time.Time
 	writeDeadline  time.Time
 
+	// done is closed when the connection shuts down, enabling goroutines
+	// (e.g., ping tickers) to detect closure and exit cleanly.
+	done     chan struct{}
+	doneOnce sync.Once
+
 	// for managing fragmented messages
 	fragmentedMessage []byte
 	fragmentedType    MessageType
@@ -109,6 +115,7 @@ func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 		isServer:       isServer,
 		maxMessageSize: defaultMaxMessageSize,
 		closeHandlers:  make([]func(int, string), 0),
+		done:           make(chan struct{}),
 	}
 
 	// Set default ping handler that responds with pong
@@ -174,26 +181,40 @@ func performHandshake(ctx *context) error {
 // It handles fragmentation and returns the complete message
 func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 	for {
-		frameType, data, err := ws.readFrame()
+		frameType, fin, data, err := ws.readFrame()
 		if err != nil {
 			return nil, err
 		}
 
 		switch frameType {
 		case wsText, wsBinary:
-			// Handle data frames
-			return &WSMessage{
-				Type: MessageType(frameType),
-				Data: data,
-			}, nil
+			if fin {
+				// Unfragmented message — the common fast path
+				return &WSMessage{
+					Type: MessageType(frameType),
+					Data: data,
+				}, nil
+			}
+			// Start of a fragmented message (FIN=0 on first frame per RFC 6455 §5.4)
+			ws.fragmentedType = MessageType(frameType)
+			ws.fragmentedMessage = append(ws.fragmentedMessage[:0], data...)
 
 		case wsContinuation:
-			// Handle fragmented messages
+			// Continuation without a preceding text/binary start frame is a protocol error
 			if ws.fragmentedMessage == nil {
 				return nil, errors.New("unexpected continuation frame")
 			}
 			ws.fragmentedMessage = append(ws.fragmentedMessage, data...)
-			// TODO: Check for FIN flag to see if message is complete
+			if fin {
+				// Final fragment — assemble and return the complete message
+				msg := &WSMessage{
+					Type: ws.fragmentedType,
+					Data: ws.fragmentedMessage,
+				}
+				ws.fragmentedMessage = nil
+				return msg, nil
+			}
+			// More fragments expected — keep reading
 
 		case wsClose:
 			// Handle close frame
@@ -244,17 +265,17 @@ func (ws *WSConn) WriteMessage(messageType MessageType, data []byte) error {
 	return ws.writeFrame(int(messageType), data)
 }
 
-// readFrame reads a single WebSocket frame
-func (ws *WSConn) readFrame() (opcode int, payload []byte, err error) {
+// readFrame reads a single WebSocket frame, returning the opcode, FIN bit, and payload.
+// The FIN bit indicates whether this is the final fragment of a message (RFC 6455 §5.2).
+func (ws *WSConn) readFrame() (opcode int, fin bool, payload []byte, err error) {
 	// Read first 2 bytes
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(ws.conn, header); err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
 
-	// Parse first byte
-	fin := (header[0] & 0x80) != 0
-	_ = fin // TODO: Handle fragmentation properly
+	// Parse first byte — FIN (bit 0) and opcode (bits 4-7)
+	fin = (header[0] & 0x80) != 0
 	opcode = int(header[0] & 0x0F)
 
 	// Parse second byte
@@ -263,30 +284,30 @@ func (ws *WSConn) readFrame() (opcode int, payload []byte, err error) {
 
 	// Client frames must be masked, server frames must not be masked
 	if ws.isServer && !masked {
-		return 0, nil, ErrWebSocketBadMask
+		return 0, false, nil, ErrWebSocketBadMask
 	}
 	if !ws.isServer && masked {
-		return 0, nil, ErrWebSocketBadMask
+		return 0, false, nil, ErrWebSocketBadMask
 	}
 
 	// Read extended payload length if needed
 	if payloadLen == 126 {
 		extLen := make([]byte, 2)
 		if _, err := io.ReadFull(ws.conn, extLen); err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint16(extLen))
 	} else if payloadLen == 127 {
 		extLen := make([]byte, 8)
 		if _, err := io.ReadFull(ws.conn, extLen); err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint64(extLen))
 	}
 
 	// Check payload size
 	if payloadLen > ws.maxMessageSize {
-		return 0, nil, ErrWebSocketPayloadTooLarge
+		return 0, false, nil, ErrWebSocketPayloadTooLarge
 	}
 
 	// Read mask key if present
@@ -294,14 +315,14 @@ func (ws *WSConn) readFrame() (opcode int, payload []byte, err error) {
 	if masked {
 		maskKey = make([]byte, 4)
 		if _, err := io.ReadFull(ws.conn, maskKey); err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 	}
 
 	// Read payload
 	payload = make([]byte, payloadLen)
 	if _, err := io.ReadFull(ws.conn, payload); err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
 
 	// Unmask payload if needed
@@ -311,7 +332,7 @@ func (ws *WSConn) readFrame() (opcode int, payload []byte, err error) {
 		}
 	}
 
-	return opcode, payload, nil
+	return opcode, fin, payload, nil
 }
 
 // writeFrame writes a WebSocket frame
@@ -402,13 +423,18 @@ func (ws *WSConn) Close(code int, reason string) error {
 	if err := ws.writeFrame(wsClose, data); err != nil {
 		// Even if writing the close frame fails, mark as closed
 		ws.closed = true
+		ws.doneOnce.Do(func() { close(ws.done) })
 		return ws.conn.Close()
 	}
 
 	ws.closed = true
+	ws.doneOnce.Do(func() { close(ws.done) })
 
-	// Give the other side a chance to send their close frame
-	time.Sleep(time.Second)
+	// Wait for the peer's close frame response using a read deadline
+	// instead of a blind sleep. Returns immediately when the frame arrives,
+	// or after closeHandshakeTimeout if the peer is unresponsive.
+	ws.conn.SetReadDeadline(time.Now().Add(closeHandshakeTimeout))
+	ws.readFrame() // best-effort read; ignore errors (timeout or otherwise)
 
 	return ws.conn.Close()
 }
@@ -429,6 +455,7 @@ func (ws *WSConn) handleClose(code int, text string) {
 
 	// Send close response
 	ws.closed = true
+	ws.doneOnce.Do(func() { close(ws.done) })
 	data := make([]byte, 2)
 	binary.BigEndian.PutUint16(data, uint16(code))
 	ws.writeFrame(wsClose, data)
@@ -499,4 +526,23 @@ func (ws *WSConn) LocalAddr() net.Addr {
 // RemoteAddr returns the remote network address
 func (ws *WSConn) RemoteAddr() net.Addr {
 	return ws.conn.RemoteAddr()
+}
+
+// Done returns a channel that is closed when the WebSocket connection shuts down.
+// Use this to stop goroutines tied to the connection (e.g., ping tickers):
+//
+//	go func() {
+//	    ticker := time.NewTicker(20 * time.Second)
+//	    defer ticker.Stop()
+//	    for {
+//	        select {
+//	        case <-ws.Done():
+//	            return
+//	        case <-ticker.C:
+//	            ws.WritePing([]byte("ping"))
+//	        }
+//	    }
+//	}()
+func (ws *WSConn) Done() <-chan struct{} {
+	return ws.done
 }

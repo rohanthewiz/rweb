@@ -1,4 +1,4 @@
-module websocket-example
+module sse-hub-example
 
 go 1.23.0
 

@@ -1,6 +1,6 @@
 ---
 name: rweb-light-go-webserver
-description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, WebSockets, static files, proxying, and file uploads.
+description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, SSE Hub (multi-client broadcast), WebSockets, static files, proxying, and file uploads.
 ---
 
 # RWeb Framework Skill
@@ -282,6 +282,10 @@ s.Post("/upload", func(ctx rweb.Context) error {
 
 ## Server-Sent Events (SSE)
 
+### Single-Channel SSE
+
+For simple cases where one channel feeds one endpoint:
+
 ```go
 // Create event channel
 eventsChan := make(chan any, 100)
@@ -299,16 +303,121 @@ eventsChan <- "event data"
 eventsChan <- map[string]string{"type": "update", "data": "value"}
 ```
 
+### SSE Hub (Multi-Client Broadcast)
+
+SSEHub provides a fan-out pattern for broadcasting events to all connected clients.
+Each client gets its own buffered channel, and the hub manages registration and
+cleanup automatically. The hub is standalone — not tied to a specific server or route.
+
+```go
+// Create the hub — can be shared across routes
+hub := rweb.NewSSEHub()
+
+// Register the SSE endpoint. hub.Handler() manages per-client lifecycle:
+// creates a buffered channel, registers it, and auto-unregisters on disconnect.
+s.Get("/logs/stream", hub.Handler(s))
+
+// Broadcast from anywhere — e.g., a log ingestion goroutine.
+// Broadcast() JSON-wraps {type, data} and sends as a "message" SSE event,
+// so JS clients use a single onmessage handler + JSON.parse().
+hub.Broadcast(rweb.SSEvent{
+    Type: "log",
+    Data: "2026-02-21 10:05:32 [INFO] User logged in",
+})
+
+// BroadcastAny is a convenience wrapper
+hub.BroadcastAny("error", "disk usage at 92%")
+
+// BroadcastRaw sends the SSEvent as-is without JSON wrapping —
+// use when JS clients listen with addEventListener on specific event names
+hub.BroadcastRaw(rweb.SSEvent{Type: "heartbeat", Data: "ok"})
+
+// Check connected client count (useful for status endpoints)
+count := hub.ClientCount()
+```
+
+#### Log Stream Example
+
+A real-time log viewer that tails application logs to all connected browsers:
+
+```go
+func main() {
+    s := rweb.NewServer(
+        rweb.WithAddress(":8080"),
+        rweb.WithVerbose(),
+    )
+
+    logHub := rweb.NewSSEHub()
+
+    // SSE endpoint — clients connect here to receive log events
+    s.Get("/logs/stream", logHub.Handler(s))
+
+    // Status endpoint
+    s.Get("/logs/viewers", func(ctx rweb.Context) error {
+        return ctx.WriteJSON(map[string]any{
+            "viewers": logHub.ClientCount(),
+        })
+    })
+
+    // Simulate log ingestion — in production this would tail a file or consume a queue
+    go func() {
+        entries := []string{
+            "[INFO] Server started on :8080",
+            "[INFO] Connected to database",
+            "[WARN] Slow query detected (1.2s)",
+            "[ERROR] Failed to send email: timeout",
+            "[INFO] User alice logged in",
+        }
+
+        i := 0
+        for range time.NewTicker(2 * time.Second).C {
+            logHub.Broadcast(rweb.SSEvent{
+                Type: "log",
+                Data: fmt.Sprintf("%s %s", time.Now().Format("15:04:05"), entries[i%len(entries)]),
+            })
+            i++
+        }
+    }()
+
+    log.Fatal(s.Run())
+}
+```
+
+#### JS Client for SSE Hub
+
+Since `Broadcast()` sends JSON-wrapped data under the standard "message" event type,
+JS clients only need `onmessage` — no `addEventListener` required:
+
+```js
+const evtSource = new EventSource('/logs/stream');
+
+evtSource.onmessage = function(e) {
+    // payload is JSON: {"type": "log", "data": "10:05:32 [INFO] User logged in"}
+    const payload = JSON.parse(e.data);
+    console.log('[' + payload.type + ']', payload.data);
+};
+
+evtSource.onerror = function() {
+    console.log('Disconnected — EventSource will auto-reconnect');
+};
+```
+
 ## WebSockets
+
+### Registration
+
+Use `s.WebSocket()` to register a handler that receives an upgraded `*rweb.WSConn`.
+The framework handles the HTTP upgrade handshake automatically.
 
 ```go
 s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
     defer ws.Close(1000, "Closing")
+    fmt.Printf("Client connected from %s\n", ws.RemoteAddr())
 
-    // Send message
+    // Send a welcome message
     ws.WriteMessage(rweb.TextMessage, []byte("Welcome"))
 
-    // Read loop
+    // Read loop — echo messages back to the client
     for {
         msg, err := ws.ReadMessage()
         if err != nil {
@@ -326,12 +435,148 @@ s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
     }
     return nil
 })
+```
 
-// Ping/Pong for keepalive
+### Message Types
+
+```go
+rweb.TextMessage   // UTF-8 text data
+rweb.BinaryMessage // Binary data
+rweb.CloseMessage  // Connection close
+rweb.PingMessage   // Ping control frame
+rweb.PongMessage   // Pong control frame
+```
+
+### WSConn API Reference
+
+```go
+// Reading and writing
+msg, err := ws.ReadMessage()              // Returns *WSMessage{Type, Data}
+ws.WriteMessage(rweb.TextMessage, data)   // Send a message
+
+// Connection lifecycle
+ws.Close(1000, "reason")                  // Send close frame and disconnect
+ws.OnClose(func(code int, text string) {  // Register close handler
+    fmt.Printf("Closed: %d %s\n", code, text)
+})
+
+// Ping/Pong keepalive — prevents proxies from dropping idle connections
+ws.WritePing([]byte("ping"))
 ws.SetPongHandler(func(data []byte) error {
     return nil
 })
-ws.WritePing([]byte("ping"))
+ws.SetPingHandler(func(data []byte) error {
+    return nil // Default handler auto-replies with pong
+})
+
+// Shutdown signal — closed when the connection is closed from either side.
+// Use this to stop goroutines tied to the connection (e.g., ping tickers).
+<-ws.Done()
+
+// Configuration
+ws.SetMaxMessageSize(10 * 1024 * 1024)    // Default: 10MB
+ws.SetReadDeadline(time.Now().Add(60 * time.Second))
+ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+// Connection info
+ws.RemoteAddr()  // Client's network address
+ws.LocalAddr()   // Server's network address
+```
+
+### Chat Server with Broadcasting
+
+A multi-client chat pattern using a Hub to manage connections:
+
+```go
+type Hub struct {
+    clients    map[*rweb.WSConn]bool
+    broadcast  chan []byte
+    register   chan *rweb.WSConn
+    unregister chan *rweb.WSConn
+    mu         sync.RWMutex
+}
+
+func (h *Hub) Run() {
+    for {
+        select {
+        case client := <-h.register:
+            h.mu.Lock()
+            h.clients[client] = true
+            h.mu.Unlock()
+
+        case client := <-h.unregister:
+            h.mu.Lock()
+            if _, ok := h.clients[client]; ok {
+                delete(h.clients, client)
+                client.Close(1000, "Disconnected")
+            }
+            h.mu.Unlock()
+
+        case message := <-h.broadcast:
+            h.mu.RLock()
+            for client := range h.clients {
+                if err := client.WriteMessage(rweb.TextMessage, message); err != nil {
+                    go func(c *rweb.WSConn) { h.unregister <- c }(client)
+                }
+            }
+            h.mu.RUnlock()
+        }
+    }
+}
+
+// Register the chat endpoint
+s.WebSocket("/ws/chat", func(ws *rweb.WSConn) error {
+    hub.register <- ws
+    defer func() { hub.unregister <- ws }()
+
+    // Periodic ping to keep the connection alive.
+    // Done() ensures the goroutine exits cleanly when the connection closes.
+    go func() {
+        ticker := time.NewTicker(20 * time.Second)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ws.Done():
+                return
+            case <-ticker.C:
+                ws.WritePing([]byte("ping"))
+            }
+        }
+    }()
+
+    for {
+        msg, err := ws.ReadMessage()
+        if err != nil {
+            break
+        }
+        if msg.Type == rweb.TextMessage {
+            hub.broadcast <- msg.Data
+        }
+    }
+    return nil
+})
+```
+
+### Manual Upgrade
+
+For advanced use cases, you can upgrade the connection manually in a regular handler
+instead of using `s.WebSocket()`:
+
+```go
+s.Get("/ws/custom", func(ctx rweb.Context) error {
+    if !ctx.IsWebSocketUpgrade() {
+        return ctx.SetStatus(400).WriteString("Expected WebSocket upgrade")
+    }
+
+    ws, err := ctx.UpgradeWebSocket()
+    if err != nil {
+        return err
+    }
+    defer ws.Close(1000, "Done")
+
+    // Use ws.ReadMessage() / ws.WriteMessage() as usual
+    return nil
+})
 ```
 
 ## Reverse Proxy

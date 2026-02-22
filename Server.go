@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -634,10 +635,15 @@ func (s *Server) Run() (err error) {
 			}
 		}
 
-		for { // maybe TODO optional graceful shutdown based on SIGTERM
+		for {
 			conn, err := listener.Accept() // accept next client connection
 			if err != nil {
-				if s.options.Debug { // TODO: check deeper into "use of closed network connection"
+				// When the listener is closed during shutdown, Accept returns net.ErrClosed.
+				// This is expected — break out of the loop to stop the goroutine cleanly.
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				if s.options.Debug {
 					fmt.Println("Error accepting connection:", err)
 				}
 				continue
@@ -990,6 +996,13 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 }
 
 func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
+	// Run any registered cleanup when SSE streaming ends (e.g., SSEHub auto-unregister)
+	defer func() {
+		if ctx.sseCleanup != nil {
+			ctx.sseCleanup()
+		}
+	}()
+
 	// Send a connect event -- not required per SSE standard, but may be helpful
 	if s.options.SSECfg.SendConnectedEvent {
 		_, err = fmt.Fprint(respWriter, "event: message\ndata: Connected\n\n")

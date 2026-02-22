@@ -170,6 +170,8 @@ type context struct {
 	sseEventsChan <-chan any
 	// Event name used in SSE protocol (e.g., "message", "update")
 	sseEventName string
+	// Cleanup callback invoked when sendSSE exits (used by SSEHub for auto-unregister)
+	sseCleanup func()
 	// Request-scoped key-value storage for passing data between handlers
 	data map[string]any
 	// Parsed cookies from request (lazy-loaded)
@@ -221,6 +223,9 @@ func (ctx *context) Clean() {
 			delete(ctx.parsedCookies, k)
 		}
 	}
+
+	// Reset SSE cleanup callback
+	ctx.sseCleanup = nil
 
 	// Reset WebSocket state
 	ctx.wsUpgraded = false
