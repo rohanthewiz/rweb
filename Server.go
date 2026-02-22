@@ -964,6 +964,13 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 }
 
 func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
+	// Run any registered cleanup when SSE streaming ends (e.g., SSEHub auto-unregister)
+	defer func() {
+		if ctx.sseCleanup != nil {
+			ctx.sseCleanup()
+		}
+	}()
+
 	// Send a connect event -- not required per SSE standard, but may be helpful
 	if s.options.SSECfg.SendConnectedEvent {
 		_, err = fmt.Fprint(respWriter, "event: message\ndata: Connected\n\n")

@@ -12,3 +12,5 @@ certs/
 rweb
 websocket-demo
 websocket-example
+scratch/
+sse-hub-example

@@ -1,0 +1,6 @@
+github.com/rohanthewiz/assert v0.1.2 h1:coi0nUTAuqgpxoa7THQynDnBKUzV9Bid+tNaocUkCYE=
+github.com/rohanthewiz/assert v0.1.2/go.mod h1:Xix0OMMRN0aGkE207Wk5GJk0eWlpcNGph0+kYpuq+vQ=
+github.com/rohanthewiz/element v0.5.5-0.20260204132123-bceae1a2e28b h1:BY6uxdHLrpP1TZlotjV1cknhYIZgn3ViaCWrUsVKeFk=
+github.com/rohanthewiz/element v0.5.5-0.20260204132123-bceae1a2e28b/go.mod h1:cA57S9UGRSaWrMmGC1M+8QCQw/y8kgODiBB0KEwIyzo=
+github.com/rohanthewiz/serr v1.2.16 h1:NDV7yhoHVkZMMSKrJzxysZHUcS7vo3QU88D2B7MHGio=
+github.com/rohanthewiz/serr v1.2.16/go.mod h1:WYBghPccoTAUknotbanGZzWnIFREXYI5ULwf5sjznxY=
