@@ -404,14 +404,20 @@ evtSource.onerror = function() {
 
 ## WebSockets
 
+### Registration
+
+Use `s.WebSocket()` to register a handler that receives an upgraded `*rweb.WSConn`.
+The framework handles the HTTP upgrade handshake automatically.
+
 ```go
 s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
     defer ws.Close(1000, "Closing")
+    fmt.Printf("Client connected from %s\n", ws.RemoteAddr())
 
-    // Send message
+    // Send a welcome message
     ws.WriteMessage(rweb.TextMessage, []byte("Welcome"))
 
-    // Read loop
+    // Read loop — echo messages back to the client
     for {
         msg, err := ws.ReadMessage()
         if err != nil {
@@ -429,12 +435,148 @@ s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
     }
     return nil
 })
+```
 
-// Ping/Pong for keepalive
+### Message Types
+
+```go
+rweb.TextMessage   // UTF-8 text data
+rweb.BinaryMessage // Binary data
+rweb.CloseMessage  // Connection close
+rweb.PingMessage   // Ping control frame
+rweb.PongMessage   // Pong control frame
+```
+
+### WSConn API Reference
+
+```go
+// Reading and writing
+msg, err := ws.ReadMessage()              // Returns *WSMessage{Type, Data}
+ws.WriteMessage(rweb.TextMessage, data)   // Send a message
+
+// Connection lifecycle
+ws.Close(1000, "reason")                  // Send close frame and disconnect
+ws.OnClose(func(code int, text string) {  // Register close handler
+    fmt.Printf("Closed: %d %s\n", code, text)
+})
+
+// Ping/Pong keepalive — prevents proxies from dropping idle connections
+ws.WritePing([]byte("ping"))
 ws.SetPongHandler(func(data []byte) error {
     return nil
 })
-ws.WritePing([]byte("ping"))
+ws.SetPingHandler(func(data []byte) error {
+    return nil // Default handler auto-replies with pong
+})
+
+// Shutdown signal — closed when the connection is closed from either side.
+// Use this to stop goroutines tied to the connection (e.g., ping tickers).
+<-ws.Done()
+
+// Configuration
+ws.SetMaxMessageSize(10 * 1024 * 1024)    // Default: 10MB
+ws.SetReadDeadline(time.Now().Add(60 * time.Second))
+ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+// Connection info
+ws.RemoteAddr()  // Client's network address
+ws.LocalAddr()   // Server's network address
+```
+
+### Chat Server with Broadcasting
+
+A multi-client chat pattern using a Hub to manage connections:
+
+```go
+type Hub struct {
+    clients    map[*rweb.WSConn]bool
+    broadcast  chan []byte
+    register   chan *rweb.WSConn
+    unregister chan *rweb.WSConn
+    mu         sync.RWMutex
+}
+
+func (h *Hub) Run() {
+    for {
+        select {
+        case client := <-h.register:
+            h.mu.Lock()
+            h.clients[client] = true
+            h.mu.Unlock()
+
+        case client := <-h.unregister:
+            h.mu.Lock()
+            if _, ok := h.clients[client]; ok {
+                delete(h.clients, client)
+                client.Close(1000, "Disconnected")
+            }
+            h.mu.Unlock()
+
+        case message := <-h.broadcast:
+            h.mu.RLock()
+            for client := range h.clients {
+                if err := client.WriteMessage(rweb.TextMessage, message); err != nil {
+                    go func(c *rweb.WSConn) { h.unregister <- c }(client)
+                }
+            }
+            h.mu.RUnlock()
+        }
+    }
+}
+
+// Register the chat endpoint
+s.WebSocket("/ws/chat", func(ws *rweb.WSConn) error {
+    hub.register <- ws
+    defer func() { hub.unregister <- ws }()
+
+    // Periodic ping to keep the connection alive.
+    // Done() ensures the goroutine exits cleanly when the connection closes.
+    go func() {
+        ticker := time.NewTicker(20 * time.Second)
+        defer ticker.Stop()
+        for {
+            select {
+            case <-ws.Done():
+                return
+            case <-ticker.C:
+                ws.WritePing([]byte("ping"))
+            }
+        }
+    }()
+
+    for {
+        msg, err := ws.ReadMessage()
+        if err != nil {
+            break
+        }
+        if msg.Type == rweb.TextMessage {
+            hub.broadcast <- msg.Data
+        }
+    }
+    return nil
+})
+```
+
+### Manual Upgrade
+
+For advanced use cases, you can upgrade the connection manually in a regular handler
+instead of using `s.WebSocket()`:
+
+```go
+s.Get("/ws/custom", func(ctx rweb.Context) error {
+    if !ctx.IsWebSocketUpgrade() {
+        return ctx.SetStatus(400).WriteString("Expected WebSocket upgrade")
+    }
+
+    ws, err := ctx.UpgradeWebSocket()
+    if err != nil {
+        return err
+    }
+    defer ws.Close(1000, "Done")
+
+    // Use ws.ReadMessage() / ws.WriteMessage() as usual
+    return nil
+})
 ```
 
 ## Reverse Proxy
