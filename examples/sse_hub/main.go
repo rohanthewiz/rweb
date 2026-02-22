@@ -6,6 +6,8 @@
 //   - SSEHub manages client connections automatically via hub.Handler()
 //   - Broadcast sends JSON-wrapped events to all clients as "message" events
 //   - BroadcastRaw sends events with custom SSE event types (for addEventListener)
+//   - HeartbeatInterval sends periodic keepalives to prevent proxy/LB idle timeouts
+//   - MaxDropped auto-evicts stale clients whose channels stay full
 //   - A background ticker simulates a real-time data source (e.g., stock prices, metrics)
 //   - The /send endpoint lets you push custom messages from the browser
 package main
@@ -32,8 +34,20 @@ func main() {
 		rweb.WithVerbose(),
 	)
 
-	// Create the SSE hub — standalone, not tied to a specific route
-	hub := rweb.NewSSEHub()
+	// Create the SSE hub with hardened options for production-like resilience:
+	//   - HeartbeatInterval keeps connections alive through proxies and load balancers
+	//   - MaxDropped auto-evicts clients whose channels stay full (likely disconnected)
+	//   - OnDisconnect logs when a client leaves (normal disconnect or eviction)
+	hub := rweb.NewSSEHub(rweb.SSEHubOptions{
+		ChannelSize:       8,
+		MaxDropped:        3,
+		HeartbeatInterval: 30 * time.Second,
+		OnDisconnect: func() {
+			fmt.Println("Client disconnected")
+		},
+	})
+	// Close stops the heartbeat goroutine on shutdown
+	defer hub.Close()
 
 	// Serve the HTML demo page built with the element builder
 	s.Get("/", func(ctx rweb.Context) error {
@@ -41,7 +55,8 @@ func main() {
 	})
 
 	// SSE endpoint — hub.Handler() manages per-client lifecycle automatically:
-	// creates a buffered channel, registers it, and auto-unregisters on disconnect
+	// creates a buffered channel (sized by ChannelSize), registers it,
+	// and auto-unregisters on disconnect
 	s.Get("/events", hub.Handler(s))
 
 	// Endpoint to push a custom message via the browser form.

@@ -168,6 +168,11 @@ type SSEvent struct {
 	Data interface{}
 }
 
+// sseKeepalive is a sentinel type sent by SSEHub's heartbeat goroutine.
+// When sendSSE encounters this value, it writes an SSE comment (`:keepalive\n\n`)
+// which keeps the connection alive without triggering EventSource's onmessage.
+type sseKeepalive struct{}
+
 type TLSCfg struct {
 	TLSAddr  string // [Port] to listen on for TLS
 	CertFile string // Path to certificate file
@@ -1050,6 +1055,11 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 
 			// Format and send the event
 			switch v := event.(type) {
+			case sseKeepalive:
+				// SSE comment — keeps the connection alive through proxies/LBs
+				// without triggering EventSource's onmessage handler
+				_, err = fmt.Fprint(rw, ":keepalive\n\n")
+				_ = v // use v to satisfy the compiler
 			case SSEvent: // get the eventName from the data (rweb.SSEvent) received
 				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", v.Type, v.Data)
 			case string:

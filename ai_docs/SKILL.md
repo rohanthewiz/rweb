@@ -309,8 +309,10 @@ SSEHub provides a fan-out pattern for broadcasting events to all connected clien
 Each client gets its own buffered channel, and the hub manages registration and
 cleanup automatically. The hub is standalone — not tied to a specific server or route.
 
+#### Basic Usage (zero-config)
+
 ```go
-// Create the hub — can be shared across routes
+// Create the hub with sensible defaults (channelSize=8, maxDropped=3)
 hub := rweb.NewSSEHub()
 
 // Register the SSE endpoint. hub.Handler() manages per-client lifecycle:
@@ -336,6 +338,38 @@ hub.BroadcastRaw(rweb.SSEvent{Type: "heartbeat", Data: "ok"})
 count := hub.ClientCount()
 ```
 
+#### SSEHubOptions (Hardened Configuration)
+
+For production environments with frequent disconnections, proxies, or load balancers,
+pass `SSEHubOptions` to configure heartbeat keepalives and stale client eviction:
+
+```go
+hub := rweb.NewSSEHub(rweb.SSEHubOptions{
+    // Per-client channel buffer size. Larger values absorb more burst traffic;
+    // smaller values detect slow clients faster. Default: 8
+    ChannelSize: 16,
+
+    // Max consecutive dropped messages before auto-evicting a stale client.
+    // Prevents disconnected clients from accumulating and wasting broadcast cycles.
+    // Default: 3. Set to 0 to disable auto-eviction (original skip-and-move-on behavior).
+    MaxDropped: 3,
+
+    // Sends an SSE comment (:keepalive) at this interval to all clients.
+    // Prevents proxies, load balancers, and firewalls from killing idle connections
+    // (typically 30-60s timeout). Default: 0 (disabled).
+    HeartbeatInterval: 30 * time.Second,
+
+    // Called when any client is removed — normal disconnect or eviction. Optional.
+    OnDisconnect: func() {
+        fmt.Println("Client disconnected")
+    },
+})
+
+// Close() stops the heartbeat goroutine — call on shutdown.
+// Safe to call multiple times.
+defer hub.Close()
+```
+
 #### Log Stream Example
 
 A real-time log viewer that tails application logs to all connected browsers:
@@ -347,7 +381,10 @@ func main() {
         rweb.WithVerbose(),
     )
 
-    logHub := rweb.NewSSEHub()
+    logHub := rweb.NewSSEHub(rweb.SSEHubOptions{
+        HeartbeatInterval: 30 * time.Second,
+    })
+    defer logHub.Close()
 
     // SSE endpoint — clients connect here to receive log events
     s.Get("/logs/stream", logHub.Handler(s))
