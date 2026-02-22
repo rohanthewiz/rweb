@@ -1,6 +1,6 @@
 ---
 name: rweb-light-go-webserver
-description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, WebSockets, static files, proxying, and file uploads.
+description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, SSE Hub (multi-client broadcast), WebSockets, static files, proxying, and file uploads.
 ---
 
 # RWeb Framework Skill
@@ -282,6 +282,10 @@ s.Post("/upload", func(ctx rweb.Context) error {
 
 ## Server-Sent Events (SSE)
 
+### Single-Channel SSE
+
+For simple cases where one channel feeds one endpoint:
+
 ```go
 // Create event channel
 eventsChan := make(chan any, 100)
@@ -297,6 +301,105 @@ s.Get("/events2", s.SSEHandler(eventsChan))
 // Send events from anywhere
 eventsChan <- "event data"
 eventsChan <- map[string]string{"type": "update", "data": "value"}
+```
+
+### SSE Hub (Multi-Client Broadcast)
+
+SSEHub provides a fan-out pattern for broadcasting events to all connected clients.
+Each client gets its own buffered channel, and the hub manages registration and
+cleanup automatically. The hub is standalone — not tied to a specific server or route.
+
+```go
+// Create the hub — can be shared across routes
+hub := rweb.NewSSEHub()
+
+// Register the SSE endpoint. hub.Handler() manages per-client lifecycle:
+// creates a buffered channel, registers it, and auto-unregisters on disconnect.
+s.Get("/logs/stream", hub.Handler(s))
+
+// Broadcast from anywhere — e.g., a log ingestion goroutine.
+// Broadcast() JSON-wraps {type, data} and sends as a "message" SSE event,
+// so JS clients use a single onmessage handler + JSON.parse().
+hub.Broadcast(rweb.SSEvent{
+    Type: "log",
+    Data: "2026-02-21 10:05:32 [INFO] User logged in",
+})
+
+// BroadcastAny is a convenience wrapper
+hub.BroadcastAny("error", "disk usage at 92%")
+
+// BroadcastRaw sends the SSEvent as-is without JSON wrapping —
+// use when JS clients listen with addEventListener on specific event names
+hub.BroadcastRaw(rweb.SSEvent{Type: "heartbeat", Data: "ok"})
+
+// Check connected client count (useful for status endpoints)
+count := hub.ClientCount()
+```
+
+#### Log Stream Example
+
+A real-time log viewer that tails application logs to all connected browsers:
+
+```go
+func main() {
+    s := rweb.NewServer(
+        rweb.WithAddress(":8080"),
+        rweb.WithVerbose(),
+    )
+
+    logHub := rweb.NewSSEHub()
+
+    // SSE endpoint — clients connect here to receive log events
+    s.Get("/logs/stream", logHub.Handler(s))
+
+    // Status endpoint
+    s.Get("/logs/viewers", func(ctx rweb.Context) error {
+        return ctx.WriteJSON(map[string]any{
+            "viewers": logHub.ClientCount(),
+        })
+    })
+
+    // Simulate log ingestion — in production this would tail a file or consume a queue
+    go func() {
+        entries := []string{
+            "[INFO] Server started on :8080",
+            "[INFO] Connected to database",
+            "[WARN] Slow query detected (1.2s)",
+            "[ERROR] Failed to send email: timeout",
+            "[INFO] User alice logged in",
+        }
+
+        i := 0
+        for range time.NewTicker(2 * time.Second).C {
+            logHub.Broadcast(rweb.SSEvent{
+                Type: "log",
+                Data: fmt.Sprintf("%s %s", time.Now().Format("15:04:05"), entries[i%len(entries)]),
+            })
+            i++
+        }
+    }()
+
+    log.Fatal(s.Run())
+}
+```
+
+#### JS Client for SSE Hub
+
+Since `Broadcast()` sends JSON-wrapped data under the standard "message" event type,
+JS clients only need `onmessage` — no `addEventListener` required:
+
+```js
+const evtSource = new EventSource('/logs/stream');
+
+evtSource.onmessage = function(e) {
+    // payload is JSON: {"type": "log", "data": "10:05:32 [INFO] User logged in"}
+    const payload = JSON.parse(e.data);
+    console.log('[' + payload.type + ']', payload.data);
+};
+
+evtSource.onerror = function() {
+    console.log('Disconnected — EventSource will auto-reconnect');
+};
 ```
 
 ## WebSockets
