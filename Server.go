@@ -353,7 +353,7 @@ func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventTypeOption ...
 // SSEHandler is a convenience method that creates a handler function for Server-Sent Events of a certain type.
 // Note: SSEvent data from the source will override the event type set here.
 // The eventsChan parameter is the channel from which events will be sourced.
-// The optional eventName parameter specifies the event type (defaults to "message").
+// The optional eventType parameter specifies the event type (defaults to "message").
 // Usage: s.Get("/events", s.SSEHandler(eventsChan, "update"))
 func (s *Server) SSEHandler(eventsChan <-chan any, eventType ...string) Handler {
 	// Default to "message" event type if not specified
