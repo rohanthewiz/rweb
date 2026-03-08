@@ -61,8 +61,7 @@ type request struct {
 	multipartForm         *multipart.Form
 	multipartFormBoundary string
 
-	queryArgs       Args
-	parsedQueryArgs bool
+	queryArgs Args
 
 	postArgs       Args
 	parsedPostArgs bool
@@ -194,8 +193,6 @@ func (req *request) ParseMultipartForm() error {
 		return err
 	}
 
-	fmt.Println("**-> params", params)
-
 	boundary, ok := params["boundary"]
 	if !ok {
 		return fmt.Errorf("no boundary found in multipart form data")
@@ -245,7 +242,6 @@ func (req *request) FormValue(key string) string {
 		if values := req.multipartForm.Value[key]; len(values) > 0 {
 			return values[0]
 		}
-		fmt.Printf("** req.multipartForm.Value ->  %v\n", req.multipartForm.Value)
 	}
 	return req.GetPostValue(key)
 }

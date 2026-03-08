@@ -210,9 +210,11 @@ func (ctx *context) Clean() {
 	// Cleanup any multipart form data (releases file handles)
 	ctx.request.CleanupMultipartForm()
 
-	// Clear custom data map but keep it allocated if it exists
+	// Clear custom data map but keep it allocated for reuse
 	if ctx.data != nil {
-		ctx.data = make(map[string]any)
+		for k := range ctx.data {
+			delete(ctx.data, k)
+		}
 	}
 
 	// Reset cookie state
@@ -224,8 +226,10 @@ func (ctx *context) Clean() {
 		}
 	}
 
-	// Reset SSE cleanup callback
+	// Reset SSE state
 	ctx.sseCleanup = nil
+	ctx.sseEventsChan = nil
+	ctx.sseEventName = ""
 
 	// Reset WebSocket state
 	ctx.wsUpgraded = false
