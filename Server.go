@@ -1008,6 +1008,21 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 		}
 	}()
 
+	// Detect client disconnect proactively by reading from the underlying connection.
+	// A read on a half-closed or fully-closed TCP connection returns immediately
+	// (EOF or error), giving us sub-second disconnect detection instead of waiting
+	// up to a full heartbeat interval (~25s) to discover a broken pipe on write.
+	connGone := make(chan struct{})
+	if ctx.conn != nil {
+		go func() {
+			buf := make([]byte, 1)
+			// Read blocks until the client closes or the conn is closed.
+			// We don't expect any incoming data on an SSE connection.
+			_, _ = ctx.conn.Read(buf)
+			close(connGone)
+		}()
+	}
+
 	// Send a connect event -- not required per SSE standard, but may be helpful
 	if s.options.SSECfg.SendConnectedEvent {
 		_, err = fmt.Fprint(respWriter, "event: message\ndata: Connected\n\n")
@@ -1031,6 +1046,14 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 	// Event Loop - until the input channel is closed or we exit
 	for {
 		select {
+		case <-connGone:
+			// Client disconnected — clean exit
+			if s.options.Verbose {
+				fmt.Printf("RWEB SSE client disconnected (conn closed), cleaning up channel: %v\n", ctx.sseEventsChan)
+			}
+			_ = rw.Flush()
+			return nil
+
 		case event, ok := <-ctx.sseEventsChan:
 			if !ok {
 				fmt.Println("SSE Channel closed and drained, let's clean up and exit...")
