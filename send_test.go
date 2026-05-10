@@ -54,7 +54,7 @@ func TestContentTypes(t *testing.T) {
 		{Method: consts.MethodGet, URL: "/js", Status: 200, Response: "console.log(42)", ContentType: "text/javascript"},
 		{Method: consts.MethodGet, URL: "/json", Status: 200, Response: "{\"Name\":\"User 1\"}\n", ContentType: "application/json"},
 		{Method: consts.MethodGet, URL: "/text", Status: 200, Response: "Hello", ContentType: "text/plain"},
-		{Method: consts.MethodGet, URL: "/xml", Status: 200, Response: "<xml></xml>", ContentType: "text/xml"},
+		{Method: consts.MethodGet, URL: "/xml", Status: 200, Response: "<xml></xml>", ContentType: "application/xml"},
 	}
 
 	for _, test := range tests {
@@ -227,8 +227,13 @@ func TestFileMimeTypeExtensions(t *testing.T) {
 		{"file.htm", "text/html; charset=utf-8", false},
 		{"file.css", "text/css; charset=utf-8", false},
 		{"file.js", "text/javascript; charset=utf-8", false},
+		{"file.mjs", "text/javascript; charset=utf-8", false},
 		{"file.json", "application/json; charset=utf-8", false},
+		{"file.map", "application/json; charset=utf-8", false},
 		{"file.xml", "application/xml; charset=utf-8", false},
+		{"file.yaml", "application/yaml; charset=utf-8", false},
+		{"file.yml", "application/yaml; charset=utf-8", false},
+		{"file.md", "text/markdown; charset=utf-8", false},
 		{"file.txt", "text/plain; charset=utf-8", false},
 		{"file.log", "text/plain; charset=utf-8", false},
 		{"file.csv", "text/csv; charset=utf-8", false},
@@ -241,6 +246,11 @@ func TestFileMimeTypeExtensions(t *testing.T) {
 		{"file.svg", "image/svg+xml; charset=utf-8", false}, // SVG is text-based (XML)
 		{"file.ico", "image/x-icon", false},
 		{"file.webp", "image/webp", false},
+		{"file.avif", "image/avif", false},
+		{"file.bmp", "image/bmp", false},
+
+		// WebAssembly (binary, viewable — must NOT be downloadable for streaming compile)
+		{"file.wasm", "application/wasm", false},
 
 		// Documents (binary formats, no charset)
 		{"file.pdf", "application/pdf", false},
@@ -264,6 +274,8 @@ func TestFileMimeTypeExtensions(t *testing.T) {
 		{"file.wav", "audio/wav", false},
 		{"file.ogg", "audio/ogg", false},
 		{"file.m4a", "audio/mp4", false},
+		{"file.flac", "audio/flac", false},
+		{"file.aac", "audio/aac", false},
 
 		// Video (binary formats, no charset)
 		{"file.mp4", "video/mp4", false},
