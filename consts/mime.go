@@ -13,7 +13,7 @@ const (
 	MIMEPNG               = "image/png"
 	MIMEJPEG              = "image/jpeg"
 	MIMEGIF               = "image/gif"
-	MIMESVG               = "image/svg"
+	MIMESVG               = "image/svg+xml"
 	MIMEZIP               = "application/zip"
 )
 
