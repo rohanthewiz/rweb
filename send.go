@@ -186,6 +186,10 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 		ctx.Response().SetHeader(consts.HeaderContentType, mimeType)
 	}
 
+	// Defense-in-depth: keep browsers from MIME-sniffing user-controlled static
+	// content into a script type even when our Content-Type is exactly right.
+	ctx.Response().SetHeader("X-Content-Type-Options", "nosniff")
+
 	// Set Date header (RFC 7231 requirement for origin servers)
 	ctx.Response().SetHeader(consts.HeaderDate, time.Now().UTC().Format(time.RFC1123))
 

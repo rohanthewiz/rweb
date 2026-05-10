@@ -1,10 +1,13 @@
 package rweb
 
 import (
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/rohanthewiz/rweb/consts"
 )
 
 // Context is the interface for a request and its response.
@@ -151,6 +154,27 @@ type Context interface {
 	// UserAgent returns the User-Agent header value from the request.
 	// Returns an empty string if the User-Agent header is not present.
 	UserAgent() string
+
+	// NoContent writes a 204 No Content response with no body.
+	// Common for successful DELETE / PATCH operations that have nothing
+	// meaningful to return. The Content-Type header is intentionally not
+	// set, since 204 responses MUST NOT carry a body per RFC 7230.
+	NoContent() error
+
+	// ClientIP returns the best-guess client IP for this request, applying
+	// the resolution order most production setups want behind a reverse
+	// proxy: X-Forwarded-For (first hop) → X-Real-IP → RemoteAddr.
+	// Returns an empty string only if all three are unavailable.
+	// SECURITY NOTE: X-Forwarded-For is trivially spoofable by clients
+	// when no proxy strips it. Treat the result as untrusted unless your
+	// edge proxy is configured to overwrite these headers.
+	ClientIP() string
+
+	// BasicAuth parses the Authorization header for HTTP Basic credentials
+	// per RFC 7617. Returns the decoded username and password and ok=true
+	// only when the header is present, well-formed, base64-decodes, and
+	// contains a `:` separator.
+	BasicAuth() (user, pass string, ok bool)
 }
 
 // context is the concrete implementation of the Context interface.
@@ -198,8 +222,21 @@ func (ctx *context) Clean() {
 	ctx.response.body = ctx.response.body[:0]
 	ctx.params = ctx.params[:0]
 
-	// Reset request state flags
+	// ContentType is a cached []byte shortcut populated when the
+	// "Content-Type" header is read. It must be cleared between requests
+	// because the next request on the same connection may not send a
+	// Content-Type header at all (e.g. a GET); without this reset, a
+	// prior POST's Content-Type leaks through and silently steers
+	// parsePostArgs / FormValue / ParseMultipartForm down the wrong path.
+	ctx.request.ContentType = nil
+
+	// Reset request state flags AND the parsed-args slice itself.
+	// Resetting only the flag is not enough: parsePostArgs early-returns
+	// when Content-Type isn't urlencoded, so the next request (e.g. a GET)
+	// would see the previous request's args via GetPostValue → PostArgs,
+	// which returns &req.postArgs unconditionally.
 	ctx.parsedPostArgs = false
+	ctx.request.postArgs.Reset()
 
 	// Reset middleware chain position
 	ctx.handlerIndex = 0
@@ -673,4 +710,67 @@ func (ctx *context) UserAgent() string {
 		}
 	}
 	return ""
+}
+
+// NoContent writes a 204 No Content response. Body is intentionally empty —
+// per RFC 7230 a 204 response MUST NOT include a message body.
+func (ctx *context) NoContent() error {
+	ctx.response.SetStatus(consts.StatusNoContent)
+	return nil
+}
+
+// ClientIP resolves the client IP using the order most reverse-proxied
+// deployments want:
+//  1. X-Forwarded-For — first comma-separated entry (the original client).
+//  2. X-Real-IP — single value set by some proxies (nginx default).
+//  3. The conn's RemoteAddr, with the port stripped.
+//
+// We deliberately do NOT trust XFF/X-Real-IP unconditionally — see the
+// security note on the interface declaration. The header lookup uses the
+// case-insensitive Header() helper.
+func (ctx *context) ClientIP() string {
+	if xff := ctx.request.Header("X-Forwarded-For"); xff != "" {
+		// XFF is "client, proxy1, proxy2"; the leftmost entry is the
+		// original client (assuming the chain is honest).
+		if comma := strings.IndexByte(xff, ','); comma >= 0 {
+			xff = xff[:comma]
+		}
+		if ip := strings.TrimSpace(xff); ip != "" {
+			return ip
+		}
+	}
+	if xri := strings.TrimSpace(ctx.request.Header("X-Real-IP")); xri != "" {
+		return xri
+	}
+	if ctx.conn != nil {
+		addr := ctx.conn.RemoteAddr().String()
+		// RemoteAddr is "host:port" (or "[v6]:port"); strip the port if we can.
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			return host
+		}
+		return addr
+	}
+	return ""
+}
+
+// BasicAuth parses an `Authorization: Basic <b64>` header per RFC 7617.
+// Returns ok=true only when the header is present, well-formed, decodes
+// cleanly as base64, and contains a `:` separator. Empty username or
+// empty password are still valid per the RFC.
+func (ctx *context) BasicAuth() (user, pass string, ok bool) {
+	const prefix = "Basic "
+	h := ctx.request.Header("Authorization")
+	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(h[len(prefix):])
+	if err != nil {
+		return
+	}
+	s := string(raw)
+	i := strings.IndexByte(s, ':')
+	if i < 0 {
+		return
+	}
+	return s[:i], s[i+1:], true
 }

@@ -1,7 +1,14 @@
 package rweb_test
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -82,6 +89,148 @@ func TestRequestParam(t *testing.T) {
 	response := s.Request(consts.MethodGet, "/blog/my-article", nil, nil)
 	assert.Equal(t, response.Status(), 200)
 	assert.Equal(t, string(response.Body()), "my-article")
+}
+
+// TestGetFormFiles exercises the new multi-file accessor end-to-end. The
+// synthetic s.Request() path doesn't pipe the body through to the multipart
+// parser, so we use a real HTTP server here. Three files are uploaded under
+// the same form key to confirm we see all of them (not just the first, which
+// is what GetFormFile returns) and that filenames + contents survive intact.
+func TestGetFormFiles(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	clientDone := make(chan struct{})
+
+	s := rweb.NewServer(rweb.ServerOptions{
+		ReadyChan: readyChan,
+		Address:   "localhost:",
+	})
+
+	type result struct {
+		count    int
+		names    []string
+		contents []string
+		err      string
+	}
+	var got atomic.Pointer[result]
+
+	s.Post("/upload", func(ctx rweb.Context) error {
+		files, err := ctx.Request().GetFormFiles("attachments")
+		r := result{}
+		if err != nil {
+			r.err = err.Error()
+		}
+		for _, fh := range files {
+			r.count++
+			r.names = append(r.names, fh.Filename)
+			f, oerr := fh.Open()
+			if oerr != nil {
+				r.err = oerr.Error()
+				continue
+			}
+			body, _ := io.ReadAll(f)
+			_ = f.Close()
+			r.contents = append(r.contents, string(body))
+		}
+		got.Store(&r)
+		return ctx.NoContent()
+	})
+
+	go func() {
+		defer close(clientDone)
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-readyChan
+
+		// Build a real multipart body: two attachments under the same key,
+		// plus a normal text field, plus an unrelated file under a different
+		// key (which GetFormFiles("attachments") must NOT return).
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		_ = mw.WriteField("vehicle", "car")
+
+		w1, err := mw.CreateFormFile("attachments", "first.txt")
+		assert.Nil(t, err)
+		_, _ = w1.Write([]byte("alpha"))
+
+		w2, err := mw.CreateFormFile("attachments", "second.txt")
+		assert.Nil(t, err)
+		_, _ = w2.Write([]byte("beta"))
+
+		w3, err := mw.CreateFormFile("attachments", "third.txt")
+		assert.Nil(t, err)
+		_, _ = w3.Write([]byte("gamma"))
+
+		// Sanity decoy under a different key
+		wOther, err := mw.CreateFormFile("avatar", "ignored.png")
+		assert.Nil(t, err)
+		_, _ = wOther.Write([]byte("decoy"))
+
+		assert.Nil(t, mw.Close())
+
+		url := fmt.Sprintf("http://127.0.0.1:%s/upload", s.GetListenPort())
+		resp, err := http.Post(url, mw.FormDataContentType(), &buf)
+		assert.Nil(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, int(resp.StatusCode), int(consts.StatusNoContent))
+
+		r := got.Load()
+		if r == nil {
+			t.Error("handler did not capture any result")
+			return
+		}
+		if r.err != "" {
+			t.Errorf("handler reported error: %s", r.err)
+			return
+		}
+		assert.Equal(t, r.count, 3)
+		assert.Equal(t, strings.Join(r.names, ","), "first.txt,second.txt,third.txt")
+		assert.Equal(t, strings.Join(r.contents, ","), "alpha,beta,gamma")
+	}()
+
+	_ = s.Run()
+	<-clientDone
+}
+
+// TestGetFormFilesNotPresent confirms the error paths: the missing-key case
+// returns an error rather than silently returning nil/empty.
+func TestGetFormFilesNotPresent(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	clientDone := make(chan struct{})
+
+	s := rweb.NewServer(rweb.ServerOptions{
+		ReadyChan: readyChan,
+		Address:   "localhost:",
+	})
+
+	var sawErr atomic.Bool
+	s.Post("/upload", func(ctx rweb.Context) error {
+		files, err := ctx.Request().GetFormFiles("nope")
+		if err != nil && len(files) == 0 {
+			sawErr.Store(true)
+		}
+		return ctx.NoContent()
+	})
+
+	go func() {
+		defer close(clientDone)
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-readyChan
+
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		w, err := mw.CreateFormFile("attachments", "ok.txt")
+		assert.Nil(t, err)
+		_, _ = w.Write([]byte("hello"))
+		assert.Nil(t, mw.Close())
+
+		url := fmt.Sprintf("http://127.0.0.1:%s/upload", s.GetListenPort())
+		resp, err := http.Post(url, mw.FormDataContentType(), &buf)
+		assert.Nil(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, sawErr.Load(), true)
+	}()
+
+	_ = s.Run()
+	<-clientDone
 }
 
 func TestUserAgent(t *testing.T) {

@@ -191,6 +191,10 @@ func TestFileHeaders(t *testing.T) {
 			// Check Date header is present (RFC 7231 requirement)
 			assert.NotEqual(t, response.Header("Date"), "")
 
+			// Check nosniff is set on every file response (defense-in-depth
+			// against MIME sniffing user-controlled static content).
+			assert.Equal(t, response.Header("X-Content-Type-Options"), "nosniff")
+
 			// Check download headers
 			contentDisposition := response.Header("Content-Disposition")
 			if tt.shouldHaveDownload {

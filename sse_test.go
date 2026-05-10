@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -97,6 +98,174 @@ func TestSSEHandler(t *testing.T) {
 		// Test completed normally
 	case <-time.After(15 * time.Second):
 		t.Fatal("Test did not complete within timeout")
+	}
+}
+
+// TestSSESenderGoroutineExitsOnChannelClose is a regression guard for a goroutine
+// leak in sendSSE: the disconnect-detector goroutine (`go func(){ conn.Read(...) }`)
+// only unblocks when the *client* closes its side of the conn. If sendSSE returns
+// through the events-channel-closed path instead, that goroutine would otherwise
+// stay parked forever. The fix sets a past-instant ReadDeadline in a defer so the
+// goroutine unblocks deterministically. We assert by counting goroutines: the
+// post-test count must settle back to the pre-test baseline.
+func TestSSESenderGoroutineExitsOnChannelClose(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	sseDone := make(chan struct{})
+
+	// Server closes this channel itself to trigger the events-closed exit path
+	// (NOT the connGone path). The client must therefore stay connected for
+	// the test to actually exercise the leak scenario.
+	eventsChan := make(chan any, 1)
+
+	s := rweb.NewServer(rweb.ServerOptions{
+		ReadyChan: readyChan,
+		Address:   "localhost:",
+	})
+
+	s.Get("/events", func(ctx rweb.Context) error {
+		defer close(sseDone)
+		return ctx.SetSSE(eventsChan, "test-events")
+	})
+
+	serverDone := make(chan struct{})
+	go func() {
+		_ = s.Run()
+		close(serverDone)
+	}()
+	defer func() {
+		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-serverDone
+	}()
+
+	<-readyChan
+
+	// Capture baseline AFTER server has spun up its accept loop, BEFORE we
+	// open the SSE conn (which forks the disconnect-detector goroutine).
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	base := runtime.NumGoroutine()
+
+	addr := fmt.Sprintf("127.0.0.1:%s", s.GetListenPort())
+	conn, err := net.Dial("tcp", addr)
+	assert.Nil(t, err)
+	defer conn.Close() // client stays connected through the channel-close path
+
+	reqStr := fmt.Sprintf("GET /events HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\n\r\n", addr)
+	_, err = conn.Write([]byte(reqStr))
+	assert.Nil(t, err)
+
+	// Wait for the response status line so we know sendSSE has started
+	// (and the inner Read goroutine has been spawned).
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	assert.Nil(t, err)
+	assert.Equal(t, strings.Contains(statusLine, "200"), true)
+
+	// Trigger the channel-closed exit path, then wait for sendSSE to return.
+	close(eventsChan)
+	select {
+	case <-sseDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendSSE did not return after events channel was closed")
+	}
+
+	// Give the deferred SetReadDeadline + WaitGroup.Wait a moment to retire
+	// the inner reader goroutine and let the runtime account for it.
+	time.Sleep(200 * time.Millisecond)
+	runtime.GC()
+
+	// Goroutine *count* alone is too coarse here — the test client's still-open
+	// conn keeps handleConnection parked, hiding the +1 from a leaked reader.
+	// Instead, dump every goroutine's stack and look for one whose frames
+	// include the reader closure inside sendSSE. That frame is unique to the
+	// leak: no other code path produces a goroutine sitting in `sendSSE.funcN`.
+	buf := make([]byte, 1<<16)
+	n := runtime.Stack(buf, true)
+	stacks := string(buf[:n])
+	for _, gstack := range strings.Split(stacks, "\n\n") {
+		if strings.Contains(gstack, "rweb.(*Server).sendSSE.func") &&
+			(strings.Contains(gstack, "internal/poll") ||
+				strings.Contains(gstack, "net.(*conn).Read")) {
+			t.Logf("leaked reader goroutine stack:\n%s", gstack)
+			t.Errorf("sendSSE reader goroutine still parked after channel-close exit (baseline=%d, now=%d)",
+				base, runtime.NumGoroutine())
+			return
+		}
+	}
+}
+
+// TestSSESenderGoroutineExitsOnCloseSentinel is a second exit-path guard for
+// the sendSSE goroutine cleanup: when the events channel sends the literal
+// string "close", sendSSE returns *without* the channel being closed and
+// without the client disconnecting. Under the bug, the inner Read goroutine
+// would still be parked. Under the fix, the deferred SetReadDeadline retires
+// it on every return path including this one.
+func TestSSESenderGoroutineExitsOnCloseSentinel(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	sseDone := make(chan struct{})
+
+	eventsChan := make(chan any, 1)
+
+	s := rweb.NewServer(rweb.ServerOptions{
+		ReadyChan: readyChan,
+		Address:   "localhost:",
+	})
+
+	s.Get("/events", func(ctx rweb.Context) error {
+		defer close(sseDone)
+		return ctx.SetSSE(eventsChan, "test-events")
+	})
+
+	serverDone := make(chan struct{})
+	go func() {
+		_ = s.Run()
+		close(serverDone)
+	}()
+	defer func() {
+		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-serverDone
+	}()
+
+	<-readyChan
+
+	addr := fmt.Sprintf("127.0.0.1:%s", s.GetListenPort())
+	conn, err := net.Dial("tcp", addr)
+	assert.Nil(t, err)
+	defer conn.Close()
+
+	reqStr := fmt.Sprintf("GET /events HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\n\r\n", addr)
+	_, err = conn.Write([]byte(reqStr))
+	assert.Nil(t, err)
+
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	assert.Nil(t, err)
+	assert.Equal(t, strings.Contains(statusLine, "200"), true)
+
+	// Trigger the close-sentinel exit (NOT a close(eventsChan)). The handler
+	// recognizes the literal string "close" and returns from the event loop.
+	eventsChan <- "close"
+
+	select {
+	case <-sseDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sendSSE did not return after close-sentinel event")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	runtime.GC()
+
+	buf := make([]byte, 1<<16)
+	n := runtime.Stack(buf, true)
+	stacks := string(buf[:n])
+	for _, gstack := range strings.Split(stacks, "\n\n") {
+		if strings.Contains(gstack, "rweb.(*Server).sendSSE.func") &&
+			(strings.Contains(gstack, "internal/poll") ||
+				strings.Contains(gstack, "net.(*conn).Read")) {
+			t.Logf("leaked reader goroutine stack:\n%s", gstack)
+			t.Errorf("sendSSE reader goroutine still parked after close-sentinel exit")
+			return
+		}
 	}
 }
 
