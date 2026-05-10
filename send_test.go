@@ -147,7 +147,7 @@ func TestFileHeaders(t *testing.T) {
 		{
 			name:                 "SVG - viewable, with charset (XML-based)",
 			url:                  "/svg",
-			expectedContentType:  "image/svg; charset=utf-8",
+			expectedContentType:  "image/svg+xml; charset=utf-8",
 			shouldHaveDownload:   false,
 			shouldHaveCharset:    true,
 			expectedResponseBody: "<svg></svg>",
@@ -238,7 +238,7 @@ func TestFileMimeTypeExtensions(t *testing.T) {
 		{"file.jpg", "image/jpeg", false},
 		{"file.jpeg", "image/jpeg", false},
 		{"file.gif", "image/gif", false},
-		{"file.svg", "image/svg; charset=utf-8", false}, // SVG is text-based (XML)
+		{"file.svg", "image/svg+xml; charset=utf-8", false}, // SVG is text-based (XML)
 		{"file.ico", "image/x-icon", false},
 		{"file.webp", "image/webp", false},
 
