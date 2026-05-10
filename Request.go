@@ -33,10 +33,14 @@ type ItfRequest interface {
 	Param(string) string
 	// PathParam retrieves a Path parameter's value.
 	PathParam(string) string
-	// GetPostValue retrieves the value of POST param - cannot be used for non-multipart forms
-	// use FormValue for multipart form values.
+	// GetPostValue retrieves a value from an application/x-www-form-urlencoded
+	// POST body. It does NOT read multipart form fields — use FormValue for those.
 	GetPostValue(string) string
-	// FormValue retrieves multipart form parameter values
+	// FormValue returns the first value for the named field across both
+	// multipart/form-data and application/x-www-form-urlencoded request bodies.
+	// For multipart requests, this lazily triggers parsing if not already done;
+	// parse failures cause an empty string to be returned (use GetFormFile when
+	// you need the underlying error).
 	FormValue(string) string
 	// GetFormFile returns the first file for the provided form key
 	GetFormFile(string) (multipart.File, *multipart.FileHeader, error)
@@ -63,14 +67,27 @@ type request struct {
 	body        []byte
 	params      []rtr.Parameter
 
-	multipartForm         *multipart.Form
-	multipartFormBoundary string
+	// multipartForm holds the parsed form once parsing has succeeded.
+	// multipartParseErr caches a prior parse failure so callers (GetFormFile,
+	// GetFormFiles, FormValue) all surface the same error instead of getting
+	// a generic "no multipart form data" message after a real parse error.
+	// multipartMaxMem is the per-request memory cap passed to ReadForm; when
+	// zero, defaultMultipartMaxMemory is used. It is configured from
+	// ServerOptions.MultipartMaxMemory at context construction time.
+	multipartForm     *multipart.Form
+	multipartParseErr error
+	multipartMaxMem   int64
 
 	queryArgs Args
 
 	postArgs       Args
 	parsedPostArgs bool
 }
+
+// defaultMultipartMaxMemory is the in-memory cap used by ReadForm when the
+// server hasn't configured one. Anything beyond this cap spills to temp files
+// (which are cleaned up by CleanupMultipartForm). 32 MB matches net/http.
+const defaultMultipartMaxMemory int64 = 32 << 20
 
 // Header returns the header value for the given key.
 // Performs case-sensitive match first (priority), then falls back to lowercase match if not found.
@@ -181,32 +198,58 @@ func (req *request) parsePostArgs() {
 	req.parsedPostArgs = true
 }
 
+// ParseMultipartForm parses the request body as a multipart form.
+//
+// Idempotent: a successful parse caches the form, and a failed parse caches
+// the error. Subsequent calls return the cached result without re-reading
+// the body. This lets the server eagerly pre-parse while still letting
+// handlers re-call defensively (via GetFormFile etc.) and see the same error.
+//
+// Memory limit comes from req.multipartMaxMem (configured via
+// ServerOptions.MultipartMaxMemory); falls back to defaultMultipartMaxMemory
+// when zero. Bytes beyond the cap spill to temp files which CleanupMultipartForm
+// removes.
 func (req *request) ParseMultipartForm() error {
+	// Fast paths: already parsed, or already known to be unparseable.
 	if req.multipartForm != nil {
 		return nil
 	}
-
-	// Get the Content-Type header
-	contentType := req.ContentType
-	if !bytes.HasPrefix(contentType, consts.BytMultipartFormData) {
-		return fmt.Errorf("not a multipart form request")
+	if req.multipartParseErr != nil {
+		return req.multipartParseErr
 	}
 
-	// Extract boundary
+	// Validate Content-Type before touching the body.
+	contentType := req.ContentType
+	if !bytes.HasPrefix(contentType, consts.BytMultipartFormData) {
+		req.multipartParseErr = fmt.Errorf("not a multipart form request")
+		return req.multipartParseErr
+	}
+
+	// Extract boundary parameter
 	_, params, err := mime.ParseMediaType(b2s(contentType))
 	if err != nil {
+		req.multipartParseErr = err
 		return err
 	}
 
 	boundary, ok := params["boundary"]
 	if !ok {
-		return fmt.Errorf("no boundary found in multipart form data")
+		req.multipartParseErr = fmt.Errorf("no boundary found in multipart form data")
+		return req.multipartParseErr
 	}
 
-	// Create a new multipart reader
+	// Resolve the in-memory cap; 0 means "use default".
+	maxMem := req.multipartMaxMem
+	if maxMem <= 0 {
+		maxMem = defaultMultipartMaxMemory
+	}
+
+	// req.body is already buffered, so wrapping with bytes.NewReader is cheap
+	// and lets us re-read if needed (it isn't, currently — caching prevents that).
 	reader := multipart.NewReader(bytes.NewReader(req.body), boundary)
-	form, err := reader.ReadForm(32 << 20) // 32MB max memory
+	form, err := reader.ReadForm(maxMem)
 	if err != nil {
+		req.multipartParseErr = err
 		return err
 	}
 
@@ -214,11 +257,16 @@ func (req *request) ParseMultipartForm() error {
 	return nil
 }
 
-// GetFormFile returns the first file for the provided form key
+// GetFormFile returns the first file for the provided form key.
+//
+// ParseMultipartForm is idempotent — if the server already pre-parsed the
+// form during request handling, this is a near-free no-op. If the pre-parse
+// failed (or never ran), the cached error is returned here so the handler
+// can react to it instead of seeing a generic "no multipart form data".
 func (req *request) GetFormFile(key string) (multipart.File, *multipart.FileHeader, error) {
-	// if err := req.ParseMultipartForm(); err != nil {
-	// 	return nil, nil, err
-	// }
+	if err := req.ParseMultipartForm(); err != nil {
+		return nil, nil, err
+	}
 
 	if req.multipartForm == nil {
 		return nil, nil, fmt.Errorf("no multipart form data")
@@ -245,8 +293,15 @@ func (req *request) GetFormFile(key string) (multipart.File, *multipart.FileHead
 // Mirrors GetFormFile but lets callers handle multi-file uploads
 // (e.g. <input type="file" multiple>). Caller calls .Open() on each
 // header to read; matches the stdlib idiom in mime/multipart.
-// As with GetFormFile, the multipart form must already be parsed.
+//
+// As with GetFormFile, ParseMultipartForm is invoked defensively so a
+// missed/failed pre-parse surfaces here rather than masquerading as
+// "no multipart form data".
 func (req *request) GetFormFiles(key string) ([]*multipart.FileHeader, error) {
+	if err := req.ParseMultipartForm(); err != nil {
+		return nil, err
+	}
+
 	if req.multipartForm == nil {
 		return nil, fmt.Errorf("no multipart form data")
 	}
@@ -263,19 +318,42 @@ func (req *request) GetFormFiles(key string) ([]*multipart.FileHeader, error) {
 	return files, nil
 }
 
-// FormValue returns the first value for the named component of the form data
+// FormValue returns the first value for the named component of the form data.
+//
+// Dispatch is by Content-Type rather than by "is multipartForm non-nil",
+// because the latter was the source of a cross-request data leak: with
+// connection keep-alive the same context is reused, and prior to the fix
+// req.multipartForm survived across requests, causing a urlencoded POST on
+// the same connection to read string values from the previous multipart
+// request's form. Anchoring on the *current* request's Content-Type is the
+// correct discriminator.
 func (req *request) FormValue(key string) string {
-	if req.multipartForm != nil {
+	if bytes.HasPrefix(req.ContentType, consts.BytMultipartFormData) {
+		// Lazy-parse defense: ParseMultipartForm is idempotent, so a successful
+		// server-side pre-parse short-circuits immediately. Errors are swallowed
+		// here (the caller asked for a value, not an error); use GetFormFile
+		// when the underlying parse error matters.
+		if err := req.ParseMultipartForm(); err != nil || req.multipartForm == nil {
+			return ""
+		}
 		if values := req.multipartForm.Value[key]; len(values) > 0 {
 			return values[0]
 		}
+		return ""
 	}
 	return req.GetPostValue(key)
 }
 
-// CleanupMultipartForm removes any temporary files
+// CleanupMultipartForm releases any temp files AND nils out the cached form
+// and parse error. The latter is the load-bearing part: contexts are pooled
+// across requests on a keep-alive connection, and leaving multipartForm /
+// multipartParseErr populated would cause the next request on that connection
+// to read stale form values via FormValue (Form.Value is a plain map that
+// RemoveAll does not clear) or to inherit a stale parse failure.
 func (req *request) CleanupMultipartForm() {
 	if req.multipartForm != nil {
 		_ = req.multipartForm.RemoveAll()
+		req.multipartForm = nil
 	}
+	req.multipartParseErr = nil
 }

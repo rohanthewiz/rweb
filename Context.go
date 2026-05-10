@@ -222,8 +222,21 @@ func (ctx *context) Clean() {
 	ctx.response.body = ctx.response.body[:0]
 	ctx.params = ctx.params[:0]
 
-	// Reset request state flags
+	// ContentType is a cached []byte shortcut populated when the
+	// "Content-Type" header is read. It must be cleared between requests
+	// because the next request on the same connection may not send a
+	// Content-Type header at all (e.g. a GET); without this reset, a
+	// prior POST's Content-Type leaks through and silently steers
+	// parsePostArgs / FormValue / ParseMultipartForm down the wrong path.
+	ctx.request.ContentType = nil
+
+	// Reset request state flags AND the parsed-args slice itself.
+	// Resetting only the flag is not enough: parsePostArgs early-returns
+	// when Content-Type isn't urlencoded, so the next request (e.g. a GET)
+	// would see the previous request's args via GetPostValue → PostArgs,
+	// which returns &req.postArgs unconditionally.
 	ctx.parsedPostArgs = false
+	ctx.request.postArgs.Reset()
 
 	// Reset middleware chain position
 	ctx.handlerIndex = 0

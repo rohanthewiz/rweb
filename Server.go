@@ -42,6 +42,14 @@ type ServerOptions struct {
 	// Cookie holds server-wide default settings for cookies
 	Cookie CookieConfig
 	SSECfg SSECfg
+
+	// MultipartMaxMemory is the in-memory cap (in bytes) used when parsing
+	// multipart/form-data bodies. Form parts beyond this cap spill to temp
+	// files (which Cleanup removes after each request). When zero, the
+	// framework default (32 MB, matching net/http) is used. Set this lower
+	// for endpoints that do not expect uploads, or higher for upload-heavy
+	// services where temp-file spillover is undesirable.
+	MultipartMaxMemory int64
 }
 
 type SSECfg struct {
@@ -145,6 +153,18 @@ func WithSSESendConnectedEvent() ServerOption {
 	}
 }
 
+// WithMultipartMaxMemory sets the in-memory cap (in bytes) used when parsing
+// multipart/form-data bodies. A value of 0 (or negative) selects the default
+// of 32 MB. Bytes beyond the cap spill to temporary files which the framework
+// cleans up automatically at the end of each request.
+//
+// Example: WithMultipartMaxMemory(8 << 20) // 8 MB cap
+func WithMultipartMaxMemory(n int64) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.MultipartMaxMemory = n
+	}
+}
+
 // WithOptions creates a ServerOption from a ServerOptions struct.
 // This is provided for backwards compatibility with the old configuration style.
 // Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
@@ -160,6 +180,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.ReadyChan = serverOpts.ReadyChan
 		opts.Cookie = serverOpts.Cookie
 		opts.SSECfg = serverOpts.SSECfg
+		opts.MultipartMaxMemory = serverOpts.MultipartMaxMemory
 	}
 }
 
@@ -1171,14 +1192,20 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 }
 
 // newContext allocates a new context with the default state.
+//
+// multipartMaxMem is seeded from server options here (rather than per-request)
+// because (a) it's a stable server-wide setting, and (b) seeding it once at
+// pool creation avoids touching every request's hot path. Cleanup never
+// resets this field — it's config, not request state.
 func (s *Server) newContext() *context {
 	return &context{
 		server: s,
 		request: request{
-			reader:  bufio.NewReader(nil),
-			body:    make([]byte, 0),
-			headers: make([]Header, 0, 8),
-			params:  make([]rtr.Parameter, 0, 8),
+			reader:          bufio.NewReader(nil),
+			body:            make([]byte, 0),
+			headers:         make([]Header, 0, 8),
+			params:          make([]rtr.Parameter, 0, 8),
+			multipartMaxMem: s.options.MultipartMaxMemory,
 		},
 		response: response{
 			body:    make([]byte, 0, 1024),
