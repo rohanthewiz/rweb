@@ -14,10 +14,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/rohanthewiz/element"
 	"github.com/rohanthewiz/rweb/consts"
@@ -550,18 +552,49 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 
 		// Build the actual filepath now
 		wildcardPath := ctx.Request().Param("path")
+
+		// Defensive: percent-decode and reject any traversal-bearing input before
+		// touching the filesystem. `filepath.Join` *normalizes* `..` segments
+		// rather than rejecting them, so a request like /static/../../etc/passwd
+		// would otherwise resolve outside `targetDir`. We refuse such requests
+		// with 404 (rather than 403) so we don't leak whether off-root targets exist.
+		decoded, decErr := url.PathUnescape(wildcardPath)
+		if decErr != nil || strings.ContainsRune(decoded, 0) ||
+			slices.Contains(strings.Split(decoded, "/"), "..") {
+			ctx.SetStatus(consts.StatusNotFound)
+			return nil
+		}
+
 		fileSpec := filepath.Join("/", targetDir,
-			strings.Join(rhTokens, "/"), wildcardPath)
+			strings.Join(rhTokens, "/"), decoded)
 		if s.options.Debug {
 			fmt.Println("**-> fileFullPath", fileSpec)
 		}
 
-		body, err := os.ReadFile("." + fileSpec)
+		// Belt-and-suspenders containment check: even with `..` rejected above,
+		// resolve both the configured root and the candidate to absolute paths
+		// and require the candidate to be inside the root via `filepath.Rel`.
+		// This catches any unforeseen normalization quirks (e.g. odd separators
+		// on different OSes) without re-implementing them ourselves.
+		rootAbs, rErr := filepath.Abs("." + filepath.Join("/", targetDir))
+		candAbs, cErr := filepath.Abs("." + fileSpec)
+		if rErr != nil || cErr != nil {
+			ctx.SetStatus(consts.StatusNotFound)
+			return nil
+		}
+		rel, relErr := filepath.Rel(rootAbs, candAbs)
+		if relErr != nil || rel == ".." ||
+			strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			ctx.SetStatus(consts.StatusNotFound)
+			return nil
+		}
+
+		body, err := os.ReadFile(candAbs)
 		if err != nil {
 			return err
 		}
 
-		return File(ctx, filepath.Base(fileSpec), body)
+		return File(ctx, filepath.Base(candAbs), body)
 	})
 }
 
@@ -1012,11 +1045,36 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 	// A read on a half-closed or fully-closed TCP connection returns immediately
 	// (EOF or error), giving us sub-second disconnect detection instead of waiting
 	// up to a full heartbeat interval (~25s) to discover a broken pipe on write.
+	//
+	// The Read in the goroutine below otherwise blocks until the *client* closes,
+	// so on every other exit path (channel-close, "close" sentinel, write error)
+	// the goroutine would leak — parked on a conn the framework has stopped tracking.
+	// The defer below forces the parked Read to unblock by setting an immediate
+	// read deadline, then waits for the goroutine to finish before returning.
+	// The Read in the goroutine below otherwise blocks until the *client* closes,
+	// so on every other exit path (channel-close, "close" sentinel, write error)
+	// the goroutine would leak — parked on a conn the framework has stopped tracking.
+	// The defer below forces the parked Read to unblock by setting an immediate
+	// read deadline, then waits for the goroutine to finish before returning.
 	connGone := make(chan struct{})
+	var readerWG sync.WaitGroup
+	defer func() {
+		if ctx.conn != nil {
+			// Past-instant deadline: a Read already in-flight returns at once
+			// with a deadline-exceeded error. Side effect: the conn becomes
+			// unusable for further reads, which is fine — SSE streaming has
+			// finished and the conn isn't reused for keep-alive after this.
+			_ = ctx.conn.SetReadDeadline(time.Unix(1, 0))
+		}
+		readerWG.Wait()
+	}()
 	if ctx.conn != nil {
+		readerWG.Add(1)
 		go func() {
+			defer readerWG.Done()
 			buf := make([]byte, 1)
-			// Read blocks until the client closes or the conn is closed.
+			// Read blocks until the client closes, the conn is closed,
+			// or the deferred SetReadDeadline above fires.
 			// We don't expect any incoming data on an SSE connection.
 			_, _ = ctx.conn.Read(buf)
 			close(connGone)

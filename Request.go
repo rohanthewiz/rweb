@@ -40,6 +40,11 @@ type ItfRequest interface {
 	FormValue(string) string
 	// GetFormFile returns the first file for the provided form key
 	GetFormFile(string) (multipart.File, *multipart.FileHeader, error)
+	// GetFormFiles returns all FileHeaders for the given form key.
+	// Caller is responsible for calling .Open() on each header to read.
+	// Returns an error when no multipart form has been parsed or no
+	// files exist under the key.
+	GetFormFiles(string) ([]*multipart.FileHeader, error)
 	Body() []byte
 }
 
@@ -234,6 +239,28 @@ func (req *request) GetFormFile(key string) (multipart.File, *multipart.FileHead
 	}
 
 	return file, files[0], nil
+}
+
+// GetFormFiles returns all FileHeaders for the given form key.
+// Mirrors GetFormFile but lets callers handle multi-file uploads
+// (e.g. <input type="file" multiple>). Caller calls .Open() on each
+// header to read; matches the stdlib idiom in mime/multipart.
+// As with GetFormFile, the multipart form must already be parsed.
+func (req *request) GetFormFiles(key string) ([]*multipart.FileHeader, error) {
+	if req.multipartForm == nil {
+		return nil, fmt.Errorf("no multipart form data")
+	}
+
+	if req.multipartForm.File == nil {
+		return nil, fmt.Errorf("no files in form")
+	}
+
+	files := req.multipartForm.File[key]
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no file found for key: %s", key)
+	}
+
+	return files, nil
 }
 
 // FormValue returns the first value for the named component of the form data

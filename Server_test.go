@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 
@@ -321,6 +323,69 @@ func TestEarlyClose(t *testing.T) {
 	}()
 
 	_ = s.Run()
+}
+
+// TestStaticFilesPathTraversal asserts that StaticFiles refuses requests whose
+// wildcard path contains `..` segments — directly or percent-encoded — and
+// that legitimate requests still resolve. Regression guard: prior to the
+// containment fix, `filepath.Join` would normalize `..` and let a request
+// like /static/../sentinel.txt escape the configured root.
+func TestStaticFilesPathTraversal(t *testing.T) {
+	// StaticFiles serves relative to the process CWD (it reads via "." + path),
+	// so we hop CWD into a temp dir for the duration of the test and restore
+	// it on exit. Using a sibling layout: <tmp>/safe/ is the served root,
+	// <tmp>/secret.txt is the off-root sentinel that must remain unreachable.
+	origWD, err := os.Getwd()
+	assert.Nil(t, err)
+	tmp := t.TempDir()
+	assert.Nil(t, os.Chdir(tmp))
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	const allowedBody = "ok-allowed"
+	const secretBody = "off-root-secret"
+	assert.Nil(t, os.MkdirAll(filepath.Join(tmp, "safe"), 0o755))
+	assert.Nil(t, os.WriteFile(filepath.Join(tmp, "safe", "allowed.txt"),
+		[]byte(allowedBody), 0o644))
+	assert.Nil(t, os.WriteFile(filepath.Join(tmp, "secret.txt"),
+		[]byte(secretBody), 0o644))
+
+	s := rweb.NewServer()
+	// Strip the "/static" prefix and serve from "./safe" relative to CWD.
+	s.StaticFiles("/static/", "safe", 1)
+
+	// Happy path: legit request resolves and returns content.
+	resp := s.Request(consts.MethodGet, "/static/allowed.txt", nil, nil)
+	assert.Equal(t, int(200), int(resp.Status()))
+	assert.Equal(t, allowedBody, string(resp.Body()))
+
+	// Each of these traversal attempts must NOT return secret content.
+	// We accept any non-200 status (404 is what the guard returns) and
+	// require the body to never contain the off-root sentinel.
+	traversals := []string{
+		"/static/../secret.txt",
+		"/static/%2E%2E/secret.txt",
+		"/static/%2e%2e/secret.txt",
+		"/static/foo/../../secret.txt",
+		"/static/%2e%2e%2fsecret.txt",
+		// NUL byte truncation: some C-string-based filesystems would treat
+		// "allowed.txt\x00.evil" as "allowed.txt". We reject NUL outright.
+		"/static/allowed.txt%00.evil",
+		// Double-slash: attempts to make filepath.Join collapse into an
+		// absolute lookup. Containment check must still catch it.
+		"/static//etc/passwd",
+		// Absolute-path injection (rare but possible if a router decoded the
+		// wildcard into a path that begins with `/`).
+		"/static/%2fetc/passwd",
+	}
+	for _, url := range traversals {
+		r := s.Request(consts.MethodGet, url, nil, nil)
+		if int(r.Status()) == 200 {
+			t.Errorf("traversal %q unexpectedly succeeded with 200", url)
+		}
+		if bytes.Contains(r.Body(), []byte(secretBody)) {
+			t.Errorf("traversal %q leaked off-root content", url)
+		}
+	}
 }
 
 func TestUnavailablePort(t *testing.T) {
