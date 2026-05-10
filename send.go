@@ -48,14 +48,27 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 	case ".css":
 		mimeType = "text/css"
 		isTextBased = true
-	case ".js":
+	case ".js", ".mjs":
+		// .mjs is the standard extension for ES modules; both share the JS MIME type per RFC 9239
 		mimeType = "text/javascript"
 		isTextBased = true
 	case ".json":
 		mimeType = consts.MIMEJSON
 		isTextBased = true
+	case ".map":
+		// Source maps are JSON; serving them with a JSON type lets DevTools fetch them cleanly
+		mimeType = consts.MIMEJSON
+		isTextBased = true
 	case ".xml":
 		mimeType = consts.MIMEXML
+		isTextBased = true
+	case ".yaml", ".yml":
+		// RFC 9512 (Feb 2024) registered application/yaml as the canonical type
+		mimeType = "application/yaml"
+		isTextBased = true
+	case ".md":
+		// RFC 7763
+		mimeType = "text/markdown"
 		isTextBased = true
 	case ".txt", ".log":
 		mimeType = consts.MIMETextPlain
@@ -78,6 +91,14 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 		mimeType = "image/x-icon"
 	case ".webp":
 		mimeType = "image/webp"
+	case ".avif":
+		mimeType = "image/avif"
+	case ".bmp":
+		mimeType = "image/bmp"
+
+	// WebAssembly — browsers' streaming compile (instantiateStreaming) requires this exact type
+	case ".wasm":
+		mimeType = "application/wasm"
 
 	// Document formats (typically downloadable)
 	case ".pdf":
@@ -127,6 +148,10 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 		mimeType = "audio/ogg"
 	case ".m4a":
 		mimeType = "audio/mp4"
+	case ".flac":
+		mimeType = "audio/flac"
+	case ".aac":
+		mimeType = "audio/aac"
 
 	// Video formats
 	case ".mp4":
@@ -241,8 +266,8 @@ func Text(ctx Context, body string) error {
 	return ctx.WriteString(body)
 }
 
-// XML sends the body with the content type set to `text/xml`.
+// XML sends the body with the content type set to `application/xml`.
 func XML(ctx Context, body string) error {
-	ctx.Response().SetHeader("Content-Type", "text/xml")
+	ctx.Response().SetHeader("Content-Type", consts.MIMEXML)
 	return ctx.WriteString(body)
 }
