@@ -63,6 +63,13 @@ func main() {
 		return ctx.Next()
 	})
 
+	// Register the element package's debug helper routes under /debug.
+	// Provides /debug/set, /debug/show, /debug/clear, and /debug/clear-issues —
+	// useful during development to surface unclosed tags, unpaired attributes,
+	// and other HTML generation problems detected by the element builder.
+	// Safe to leave in for example/demo code; omit (or gate behind a build flag) in production.
+	s.ElementDebugRoutes()
+
 	// Route: Root endpoint
 	// Handles GET requests to "/"
 	// Test with: curl http://localhost:8080/
