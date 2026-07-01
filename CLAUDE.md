@@ -104,10 +104,11 @@ s.Get("/profile", func(ctx rweb.Context) error {
 
 ### Directory Structure
 ```
-/consts/        - HTTP constants (headers, status codes, MIME types)
-/core/rtr/      - Radix tree router implementation
-/examples/      - Example applications
-/*_test.go      - Test files for each component
+/consts/            - HTTP constants (headers, status codes, MIME types)
+/core/rtr/          - Radix tree router implementation
+/middleware/stylus/ - Stylus CSS middleware (compiles .styl via go-styl; optional subpackage)
+/examples/          - Example applications
+/*_test.go          - Test files for each component
 ```
 
 ## Important Notes

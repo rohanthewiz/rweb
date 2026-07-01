@@ -18,6 +18,7 @@ Thanks and credit to Akyoto, especially for the radix tree!
 - Flexible static files handling
 - Scales incredibly well with the number of routes
 - Route grouping with middleware support
+- Stylus CSS middleware — serve compiled [Stylus](https://stylus-lang.com/) stylesheets via [go-styl](https://github.com/rohanthewiz/go-styl) (see below)
 
 ## Installation
 
@@ -307,6 +308,42 @@ By default, RWeb cookies are secure:
 For a comprehensive example including session management, login/logout, flash messages, and remember me functionality, see [examples/cookies/main.go](examples/cookies/main.go).
 
 
+
+## Stylus CSS Middleware
+
+`middleware/stylus` serves compiled Stylus (`.styl`) stylesheets, powered by
+[go-styl](https://github.com/rohanthewiz/go-styl) (a pure-Go Stylus compiler — no
+Node.js). Stylesheets compile on first request and are cached, recompiling when the
+source or any of its `@import`s change. Responses carry ETags (with 304 handling),
+and `SourceMaps: true` serves `<name>.css.map` alongside for browser DevTools.
+
+```go
+import (
+    "github.com/rohanthewiz/go-styl/stylserve"
+    "github.com/rohanthewiz/rweb/middleware/stylus"
+)
+
+// GET /css/<name>.css compiles ./styles/<name>.styl
+s.Get("/css/*path", stylus.Handler(stylserve.Options{
+    Dir:        "./styles",
+    SourceMaps: true, // dev: serve <name>.css.map + sourceMappingURL comment
+}))
+```
+
+Or embed the stylesheets in the binary:
+
+```go
+//go:embed styles/*.styl
+var styles embed.FS
+
+sub, _ := fs.Sub(styles, "styles")
+s.Get("/css/*path", stylus.Handler(stylserve.Options{FS: sub}))
+```
+
+Compile errors return `500` with a positioned `file:line:col` message; unknown
+paths return `404`. This lives in a subpackage, so apps that don't import it
+don't build the compiler. See [examples/stylus_css](examples/stylus_css/) for a
+runnable demo.
 
 ## Benchmarks
 

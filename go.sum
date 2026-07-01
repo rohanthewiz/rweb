@@ -2,5 +2,7 @@ github.com/rohanthewiz/assert v0.1.2 h1:coi0nUTAuqgpxoa7THQynDnBKUzV9Bid+tNaocUk
 github.com/rohanthewiz/assert v0.1.2/go.mod h1:Xix0OMMRN0aGkE207Wk5GJk0eWlpcNGph0+kYpuq+vQ=
 github.com/rohanthewiz/element v0.5.6 h1:ngtHqe7asrJavAotQVNBK2veXgnGEIfcCzm7AYVJFHM=
 github.com/rohanthewiz/element v0.5.6/go.mod h1:YZnKqWX2lSsR+zi06x3vhViYVoOSx8xHQjUMTmM/FLo=
+github.com/rohanthewiz/go-styl v0.0.0-20260701215319-56c1573da3fb h1:8Ii/0Ximoo7P9257UB+OQhrcyrsT/Y6ZZNsm33NkJUo=
+github.com/rohanthewiz/go-styl v0.0.0-20260701215319-56c1573da3fb/go.mod h1:KrfV5uRUL3U7mh32H7zeIZzKJeIGOU/AEC5UBqH53/s=
 github.com/rohanthewiz/serr v1.3.0 h1:gCKIHw0XFOmPifLq0oocx5RDi6iT7AxzVGT+9z3liO4=
 github.com/rohanthewiz/serr v1.3.0/go.mod h1:l01AbjXw1zP0kxe5tX5s/sADHiBbl0Rwfo/igde4b88=
