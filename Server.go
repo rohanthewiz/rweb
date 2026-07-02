@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,7 +52,20 @@ type ServerOptions struct {
 	// for endpoints that do not expect uploads, or higher for upload-heavy
 	// services where temp-file spillover is undesirable.
 	MultipartMaxMemory int64
+
+	// MaxRequestBodySize caps the request body size in bytes, for both
+	// Content-Length and chunked bodies. Without a cap, a single request
+	// claiming an enormous Content-Length forces an equally enormous
+	// allocation. Requests over the cap receive 413 Request Entity Too Large
+	// and the connection is closed. 0 selects the default (100 MB);
+	// a negative value disables the cap entirely.
+	MaxRequestBodySize int64
 }
+
+// defaultMaxRequestBodySize is the request-body cap used when
+// ServerOptions.MaxRequestBodySize is zero. Generous enough for large
+// uploads while still bounding what a single request can make us allocate.
+const defaultMaxRequestBodySize int64 = 100 << 20 // 100 MB
 
 type SSECfg struct {
 	SendConnectedEvent bool // Whether to send "Connected" event to clients
@@ -165,6 +180,18 @@ func WithMultipartMaxMemory(n int64) ServerOption {
 	}
 }
 
+// WithMaxRequestBodySize caps the request body size in bytes (both
+// Content-Length and chunked bodies). Requests over the cap receive
+// 413 Request Entity Too Large. 0 selects the default (100 MB); a negative
+// value disables the cap.
+//
+// Example: WithMaxRequestBodySize(10 << 20) // 10 MB cap
+func WithMaxRequestBodySize(n int64) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.MaxRequestBodySize = n
+	}
+}
+
 // WithOptions creates a ServerOption from a ServerOptions struct.
 // This is provided for backwards compatibility with the old configuration style.
 // Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
@@ -181,6 +208,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.Cookie = serverOpts.Cookie
 		opts.SSECfg = serverOpts.SSECfg
 		opts.MultipartMaxMemory = serverOpts.MultipartMaxMemory
+		opts.MaxRequestBodySize = serverOpts.MaxRequestBodySize
 	}
 }
 
@@ -450,7 +478,7 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			pathWoPrefix = pathWoPrefix[idx+len(pathPrefix):]
 		}
 
-		proxyURL := urlWithoutPath + filepath.Join("/", strippedPrefix, tURL.Path, pathWoPrefix)
+		proxyURL := urlWithoutPath + path.Join("/", strippedPrefix, tURL.Path, pathWoPrefix)
 
 		if qry := ctxReq.Query(); qry != "" {
 			proxyURL = proxyURL + "?" + qry
@@ -499,14 +527,18 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			if strings.EqualFold(consts.HeaderContentLength, hdr) { // we auto set content-length - don't set it twice
 				continue
 			}
-			ctx.Response().SetHeader(hdr, strings.Join(vals, ","))
+			// One header line per value — joining with commas corrupts
+			// headers that legally repeat, most notably Set-Cookie.
+			for _, val := range vals {
+				ctx.Response().AddHeader(hdr, val)
+			}
 		}
 		return nil
 	}
 
-	s.setMethodProxyHandler(filepath.Join("/", pathPrefix, "*path"), hdlr)
+	s.setMethodProxyHandler(path.Join("/", pathPrefix, "*path"), hdlr)
 	// The wildcard route does not handle the root of the prefix, so have to handle that separately
-	s.setMethodProxyHandler(filepath.Join("/", pathPrefix), hdlr)
+	s.setMethodProxyHandler(path.Join("/", pathPrefix), hdlr)
 	return nil
 }
 
@@ -538,8 +570,9 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		return
 	}
 
-	// Build wildcard route
-	route := filepath.Join("/", reqDir, "*path")
+	// Build wildcard route (URL path — always forward slashes, hence path.Join
+	// rather than filepath.Join, which would use backslashes on Windows)
+	route := path.Join("/", reqDir, "*path")
 	if s.options.Debug {
 		fmt.Println("**-> static route:", route)
 	}
@@ -610,12 +643,31 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 			return nil
 		}
 
+		info, statErr := os.Stat(candAbs)
+		if statErr != nil || info.IsDir() {
+			ctx.SetStatus(consts.StatusNotFound)
+			return nil
+		}
+		modTime := info.ModTime()
+
+		// Honor If-Modified-Since: reply 304 without reading or resending
+		// the file when the client's cached copy is still current.
+		// Last-Modified has one-second resolution, so compare at that grain.
+		if ims := ctx.Request().Header(consts.HeaderIfModifiedSince); ims != "" {
+			if t, tErr := http.ParseTime(ims); tErr == nil &&
+				!modTime.Truncate(time.Second).After(t) {
+				ctx.SetStatus(consts.StatusNotModified)
+				return nil
+			}
+		}
+
 		body, err := os.ReadFile(candAbs)
 		if err != nil {
 			return err
 		}
 
-		return File(ctx, filepath.Base(candAbs), body)
+		// Sets Last-Modified so clients can revalidate with If-Modified-Since
+		return FileWithModTime(ctx, filepath.Base(candAbs), body, modTime)
 	})
 }
 
@@ -625,6 +677,25 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 func (s *Server) Request(method string, url string, headers []Header, body io.Reader) Response {
 	ctx := s.newContext()
 	ctx.request.headers = headers
+
+	// Seed the ContentType shortcut from the supplied headers. On a real
+	// connection this happens while reading headers off the wire, and the
+	// form-parsing paths (post args, multipart) all key off it.
+	for _, h := range headers {
+		if strings.EqualFold(h.Key, consts.HeaderContentType) {
+			ctx.request.ContentType = s2b(h.Value)
+			break
+		}
+	}
+
+	if body != nil {
+		b, err := io.ReadAll(body)
+		if err != nil {
+			log.Printf("rweb: error reading synthetic request body: %v", err)
+		}
+		ctx.request.body = append(ctx.request.body, b...)
+	}
+
 	s.handleRequest(ctx, method, url, io.Discard)
 	return ctx.Response()
 }
@@ -777,6 +848,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 		s.contextPool.Put(ctx)
 	}()
 
+	// Backstop: a panic anywhere in connection handling (request parsing,
+	// response writing) must only cost this connection, never the process.
+	// Handler panics are already recovered closer to the call site in
+	// handleRequest; this catches everything else. Registered after the
+	// cleanup defers above so they still run (LIFO) once we've recovered.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("rweb: recovered panic serving connection from %s: %v\n%s",
+				conn.RemoteAddr(), r, debug.Stack())
+			_, _ = io.WriteString(conn, consts.HTTPInternalError)
+		}
+	}()
+
 	for {
 		// Read a line from the connection
 		message, err := ctx.reader.ReadString(consts.RuneNewLine)
@@ -834,7 +918,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 
 			key := message[:colon]
-			value := message[colon+2 : len(message)-2]
+			// Everything after the colon is the value. Never assume a space
+			// follows the colon — "Host:example.com" is legal per RFC 7230,
+			// and "X-Empty:" has no value at all (slicing colon+2 here used
+			// to panic on that). TrimSpace removes the trailing CRLF along
+			// with any optional whitespace (OWS) around the value.
+			value := strings.TrimSpace(message[colon+1:])
 
 			ctx.request.headers = append(ctx.request.headers, Header{
 				Key:   key,
@@ -856,20 +945,40 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 		}
 
+		// Resolve the request-body cap; 0 means "use default", negative disables.
+		maxBody := s.options.MaxRequestBodySize
+		if maxBody == 0 {
+			maxBody = defaultMaxRequestBodySize
+		}
+
 		// Read the request body if present
 		if contentLen > 0 {
-			// Fixed-length body
-			body := make([]byte, contentLen)
-			_, err = io.ReadFull(ctx.reader, body)
-			if err != nil {
-				if s.options.Verbose {
-					fmt.Println("Error reading request body:", err)
-				}
+			// Reject oversized bodies before allocating anything — the
+			// client-supplied Content-Length must not dictate our memory use.
+			if maxBody > 0 && contentLen > maxBody {
+				_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
 				return
 			}
 
-			if method != consts.MethodHead && method != consts.MethodTrace {
-				ctx.request.body = append(ctx.request.body, body...)
+			if method == consts.MethodHead || method == consts.MethodTrace {
+				// Body is ignored for these methods; consume without buffering
+				// so the connection stays aligned for the next request.
+				_, err = io.CopyN(io.Discard, ctx.reader, contentLen)
+				if err != nil {
+					return
+				}
+			} else {
+				// Read directly into the pooled body buffer — no intermediate
+				// allocation + copy.
+				start := len(ctx.request.body)
+				ctx.request.body = slices.Grow(ctx.request.body, int(contentLen))[:start+int(contentLen)]
+				_, err = io.ReadFull(ctx.reader, ctx.request.body[start:])
+				if err != nil {
+					if s.options.Verbose {
+						fmt.Println("Error reading request body:", err)
+					}
+					return
+				}
 			}
 
 		} else if isChunked {
@@ -883,7 +992,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				// Parse chunk size (hex)
 				size, err := strconv.ParseInt(strings.TrimSpace(chunkSize), 16, 64)
-				if err != nil {
+				if err != nil || size < 0 {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
 					return
 				}
@@ -898,13 +1007,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 					break
 				}
 
-				// Read chunk data
-				chunk := make([]byte, size)
-				_, err = io.ReadFull(ctx.reader, chunk)
+				// Enforce the cap on the accumulated chunked body as well
+				if maxBody > 0 && int64(len(ctx.request.body))+size > maxBody {
+					_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
+					return
+				}
+
+				// Read chunk data directly into the pooled body buffer
+				start := len(ctx.request.body)
+				ctx.request.body = slices.Grow(ctx.request.body, int(size))[:start+int(size)]
+				_, err = io.ReadFull(ctx.reader, ctx.request.body[start:])
 				if err != nil {
 					return
 				}
-				ctx.request.body = append(ctx.request.body, chunk...)
 
 				// Read chunk LF
 				_, err = ctx.reader.ReadString(consts.RuneNewLine)
@@ -946,7 +1061,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 
 	// Parse Post Args or Multipart Form
 	if len(ctx.request.body) > 0 {
-		if bytes.HasPrefix(ctx.ContentType, consts.BytMultipartFormData) {
+		if hasContentTypePrefix(ctx.ContentType, consts.BytMultipartFormData) {
 			if err := ctx.request.ParseMultipartForm(); err != nil {
 				fmt.Printf("Error parsing multipart form: %v\n", err)
 			} else {
@@ -954,7 +1069,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 					fmt.Println("Parsed Multipart Form")
 				}
 			}
-		} else if bytes.EqualFold(ctx.ContentType, consts.BytFormData) {
+		} else if hasContentTypePrefix(ctx.ContentType, consts.BytFormData) {
 			ctx.request.parsePostArgs()
 			if s.options.Debug {
 				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
@@ -964,8 +1079,18 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 
 	// Call the first handler in the chain
 	// (which will call any subsequent handlers)
-	// Handlers populate the context, before the response is written
-	err := s.handlers[0](ctx)
+	// Handlers populate the context, before the response is written.
+	// A panic in any handler is recovered here and routed through the
+	// error handler as a 500 — one bad handler must not take down the
+	// whole process (or even the connection).
+	err := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic in handler for %q: %v\n%s", ctx.path, r, debug.Stack())
+			}
+		}()
+		return s.handlers[0](ctx)
+	}()
 	if err != nil {
 		s.errorHandler(ctx, err)
 	}
@@ -1007,7 +1132,10 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		return
 	}
 
-	tmp := bytes.Buffer{}
+	// Reuse the pooled context's scratch buffer rather than allocating a
+	// fresh one per request
+	tmp := &ctx.respBuf
+	tmp.Reset()
 
 	// HTTP1.1 header and status
 	tmp.WriteString(consts.HTTP1)
@@ -1044,7 +1172,11 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 
 	// Body
 	if ctx.sseEventsChan == nil {
-		_, _ = respWriter.Write(ctx.response.body)
+		// HEAD responses carry the same headers a GET would (including
+		// Content-Length above) but MUST NOT include a body (RFC 7231 §4.3.2)
+		if ctx.request.method != consts.MethodHead {
+			_, _ = respWriter.Write(ctx.response.body)
+		}
 	} else {
 		// fmt.Println("RWEB: SSE events channel is set -- sending events")
 		err = s.sendSSE(ctx, respWriter)

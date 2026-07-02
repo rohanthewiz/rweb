@@ -20,6 +20,8 @@ const (
 	HTTP11OK = "HTTP/1.1 200"
 )
 
+// TestPanic verifies that a panicking handler is recovered by the framework
+// and surfaced as a 500 response instead of crashing the process.
 func TestPanic(t *testing.T) {
 	s := rweb.NewServer()
 
@@ -27,15 +29,48 @@ func TestPanic(t *testing.T) {
 		panic("Something unbelievable happened")
 	})
 
-	defer func() {
-		r := recover()
+	resp := s.Request(consts.MethodGet, "/panic", nil, nil)
+	assert.Equal(t, resp.Status(), consts.StatusInternalServerError)
+}
 
-		if r == nil {
-			t.Error("Didn't panic")
-		}
+// TestHeaderEdgeCases sends raw header lines that tripped the parser in the
+// past: an empty header value used to panic the whole process (inverted slice
+// bounds), and a value with no space after the colon lost its first byte.
+func TestHeaderEdgeCases(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	s := rweb.NewServer(rweb.ServerOptions{ReadyChan: readyChan, Address: "localhost:"})
+
+	s.Get("/hdr", func(ctx rweb.Context) error {
+		return ctx.WriteString("v=" + ctx.Request().Header("X-Tight"))
+	})
+
+	go func() {
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-readyChan
+
+		addr := "127.0.0.1:" + s.GetListenPort()
+		buf := make([]byte, 512)
+
+		// Empty header value — must get a normal response, not a process crash
+		conn, err := net.Dial("tcp", addr)
+		assert.Nil(t, err)
+		fmt.Fprint(conn, "GET /hdr HTTP/1.1\r\nX-Empty:\r\n\r\n")
+		n, err := conn.Read(buf)
+		assert.Nil(t, err)
+		assert.True(t, bytes.Contains(buf[:n], []byte("200")))
+		_ = conn.Close()
+
+		// No space after the colon — the full value must be preserved
+		conn2, err := net.Dial("tcp", addr)
+		assert.Nil(t, err)
+		fmt.Fprint(conn2, "GET /hdr HTTP/1.1\r\nX-Tight:tight-value\r\n\r\n")
+		n, err = conn2.Read(buf)
+		assert.Nil(t, err)
+		assert.True(t, bytes.Contains(buf[:n], []byte("v=tight-value")))
+		_ = conn2.Close()
 	}()
 
-	s.Request(consts.MethodGet, "/panic", nil, nil)
+	_ = s.Run()
 }
 
 func TestGet(t *testing.T) {

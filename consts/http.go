@@ -24,8 +24,10 @@ const (
 	SchemeDelimiter = "://"
 	Localhost       = "localhost"
 
-	HTTPBadRequest = "HTTP/1.1 400 Bad Request\r\n\r\n"
-	HTTPBadMethod  = "BAD-METHOD / HTTP/1.1\r\n\r\n"
+	HTTPBadRequest      = "HTTP/1.1 400 Bad Request\r\n\r\n"
+	HTTPBadMethod       = "BAD-METHOD / HTTP/1.1\r\n\r\n"
+	HTTPInternalError   = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
+	HTTPPayloadTooLarge = "HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n"
 )
 
 var ( // HTTP messages

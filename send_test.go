@@ -1,6 +1,7 @@
 package rweb_test
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -339,8 +340,10 @@ func TestFileWithModTime(t *testing.T) {
 		lastModified := response.Header("Last-Modified")
 		assert.NotEqual(t, lastModified, "")
 
-		// Verify the format is RFC1123
-		expectedLastModified := modTime.UTC().Format(time.RFC1123)
+		// Verify the format is the HTTP date format (RFC1123 with GMT zone,
+		// per RFC 7231 — "UTC" as rendered by time.RFC1123 is not a valid
+		// HTTP date and breaks If-Modified-Since round-trips)
+		expectedLastModified := modTime.UTC().Format(http.TimeFormat)
 		assert.Equal(t, lastModified, expectedLastModified)
 
 		// Check Date header is also present

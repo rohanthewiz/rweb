@@ -78,7 +78,8 @@ type request struct {
 	multipartParseErr error
 	multipartMaxMem   int64
 
-	queryArgs Args
+	queryArgs       Args
+	parsedQueryArgs bool
 
 	postArgs       Args
 	parsedPostArgs bool
@@ -90,15 +91,12 @@ type request struct {
 const defaultMultipartMaxMemory int64 = 32 << 20
 
 // Header returns the header value for the given key.
-// Performs case-sensitive match first (priority), then falls back to lowercase match if not found.
+// Matching is case-insensitive per RFC 7230 (header field names are
+// case-insensitive), so Header("Content-Type") finds "content-type",
+// "Content-type", etc. EqualFold does this without allocating.
 func (req *request) Header(key string) string {
 	for _, header := range req.headers {
-		// Give priority to case-sensitive match
-		if header.Key == key {
-			return header.Value
-		}
-		// Otherwise, try lowercase match
-		if header.Key == strings.ToLower(key) {
+		if strings.EqualFold(header.Key, key) {
 			return header.Value
 		}
 	}
@@ -151,10 +149,19 @@ func (req *request) Query() string {
 }
 
 // QueryParam returns the value of a particular query param.
+// The query string is parsed once per request and cached, so repeated
+// QueryParam calls in a handler don't re-parse (or re-allocate).
 func (req *request) QueryParam(param string) (value string) {
-	var args Args
-	args.Parse(req.query)
-	return b2s(args.Peek(param))
+	req.parseQueryArgs()
+	return b2s(req.queryArgs.Peek(param))
+}
+
+func (req *request) parseQueryArgs() {
+	if req.parsedQueryArgs {
+		return
+	}
+	req.queryArgs.Parse(req.query)
+	req.parsedQueryArgs = true
 }
 
 // Scheme returns either `http`, `https` or an empty string.
@@ -190,7 +197,7 @@ func (req *request) parsePostArgs() {
 		return
 	}
 
-	if !bytes.EqualFold(req.ContentType, consts.BytFormData) {
+	if !hasContentTypePrefix(req.ContentType, consts.BytFormData) {
 		return
 	}
 
@@ -220,7 +227,7 @@ func (req *request) ParseMultipartForm() error {
 
 	// Validate Content-Type before touching the body.
 	contentType := req.ContentType
-	if !bytes.HasPrefix(contentType, consts.BytMultipartFormData) {
+	if !hasContentTypePrefix(contentType, consts.BytMultipartFormData) {
 		req.multipartParseErr = fmt.Errorf("not a multipart form request")
 		return req.multipartParseErr
 	}
@@ -328,7 +335,7 @@ func (req *request) GetFormFiles(key string) ([]*multipart.FileHeader, error) {
 // request's form. Anchoring on the *current* request's Content-Type is the
 // correct discriminator.
 func (req *request) FormValue(key string) string {
-	if bytes.HasPrefix(req.ContentType, consts.BytMultipartFormData) {
+	if hasContentTypePrefix(req.ContentType, consts.BytMultipartFormData) {
 		// Lazy-parse defense: ParseMultipartForm is idempotent, so a successful
 		// server-side pre-parse short-circuits immediately. Errors are swallowed
 		// here (the caller asked for a value, not an error); use GetFormFile

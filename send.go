@@ -2,6 +2,7 @@ package rweb
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -190,13 +191,16 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 	// content into a script type even when our Content-Type is exactly right.
 	ctx.Response().SetHeader("X-Content-Type-Options", "nosniff")
 
-	// Set Date header (RFC 7231 requirement for origin servers)
-	ctx.Response().SetHeader(consts.HeaderDate, time.Now().UTC().Format(time.RFC1123))
+	// Set Date header (RFC 7231 requirement for origin servers).
+	// http.TimeFormat is RFC1123 with the zone hardcoded to "GMT" — HTTP
+	// dates MUST use GMT; time.RFC1123 with a UTC time renders "UTC",
+	// which standard parsers (incl. http.ParseTime) reject.
+	ctx.Response().SetHeader(consts.HeaderDate, time.Now().UTC().Format(http.TimeFormat))
 
 	// Set Last-Modified header if modification time is provided
 	// This enables conditional requests (If-Modified-Since) for better caching
 	if !modTime.IsZero() {
-		ctx.Response().SetHeader(consts.HeaderLastModified, modTime.UTC().Format(time.RFC1123))
+		ctx.Response().SetHeader(consts.HeaderLastModified, modTime.UTC().Format(http.TimeFormat))
 	}
 
 	// For downloadable files, add additional headers to prompt download

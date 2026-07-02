@@ -3,9 +3,18 @@ package rweb
 // credit fasthttp
 
 import (
+	"bytes"
 	"math/rand"
 	"unsafe"
 )
+
+// hasContentTypePrefix reports whether the Content-Type value ct starts with
+// prefix, ignoring case. Content-Type values commonly carry parameters
+// ("application/x-www-form-urlencoded; charset=UTF-8"), so an exact match is
+// the wrong test, and RFC 7231 makes media types case-insensitive.
+func hasContentTypePrefix(ct, prefix []byte) bool {
+	return len(ct) >= len(prefix) && bytes.EqualFold(ct[:len(prefix)], prefix)
+}
 
 // b2s converts byte slice to a string without memory allocation.
 // See https://groups.google.com/forum/#!msg/Golang-Nuts/ENgbUzYvCuU/90yGx7GUAgAJ .

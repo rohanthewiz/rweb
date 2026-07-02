@@ -34,9 +34,9 @@ func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path 
 	}
 
 	queryPos := strings.IndexByte(url, consts.RuneQuestion)
-	if queryPos != -1 && queryPos < len(url)+1 /* we will go one past the question sign below */ {
+	if queryPos != -1 {
 		path = url[:queryPos]
-		query = url[queryPos+1:] // check above ensures we don't go past the end of the string
+		query = url[queryPos+1:] // safe even when '?' is the last char (yields "")
 	} else {
 		path = url
 	}

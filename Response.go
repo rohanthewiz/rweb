@@ -14,6 +14,9 @@ type Response interface {
 	Body() []byte
 	Header(string) string
 	SetHeader(key string, value string)
+	// AddHeader appends a header without replacing existing values for the
+	// same key — required for headers that legally repeat, like Set-Cookie.
+	AddHeader(key string, value string)
 	SetBody([]byte)
 	SetStatus(int)
 	Status() int

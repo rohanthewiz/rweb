@@ -1,6 +1,7 @@
 package rweb
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"net"
@@ -208,6 +209,9 @@ type context struct {
 	wsConn *WSConn
 	// Flag indicating if connection was upgraded to WebSocket
 	wsUpgraded bool
+	// Scratch buffer reused by writeResponse to assemble the status line
+	// and headers, avoiding a per-request allocation
+	respBuf bytes.Buffer
 }
 
 // Clean resets the context for reuse in the next request.
@@ -237,6 +241,10 @@ func (ctx *context) Clean() {
 	// which returns &req.postArgs unconditionally.
 	ctx.parsedPostArgs = false
 	ctx.request.postArgs.Reset()
+
+	// Same treatment for the cached query args (parsed lazily by QueryParam)
+	ctx.parsedQueryArgs = false
+	ctx.request.queryArgs.Reset()
 
 	// Reset middleware chain position
 	ctx.handlerIndex = 0
@@ -699,17 +707,10 @@ func (ctx *context) GetConn() net.Conn {
 }
 
 // UserAgent returns the User-Agent header value from the request.
-// This method performs case-insensitive header matching to handle variations
-// like "User-Agent", "user-agent", or "USER-AGENT".
+// Header matching is case-insensitive ("user-agent", "USER-AGENT", ...).
 // Returns an empty string if the User-Agent header is not present.
 func (ctx *context) UserAgent() string {
-	// Perform case-insensitive search through headers
-	for _, header := range ctx.request.headers {
-		if strings.EqualFold(header.Key, "User-Agent") {
-			return header.Value
-		}
-	}
-	return ""
+	return ctx.request.Header("User-Agent")
 }
 
 // NoContent writes a 204 No Content response. Body is intentionally empty —
