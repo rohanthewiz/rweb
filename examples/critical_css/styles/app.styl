@@ -1,0 +1,47 @@
+// Design system for the whole app — every page prunes what it needs.
+primary = #e91e63
+muted = #607d8b
+
+.topbar
+  background #222
+  padding 12px 20px
+
+  .brand
+    color white
+    font-weight bold
+    text-decoration none
+
+.card
+  border 1px solid #ddd
+  border-radius 8px
+  padding 16px
+
+  .card__title
+    margin 0 0 8px
+    color primary
+
+.btn
+  background primary
+  color white
+  border-radius 4px
+  padding 8px 14px
+  &:hover
+    background darken(primary, 10%)
+
+.btn--muted
+  background muted
+
+// Toggled by script after load — kept only via Safelist.
+.menu--open
+  display block
+
+// Never used anywhere: pruned from every page.
+.legacy-table
+  border-collapse collapse
+
+.spinner
+  animation spin 1s linear infinite
+
+@keyframes spin
+  to
+    transform rotate(360deg)
