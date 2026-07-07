@@ -229,6 +229,16 @@ type TLSCfg struct {
 	CertFile string // Path to certificate file
 	KeyFile  string // Path to private key file
 	UseTLS   bool   // Whether to use TLS
+
+	// Config, when non-nil, is used for the TLS listener instead of loading
+	// CertFile/KeyFile once at startup. This is the extension point for dynamic
+	// certificate sources: an autocert.Manager's TLSConfig() (in-process
+	// Let's Encrypt issuance/renewal via its GetCertificate callback) or a
+	// hot-reloading file store that picks up certbot-renewed certs without a
+	// restart. The static-file path can't do either, since LoadX509KeyPair
+	// pins whatever was on disk at boot for the life of the process.
+	// A zero MinVersion is raised to TLS 1.2 to match the static path.
+	Config *tls.Config
 }
 
 // Server is the HTTP Server.
@@ -721,14 +731,24 @@ func (s *Server) Run() (err error) {
 	var listener net.Listener
 
 	if s.options.TLS.UseTLS {
-		cert, err := tls.LoadX509KeyPair(s.options.TLS.CertFile, s.options.TLS.KeyFile)
-		if err != nil {
-			return fmt.Errorf("failed to load TLS certificate: %v", err)
-		}
+		tlsConfig := s.options.TLS.Config
+		if tlsConfig == nil {
+			// Static cert path: the key pair is loaded once and fixed for the
+			// life of the process. Callers needing rotation supply TLS.Config.
+			cert, err := tls.LoadX509KeyPair(s.options.TLS.CertFile, s.options.TLS.KeyFile)
+			if err != nil {
+				return fmt.Errorf("failed to load TLS certificate: %v", err)
+			}
 
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12, // Require TLS 1.2 or higher
+			tlsConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12, // Require TLS 1.2 or higher
+			}
+		} else if tlsConfig.MinVersion == 0 {
+			// Clone before touching it — the caller may share this config
+			// (e.g. an autocert manager's) with other listeners.
+			tlsConfig = tlsConfig.Clone()
+			tlsConfig.MinVersion = tls.VersionTLS12
 		}
 
 		// Create TLS listener

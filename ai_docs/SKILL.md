@@ -36,15 +36,39 @@ func main() {
 
 ### TLS/HTTPS Configuration
 
+Note: the TLS listener binds `TLS.TLSAddr` (not `Address`). `Address` is the plain-HTTP address, used by `RunWithHttpsRedirect()` for the 80 -> 443 redirect server.
+
 ```go
 s := rweb.NewServer(rweb.ServerOptions{
-    Address: ":443",
+    Address: ":80",
     TLS: rweb.TLSCfg{
         UseTLS:   true,
+        TLSAddr:  ":443",
         KeyFile:  "certs/localhost.key",
         CertFile: "certs/localhost.crt",
     },
 })
+```
+
+For dynamic certificates — Let's Encrypt autocert or hot-reload of renewed cert files — supply `TLS.Config` instead of Cert/KeyFile; it is used as the listener's `*tls.Config` (MinVersion defaults to TLS 1.2 if unset):
+
+```go
+m := &autocert.Manager{
+    Prompt:     autocert.AcceptTOS,
+    HostPolicy: autocert.HostWhitelist("example.org"),
+    Cache:      autocert.DirCache("certs/autocert"),
+}
+s := rweb.NewServer(rweb.ServerOptions{
+    Address: ":80",
+    TLS: rweb.TLSCfg{
+        UseTLS:  true,
+        TLSAddr: ":443",
+        Config:  m.TLSConfig(), // GetCertificate handles issuance + renewal + TLS-ALPN challenges
+    },
+})
+// Serve HTTP-01 challenges and redirect everything else to HTTPS
+go http.ListenAndServe(":80", m.HTTPHandler(nil))
+log.Fatal(s.Run())
 ```
 
 ## Routing
