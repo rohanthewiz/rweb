@@ -46,9 +46,16 @@ ctx.sseEventName = ""
 | `Content-Type` | `text/event-stream; charset=utf-8` | SSE MIME type |
 | `Cache-Control` | `no-cache` | Prevent caching |
 | `Connection` | `keep-alive` | Persist the connection |
-| `Content-Encoding` | `text/plain` | No compression |
 | `X-Accel-Buffering` | `no` | Disable Nginx buffering |
 | `Access-Control-Allow-Origin` | `*` | CORS |
+
+No `Content-Encoding` is sent. That header names a content *coding* (gzip,
+br, zstd) applied to the body, and rweb compresses nothing, so the correct
+signal is to omit it — RFC 9110 §8.4 defines no token for "not encoded"
+(`identity` exists only as an `Accept-Encoding` value). Earlier versions sent
+`Content-Encoding: text/plain`, a media type in a content-coding slot, which
+made browsers and curl discard the stream body while Go clients — which only
+ever auto-decode gzip — saw nothing wrong.
 
 ### 3. SSE Event Types (`Server.go`)
 

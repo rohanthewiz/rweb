@@ -340,3 +340,56 @@ func TestSSEClientDisconnect(t *testing.T) {
 	}
 }
 
+// TestSSEHeadersCarryNoContentEncoding pins the one thing about an SSE response
+// that no Go client can detect from the events themselves.
+//
+// SetSSEHeaders used to send `Content-Encoding: text/plain` — a media type in a
+// slot that holds a content *coding*. Go's http client ignores Content-Encoding
+// unless it is "gzip", so every Go test kept passing while browsers and curl,
+// which discard a body whose coding they cannot decode, showed a connected
+// stream that never delivered a byte. The only way to catch that from Go is to
+// read the header, so this test asserts on the header and not on the stream:
+// rweb compresses nothing, so an event stream must arrive with no
+// Content-Encoding at all.
+func TestSSEHeadersCarryNoContentEncoding(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	eventsChan := make(chan any, 1)
+
+	s := rweb.NewServer(rweb.ServerOptions{
+		ReadyChan: readyChan,
+		Address:   "localhost:",
+	})
+	s.Get("/events", s.SSEHandler(eventsChan, "test-events"))
+
+	serverDone := make(chan struct{})
+	go func() {
+		_ = s.Run()
+		close(serverDone)
+	}()
+	defer func() {
+		// Run installs its own SIGTERM handler and returns when one arrives;
+		// wait for that return so the listener is closed before the test exits.
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-serverDone
+	}()
+
+	<-readyChan
+
+	// A plain client, with no timeout: the response headers arrive as soon as
+	// the stream opens, long before any event is sent, which is all we need.
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/events", s.GetListenPort()))
+	assert.Nil(t, err)
+	defer func() {
+		close(eventsChan) // lets the sender return, closing the response body
+		_ = resp.Body.Close()
+	}()
+
+	assert.Equal(t, resp.Status, consts.OK200)
+	assert.Equal(t, strings.HasPrefix(resp.Header.Get(consts.HeaderContentType), consts.MIMETextEventStream), true)
+
+	// The assertion this test exists for. Go leaves a Content-Encoding it does
+	// not understand on the response untouched, so an empty value here means
+	// the wire really carried none.
+	assert.Equal(t, resp.Header.Get(consts.HeaderContentEncoding), "")
+}

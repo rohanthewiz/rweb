@@ -136,11 +136,28 @@ func (res *response) writeResponseBytes(body []byte, contentType string) (int, e
 	return res.Write(body)
 }
 
+// SetSSEHeaders writes the header set an event stream needs: the event-stream
+// media type, no caching, a connection the proxy chain must keep open, and
+// X-Accel-Buffering to stop nginx (and friends) from buffering the stream into
+// silence.
+//
+// Deliberately absent: Content-Encoding. That header names a *content coding*
+// (gzip, br, zstd) applied to the body, not a media type, and rweb never
+// compresses a response, so the correct signal for "this body is not encoded"
+// is to omit the header entirely — RFC 9110 §8.4 defines no token for it
+// ("identity" exists only as an Accept-Encoding value).
+//
+// This once sent `Content-Encoding: text/plain`, which is a media type in a
+// content-coding slot. Go's http client ignores the header (it only ever
+// auto-decodes gzip), so Go clients saw nothing wrong — but browsers and curl
+// discard a body whose coding they cannot recognise, so an SSE stream read by
+// a real browser connected and then delivered nothing. Hence the header
+// assertion in TestSSEHeadersCarryNoContentEncoding: no Go client behaviour
+// can catch a regression here, only the header itself.
 func (res *response) SetSSEHeaders() {
 	res.SetHeader(consts.HeaderContentType, consts.MIMETextEventStream+"; charset=utf-8")
 	res.SetHeader(consts.HeaderCacheControl, consts.HeaderNoCache)
 	res.SetHeader(consts.HeaderConnection, consts.HeaderKeepAlive)
-	res.SetHeader(consts.HeaderContentEncoding, consts.MIMETextPlain) // no compression for now
 	res.SetHeader(consts.HeaderXAccelBuffering, "no")
 	res.SetHeader(consts.HeaderAccessControlAllowOrigin, "*")
 }
