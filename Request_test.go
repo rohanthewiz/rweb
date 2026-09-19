@@ -33,6 +33,35 @@ func TestRequest(t *testing.T) {
 	assert.Equal(t, string(response.Body()), "GET http example.com /request")
 }
 
+// Host() precedence. The origin-form cases are the ones that matter: that is
+// what browsers send, and before the Host header was consulted they all
+// reported "localhost".
+func TestRequestHost(t *testing.T) {
+	s := rweb.NewServer()
+	s.Get("/host", func(ctx rweb.Context) error {
+		return ctx.WriteString(ctx.Request().Host())
+	})
+
+	cases := []struct {
+		name, url string
+		headers   []rweb.Header
+		want      string
+	}{
+		{"origin-form uses the Host header", "/host", []rweb.Header{{"Host", "example.com"}}, "example.com"},
+		{"port is kept as sent", "/host", []rweb.Header{{"Host", "127.0.0.1:7420"}}, "127.0.0.1:7420"},
+		{"header name is case-insensitive", "/host", []rweb.Header{{"host", "example.com"}}, "example.com"},
+		{"absolute-form wins over the header", "http://target.example/host", []rweb.Header{{"Host", "header.example"}}, "target.example"},
+		{"no host anywhere falls back", "/host", nil, "localhost"},
+	}
+	for _, c := range cases {
+		response := s.Request(consts.MethodGet, c.url, c.headers, nil)
+		assert.Equal(t, response.Status(), 200)
+		if got := string(response.Body()); got != c.want {
+			t.Errorf("%s: Host() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestRequestHeader(t *testing.T) {
 	s := rweb.NewServer()
 

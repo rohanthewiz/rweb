@@ -51,10 +51,11 @@ func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path 
 		}
 	}
 
-	// If the host is empty, set it to "localhost"
-	if host == "" {
-		host = consts.Localhost
-	}
+	// host is left empty when the URL has none, which is the usual case: a
+	// browser sends the origin-form target ("GET /path") and names the host
+	// in the Host header instead. The caller resolves that (see
+	// Server.handleRequest); defaulting here would hide the difference
+	// between "the request line said localhost" and "it said nothing".
 
 	return
 }

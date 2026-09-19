@@ -1074,6 +1074,25 @@ func (s *Server) handleConnection(conn net.Conn) {
 func (s *Server) handleRequest(ctx *context, method string, url string, respWriter io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url, s.options.URLOptions)
+
+	// Resolve the effective host, in the precedence RFC 9112 §3.2.2 gives:
+	//
+	//	absolute-form target  "GET http://example.com/x"  -> host from the target;
+	//	                                                     the Host header is ignored
+	//	origin-form target    "GET /x"                     -> the Host header
+	//	neither                                            -> "localhost"
+	//
+	// Almost every real request is origin-form, so without the middle step
+	// Host() reported "localhost" no matter what the client asked for. That
+	// made it useless for virtual hosting and — worse — for the check that
+	// defends a loopback server against DNS rebinding, which exists to notice
+	// a Host that is NOT localhost. The value is kept as sent, port included.
+	if ctx.host == "" {
+		ctx.host = ctx.request.Header(consts.HeaderHost)
+	}
+	if ctx.host == "" {
+		ctx.host = consts.Localhost
+	}
 	if s.options.Debug {
 		fmt.Printf(" %s - ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
 			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)

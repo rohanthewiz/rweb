@@ -108,7 +108,10 @@ func (req *request) Headers() []Header {
 	return req.headers
 }
 
-// Host returns the requested host.
+// Host returns the host the client asked for: the one in an absolute-form
+// request target if there was one, otherwise the Host header, as sent
+// (including any port). It is "localhost" only when the request named no
+// host at all.
 func (req *request) Host() string {
 	return req.host
 }
