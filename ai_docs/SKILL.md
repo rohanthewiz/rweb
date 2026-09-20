@@ -308,6 +308,16 @@ admin.StaticFilesAbs("/files/", "/var/lib/myapp/files", 2) // strips "admin" and
   appear, then are served with no restart.
 - Both methods apply global middleware, reject `..` (plain or percent-encoded) and NUL,
   refuse directories, and honor `If-Modified-Since` with a 304.
+- Symlinks are followed wherever they point (as nginx and `net/http` do). If the served
+  directory is writable by anyone less trusted than the operator — uploads, extracted
+  archives, per-user content — set `StaticContainSymlinks` (v0.1.31+): a link resolving
+  outside the root then 404s, while links inside it, and a root that is itself a link,
+  still serve.
+
+```go
+s := rweb.NewServer(rweb.ServerOptions{Address: ":8080", StaticContainSymlinks: true})
+// or: rweb.NewServerWithOptions(rweb.WithAddress(":8080"), rweb.WithStaticContainSymlinks())
+```
 
 ## File Uploads
 
@@ -690,6 +700,7 @@ if err != nil {
 req := ctx.Request()
 
 req.Method()              // GET, POST, etc.
+req.Scheme()              // "http" or "https" (v0.1.31+: from the connection when the target has none)
 req.Host()                // Host the client asked for, as sent, port included: "example.com", "127.0.0.1:8080"
 req.Path()                // /users/123
 req.Query()               // Raw query string: "page=2&sort=name"
@@ -705,6 +716,16 @@ req.GetPostValue("field") // POST form value
 there is one, otherwise the `Host` header, otherwise `"localhost"`. Before v0.1.29 it ignored
 the `Host` header and returned `"localhost"` for every ordinary request — do not rely on it
 for virtual hosting or a DNS-rebinding check on older versions; read `req.Header("Host")`.
+
+From v0.1.31 a request with more than one `Host` header, or a malformed one (whitespace,
+`/`, `@`, a non-numeric port, ...), is answered `400` before any handler runs, so the value
+is safe to echo. A missing `Host` is still tolerated.
+
+`req.Scheme()` (v0.1.31+) is the scheme of an absolute-form target if there is one, otherwise
+`"https"` when the connection is TLS and `"http"` when it is not. Before v0.1.31 it was `""`
+for ordinary requests. It reports what *this server* terminated: behind a TLS-terminating
+proxy it is `"http"`, and `X-Forwarded-Proto` is deliberately not consulted — read that header
+yourself if you trust the proxy that sets it.
 
 ```go
 // DNS-rebinding guard for a loopback-only server: allow-list the exact host:port

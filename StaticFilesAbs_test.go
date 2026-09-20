@@ -170,3 +170,67 @@ func TestStaticFilesStaysRelativeToCWD(t *testing.T) {
 		t.Errorf("StaticFiles followed an absolute path and served %q", body)
 	}
 }
+
+// symlinkFixture adds three links to the absolute tree from staticFixture:
+//
+//	root/inside.txt  -> root/sub/deep.txt   stays within the root
+//	root/escape.txt  -> ../secret.txt       leaves the root
+//	rootlink         -> root                the root itself reached via a link
+//
+// Skips where the platform or filesystem refuses symlinks.
+func symlinkFixture(t *testing.T) (absRoot, rootLink string) {
+	t.Helper()
+	absRoot = staticFixture(t)
+	link := func(target, name string) {
+		if err := os.Symlink(target, name); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	link(filepath.Join(absRoot, "sub", "deep.txt"), filepath.Join(absRoot, "inside.txt"))
+	link(filepath.Join(absRoot, "..", "secret.txt"), filepath.Join(absRoot, "escape.txt"))
+	rootLink = filepath.Join(filepath.Dir(absRoot), "rootlink")
+	link(absRoot, rootLink)
+	return absRoot, rootLink
+}
+
+// The default is unchanged: a symlink is followed wherever it points. This
+// pins the behaviour so that tightening it is a decision, not an accident.
+func TestStaticFilesSymlinksFollowedByDefault(t *testing.T) {
+	absRoot, _ := symlinkFixture(t)
+	s := rweb.NewServer()
+	s.StaticFilesAbs("/files/", absRoot, 1)
+
+	status, body := get(s, "/files/escape.txt")
+	if status != 200 || body != "off-root-secret" {
+		t.Errorf("escape.txt: got %d %q, want 200 off-root-secret", status, body)
+	}
+}
+
+// With StaticContainSymlinks only the escaping link is refused; links that
+// resolve inside the root, and a root that is itself a link, still serve.
+func TestStaticFilesContainSymlinks(t *testing.T) {
+	absRoot, rootLink := symlinkFixture(t)
+	s := rweb.NewServerWithOptions(rweb.WithStaticContainSymlinks())
+	s.StaticFilesAbs("/files/", absRoot, 1)
+	s.StaticFilesAbs("/linked/", rootLink, 1)
+
+	cases := []struct {
+		url        string
+		wantStatus int
+		wantBody   string
+	}{
+		{"/files/allowed.txt", 200, "from-abs"},
+		{"/files/inside.txt", 200, "abs-deep"},
+		{"/files/escape.txt", 404, ""},
+		{"/files/missing.txt", 404, ""},
+		{"/linked/allowed.txt", 200, "from-abs"},
+		{"/linked/inside.txt", 200, "abs-deep"},
+		{"/linked/escape.txt", 404, ""},
+	}
+	for _, c := range cases {
+		status, body := get(s, c.url)
+		if status != c.wantStatus || (c.wantStatus == 200 && body != c.wantBody) {
+			t.Errorf("%s: got %d %q, want %d %q", c.url, status, body, c.wantStatus, c.wantBody)
+		}
+	}
+}

@@ -60,6 +60,20 @@ type ServerOptions struct {
 	// and the connection is closed. 0 selects the default (100 MB);
 	// a negative value disables the cap entirely.
 	MaxRequestBodySize int64
+
+	// StaticContainSymlinks makes StaticFiles / StaticFilesAbs refuse (404) a
+	// file whose *resolved* location is outside the served root — that is, a
+	// symlink inside the root pointing out of it. Symlinks that stay within
+	// the root keep working, as does a root that is itself a symlink.
+	//
+	// The default (false) follows symlinks wherever they lead, as nginx and
+	// net/http's FileServer do: whoever can create a link in the served
+	// directory is normally the operator, and linking shared assets in is a
+	// common deployment layout. Turn this on when that assumption does not
+	// hold — the root is writable by less-trusted parties (upload or
+	// extraction directories, per-user content), where a planted link would
+	// otherwise expose any file the process can read.
+	StaticContainSymlinks bool
 }
 
 // defaultMaxRequestBodySize is the request-body cap used when
@@ -192,6 +206,15 @@ func WithMaxRequestBodySize(n int64) ServerOption {
 	}
 }
 
+// WithStaticContainSymlinks makes static file routes refuse files that
+// resolve, through a symlink, to somewhere outside the served root.
+// See ServerOptions.StaticContainSymlinks for when to want it.
+func WithStaticContainSymlinks() ServerOption {
+	return func(opts *ServerOptions) {
+		opts.StaticContainSymlinks = true
+	}
+}
+
 // WithOptions creates a ServerOption from a ServerOptions struct.
 // This is provided for backwards compatibility with the old configuration style.
 // Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
@@ -209,6 +232,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.SSECfg = serverOpts.SSECfg
 		opts.MultipartMaxMemory = serverOpts.MultipartMaxMemory
 		opts.MaxRequestBodySize = serverOpts.MaxRequestBodySize
+		opts.StaticContainSymlinks = serverOpts.StaticContainSymlinks
 	}
 }
 
@@ -705,6 +729,37 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 			return nil
 		}
 
+		// The check above is lexical: it proves the *name* is under the root,
+		// not the file the name resolves to. With StaticContainSymlinks the
+		// same test is repeated on the resolved paths:
+		//
+		//	root/logo.png -> root/img/logo.png   resolves inside   -> served
+		//	root/secrets  -> /etc                resolves outside  -> 404
+		//
+		// The root is resolved too, otherwise a root that is itself a symlink
+		// (a "current" release link, macOS's /tmp -> /private/tmp) would make
+		// every file look like an escape. A path that fails to resolve does
+		// not exist, which is a 404 regardless.
+		//
+		// This narrows, but cannot close, the window between check and read:
+		// a link swapped in after EvalSymlinks is still followed by ReadFile.
+		// Closing it needs openat-style traversal (os.Root, Go 1.24+), which
+		// the module's go 1.23 directive rules out for now.
+		if s.options.StaticContainSymlinks {
+			rootReal, rootErr := filepath.EvalSymlinks(rootAbs)
+			candReal, candErr := filepath.EvalSymlinks(candAbs)
+			if rootErr != nil || candErr != nil {
+				ctx.SetStatus(consts.StatusNotFound)
+				return nil
+			}
+			realRel, realRelErr := filepath.Rel(rootReal, candReal)
+			if realRelErr != nil || realRel == ".." ||
+				strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
+				ctx.SetStatus(consts.StatusNotFound)
+				return nil
+			}
+		}
+
 		info, statErr := os.Stat(candAbs)
 		if statErr != nil || info.IsDir() {
 			ctx.SetStatus(consts.StatusNotFound)
@@ -971,6 +1026,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		var contentLen int64
 		var isChunked bool
+		var sawHost bool // a second Host header is a protocol error, see below
 
 		// Read headers until we meet an empty line
 		for {
@@ -1011,6 +1067,24 @@ func (s *Server) handleConnection(conn net.Conn) {
 				}
 			} else if strings.EqualFold(key, consts.HeaderContentType) {
 				ctx.request.ContentType = s2b(value)
+			} else if strings.EqualFold(key, consts.HeaderHost) {
+				// RFC 9112 §3.2: a request with more than one Host header, or
+				// with an invalid Host value, MUST be answered 400. It matters
+				// beyond tidiness: Header() returns the first match, while a
+				// proxy in front may have routed or authorized on the last, so
+				// two Host lines let a client show each hop a different host.
+				// A malformed value is refused for the sake of whatever echoes
+				// Host() into a redirect, a link or a log line.
+				//
+				// A *missing* Host is still tolerated (Host() falls back to
+				// "localhost"), although the RFC wants 400 for that too:
+				// plenty of hand-rolled clients and raw-socket tests omit it,
+				// and an absent header cannot smuggle anything.
+				if sawHost || !isValidHostHeader(value) {
+					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					return
+				}
+				sawHost = true
 			} else if strings.EqualFold(key, consts.HeaderTransferEncoding) &&
 				strings.Contains(strings.ToLower(value), "chunked") {
 				isChunked = true
@@ -1119,6 +1193,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		// Clean up the context by zeroing some slices, etc
 		ctx.Clean()
+
+		// Clean() drops ctx.conn, which is right when the context goes back
+		// to the pool but wrong here: this loop is about to serve the next
+		// keep-alive request on the very same connection. Without restoring
+		// it, everything conn-derived worked only for the first request of a
+		// connection — WebSocket upgrades, the remote address, SSE disconnect
+		// detection, and the TLS check behind Scheme().
+		ctx.conn = conn
 	}
 }
 
@@ -1144,6 +1226,25 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	}
 	if ctx.host == "" {
 		ctx.host = consts.Localhost
+	}
+
+	// Resolve the effective scheme the same way. Only an absolute-form target
+	// carries one, and almost no request is absolute-form, so Scheme() used to
+	// be "" in practice. The transport is the ground truth for an origin-form
+	// request: a connection we terminated TLS on is https, anything else is
+	// http. A synthetic Request() has no connection and reports http, in line
+	// with its "localhost" host.
+	//
+	// Deliberately NOT consulted: X-Forwarded-Proto / Forwarded. Those are
+	// client-controlled unless a trusted proxy overwrites them, and whether one
+	// does is deployment knowledge this server does not have. An app behind
+	// such a proxy can read the header itself.
+	if ctx.scheme == "" {
+		if _, isTLS := ctx.conn.(*tls.Conn); isTLS {
+			ctx.scheme = consts.HTTPS
+		} else {
+			ctx.scheme = consts.HTTP
+		}
 	}
 	if s.options.Debug {
 		fmt.Printf(" %s - ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",

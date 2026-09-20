@@ -59,3 +59,77 @@ func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path 
 
 	return
 }
+
+// isValidHostHeader reports whether v is an acceptable Host header value:
+//
+//	Host = uri-host [ ":" port ]        (RFC 9110 §7.2, RFC 3986 §3.2.2)
+//
+//	example.com          reg-name
+//	example.com:8080     reg-name + port
+//	127.0.0.1:8080       IPv4 (a subset of the reg-name alphabet)
+//	[::1]:8080           IP-literal + port
+//	""                   legal: the target URI has no authority
+//
+// This is a character-class check, not a resolver: it does not decide whether
+// the name is a plausible DNS name, only that it cannot carry anything that
+// would change meaning when echoed — whitespace, control bytes, "/", "\",
+// "?", "#", "@", or a stray ":" or bracket. It is hand-rolled rather than
+// delegated to net/url because it runs on every request and allocates nothing.
+func isValidHostHeader(v string) bool {
+	if v == "" {
+		return true
+	}
+
+	host, port := v, ""
+	if v[0] == '[' {
+		// IP-literal: everything up to the closing bracket is the address;
+		// what follows may only be ":port". The address alphabet is hex
+		// digits, ":" and "." (for an embedded IPv4 tail). Zone IDs ("%eth0")
+		// are not valid in a Host header and so are not admitted.
+		end := strings.IndexByte(v, ']')
+		if end < 2 { // no "]" at all, or the empty literal "[]"
+			return false
+		}
+		for i := 1; i < end; i++ {
+			c := v[i]
+			isHex := c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+			if !isHex && c != ':' && c != '.' {
+				return false
+			}
+		}
+		rest := v[end+1:]
+		if rest == "" {
+			return true
+		}
+		if rest[0] != ':' {
+			return false
+		}
+		host, port = "", rest[1:]
+	} else if colon := strings.IndexByte(v, ':'); colon != -1 {
+		// Outside brackets the first ":" must be the port delimiter, so any
+		// further ":" ends up in the port and fails the digit check below.
+		host, port = v[:colon], v[colon+1:]
+		if host == "" {
+			return false // ":8080" — a port with no host
+		}
+	}
+
+	// port = *DIGIT — an empty port ("example.com:") is legal per the grammar.
+	for i := 0; i < len(port); i++ {
+		if port[i] < '0' || port[i] > '9' {
+			return false
+		}
+	}
+
+	// reg-name = *( unreserved / pct-encoded / sub-delims )
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("-._~%!$&'()*+,;=", c) != -1:
+		default:
+			return false
+		}
+	}
+	return true
+}

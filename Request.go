@@ -167,7 +167,10 @@ func (req *request) parseQueryArgs() {
 	req.parsedQueryArgs = true
 }
 
-// Scheme returns either `http`, `https` or an empty string.
+// Scheme returns `http` or `https`. An absolute-form request target supplies
+// it directly; otherwise it reflects the transport — `https` when the
+// connection is TLS, `http` when it is not. Proxy headers such as
+// X-Forwarded-Proto are not consulted (see handleRequest).
 func (req *request) Scheme() string {
 	return req.scheme
 }
