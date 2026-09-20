@@ -277,6 +277,38 @@ s.StaticFiles("/css/", "./assets/css", 1)
 s.StaticFiles("/.well-known/", "./", 0)
 ```
 
+`StaticFiles`' `localPath` is **always relative to the process's working directory** — a
+leading `/` does not change that: `"/assets/css"`, `"assets/css"` and `"./assets/css"` all
+mean `./assets/css`, and `"/"` means the working directory itself. It cannot reach a
+directory outside the working directory.
+
+### Absolute Paths: StaticFilesAbs (v0.1.30+)
+
+To serve a directory by its absolute filesystem path — a per-user data or cache directory,
+or anything whose location must not depend on where the process was started — use
+`StaticFilesAbs`. Same arguments, same token stripping, same traversal protection.
+
+```go
+// /editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
+s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)
+
+// Build the path at startup rather than hardcoding it
+home, _ := os.UserHomeDir()
+s.StaticFilesAbs("/assets/", filepath.Join(home, ".local", "share", "myapp", "assets"), 1)
+
+// Also on groups
+admin := s.Group("/admin", authMiddleware)
+admin.StaticFilesAbs("/files/", "/var/lib/myapp/files", 2) // strips "admin" and "files"
+```
+
+- `localPath` must be absolute; a relative one is refused at registration (a message is
+  printed and no route is added). Do NOT pass an absolute path to `StaticFiles` expecting
+  this behavior — it will be treated as relative to the working directory and 404.
+- The directory does not have to exist at registration: requests 404 until the files
+  appear, then are served with no restart.
+- Both methods apply global middleware, reject `..` (plain or percent-encoded) and NUL,
+  refuse directories, and honor `If-Modified-Since` with a 304.
+
 ## File Uploads
 
 ```go
@@ -658,12 +690,30 @@ if err != nil {
 req := ctx.Request()
 
 req.Method()              // GET, POST, etc.
+req.Host()                // Host the client asked for, as sent, port included: "example.com", "127.0.0.1:8080"
 req.Path()                // /users/123
+req.Query()               // Raw query string: "page=2&sort=name"
+req.QueryParam("page")    // Single query parameter
 req.PathParam("id")       // Route parameter
 req.Header("Authorization") // Request header
 req.Body()                // Raw request body bytes
 req.FormValue("field")    // Form field value
 req.GetPostValue("field") // POST form value
+```
+
+`req.Host()` (v0.1.29+) follows RFC 9112: the host from an absolute-form request target if
+there is one, otherwise the `Host` header, otherwise `"localhost"`. Before v0.1.29 it ignored
+the `Host` header and returned `"localhost"` for every ordinary request — do not rely on it
+for virtual hosting or a DNS-rebinding check on older versions; read `req.Header("Host")`.
+
+```go
+// DNS-rebinding guard for a loopback-only server: allow-list the exact host:port
+s.Use(func(ctx rweb.Context) error {
+    if h := ctx.Request().Host(); h != "127.0.0.1:8080" && h != "localhost:8080" {
+        return ctx.SetStatus(403).WriteString("unexpected Host")
+    }
+    return ctx.Next()
+})
 ```
 
 ## Handler Signature
