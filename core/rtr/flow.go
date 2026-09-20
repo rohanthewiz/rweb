@@ -14,11 +14,11 @@ type flow int
 const (
 	// flowStop indicates traversal should terminate (route fully processed)
 	flowStop flow = iota
-	
+
 	// flowBegin indicates traversal should restart from the beginning of the loop
 	// Used when switching to a parameter node that needs fresh traversal
 	flowBegin
-	
+
 	// flowNext indicates traversal should continue to the next iteration
 	// Used for normal progression through the tree
 	flowNext

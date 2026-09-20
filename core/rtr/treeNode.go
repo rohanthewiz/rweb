@@ -24,21 +24,21 @@ const (
 //   - Separate parameter/wildcard pointers avoid mixing with static routes
 //
 // Example tree structure for routes /users, /users/:id, /users/:id/posts:
-//   
-//   root (prefix: "")
-//    └── "users" (data: handler1)
-//         └── parameter ":id" (data: handler2)
-//              └── "/posts" (data: handler3)
+//
+//	root (prefix: "")
+//	 └── "users" (data: handler1)
+//	      └── parameter ":id" (data: handler2)
+//	           └── "/posts" (data: handler3)
 type treeNode[T any] struct {
-	prefix     string          // The common prefix for this node
-	data       T               // Handler data (zero value if no handler)
-	children   []*treeNode[T]  // Static path children
-	parameter  *treeNode[T]    // Parameter child (e.g., :id)
-	wildcard   *treeNode[T]    // Wildcard child (e.g., *path)
-	indices    []uint8         // Maps character offset to children index
-	startIndex uint8           // First character in children range
-	endIndex   uint8           // Last character + 1 in children range
-	kind       byte            // Node type: ':', '*', or 0 for static
+	prefix     string         // The common prefix for this node
+	data       T              // Handler data (zero value if no handler)
+	children   []*treeNode[T] // Static path children
+	parameter  *treeNode[T]   // Parameter child (e.g., :id)
+	wildcard   *treeNode[T]   // Wildcard child (e.g., *path)
+	indices    []uint8        // Maps character offset to children index
+	startIndex uint8          // First character in children range
+	endIndex   uint8          // Last character + 1 in children range
+	kind       byte           // Node type: ':', '*', or 0 for static
 }
 
 // split splits the node at the given index and inserts
@@ -47,10 +47,11 @@ type treeNode[T any] struct {
 // and instead assign the data directly to the node.
 //
 // Split operation example:
-//   Original: "blogs" -> (handler1)
-//   New path: "blog" -> (handler2)
-//   Result: "blog" -> (handler2)
-//             └── "s" -> (handler1)
+//
+//	Original: "blogs" -> (handler1)
+//	New path: "blog" -> (handler2)
+//	Result: "blog" -> (handler2)
+//	          └── "s" -> (handler1)
 //
 // Algorithm:
 // 1. Clone current node with suffix as prefix
@@ -108,14 +109,14 @@ func (node *treeNode[T]) clone(prefix string) *treeNode[T] {
 func (node *treeNode[T]) reset(prefix string) {
 	var empty T
 	node.prefix = prefix
-	node.data = empty        // Clear handler
-	node.parameter = nil     // Clear parameter child
-	node.wildcard = nil      // Clear wildcard child
-	node.kind = 0            // Reset to static node
-	node.startIndex = 0      // Reset index range
+	node.data = empty    // Clear handler
+	node.parameter = nil // Clear parameter child
+	node.wildcard = nil  // Clear wildcard child
+	node.kind = 0        // Reset to static node
+	node.startIndex = 0  // Reset index range
 	node.endIndex = 0
-	node.indices = nil       // Clear index mapping
-	node.children = nil      // Clear children array
+	node.indices = nil  // Clear index mapping
+	node.children = nil // Clear children array
 }
 
 // addChild adds a child tree.
@@ -127,9 +128,10 @@ func (node *treeNode[T]) reset(prefix string) {
 //   - Character 'c' maps to children[indices[c - startIndex]]
 //
 // Example:
-//   startIndex = 'a' (97), endIndex = 'd' (100)
-//   indices = [0, 5, 0, 3]  // Positions for 'a', 'b', 'c', 'd'
-//   'b' -> children[5], 'd' -> children[3]
+//
+//	startIndex = 'a' (97), endIndex = 'd' (100)
+//	indices = [0, 5, 0, 3]  // Positions for 'a', 'b', 'c', 'd'
+//	'b' -> children[5], 'd' -> children[3]
 //
 // The method dynamically expands the index range as needed.
 func (node *treeNode[T]) addChild(child *treeNode[T]) {
@@ -262,8 +264,8 @@ func (node *treeNode[T]) append(path string, data T) {
 			// Create parameter/wildcard node
 			// Note: prefix stores the parameter name without : or *
 			child := &treeNode[T]{
-				prefix: path[1:paramEnd],  // Skip : or *
-				kind:   path[paramStart],   // Store : or *
+				prefix: path[1:paramEnd], // Skip : or *
+				kind:   path[paramStart], // Store : or *
 			}
 
 			switch child.kind {
@@ -315,9 +317,9 @@ func (node *treeNode[T]) append(path string, data T) {
 // end is only called from `tree.Add`.
 //
 // This method determines what to do after matching a node's prefix:
-//   1. Continue to a child node (if one matches)
-//   2. Add remaining path as new nodes
-//   3. Handle parameter node transitions
+//  1. Continue to a child node (if one matches)
+//  2. Add remaining path as new nodes
+//  3. Handle parameter node transitions
 //
 // Returns: (next node, new offset, control flow directive)
 func (node *treeNode[T]) end(path string, data T, i int, offset int) (*treeNode[T], int, flow) {
@@ -336,7 +338,7 @@ func (node *treeNode[T]) end(path string, data T, i int, offset int) (*treeNode[
 	}
 
 	// No matching static child found
-	
+
 	// Special case: Empty prefix means this is the root node
 	if node.prefix == "" {
 		node.append(path[i:], data)
@@ -362,10 +364,10 @@ func (node *treeNode[T]) end(path string, data T, i int, offset int) (*treeNode[
 // This performs a depth-first traversal of the entire tree structure.
 //
 // Traversal order:
-//   1. Current node
-//   2. All static children
-//   3. Parameter child (if any)
-//   4. Wildcard child (if any)
+//  1. Current node
+//  2. All static children
+//  3. Parameter child (if any)
+//  4. Wildcard child (if any)
 //
 // Used by Tree.Map to transform all handlers in the tree.
 // The callback is guaranteed to be called exactly once per node.

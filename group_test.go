@@ -72,12 +72,12 @@ func TestGroupMiddleware(t *testing.T) {
 	// Test request to verify middleware execution order
 	executionOrder = []string{} // Reset
 	response := s.Request("GET", "/api/test", nil, nil)
-	
+
 	// Verify response is correct
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "test response", string(response.Body()))
 	assert.Equal(t, "true", response.Header("X-API"))
-	
+
 	// Verify middleware executed in correct order:
 	// server -> group -> handler
 	assert.Equal(t, 3, len(executionOrder))
@@ -208,7 +208,7 @@ func TestGroupUseMethod(t *testing.T) {
 	var middlewareOrder []string
 
 	api := s.Group("/api")
-	
+
 	// Add middleware after group creation using Use() method
 	api.Use(func(ctx rweb.Context) error {
 		middlewareOrder = append(middlewareOrder, "first")
@@ -276,7 +276,7 @@ func TestGroupStaticFiles(t *testing.T) {
 
 	// Create a group for serving static assets
 	assets := s.Group("/assets")
-	
+
 	// Register static file handler - this would serve files from ./testdata
 	// when requests come to /assets/static/*
 	// The 0 parameter means no path segments are stripped
@@ -293,12 +293,12 @@ func TestGroupProxy(t *testing.T) {
 
 	// Create API group for proxying external services
 	api := s.Group("/api")
-	
+
 	// Set up proxy - this would forward /api/external/* to http://example.com
 	// The 0 parameter means no path segments are stripped before forwarding
 	err := api.Proxy("/external", "http://example.com", 0)
 	assert.Nil(t, err)
-	
+
 	// Note: Full testing would require a target server to proxy to
 }
 
@@ -309,7 +309,7 @@ func TestGroupWithParameters(t *testing.T) {
 
 	// Create users group for RESTful user endpoints
 	users := s.Group("/users")
-	
+
 	users.Get("/:id", func(ctx rweb.Context) error {
 		id := ctx.Request().Param("id")
 		return ctx.WriteText("user " + id)

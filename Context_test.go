@@ -188,7 +188,10 @@ func TestClientIPRemoteAddrFallback(t *testing.T) {
 func TestBasicAuth(t *testing.T) {
 	s := rweb.NewServer()
 
-	type result struct{ user, pass string; ok bool }
+	type result struct {
+		user, pass string
+		ok         bool
+	}
 	var got result
 	s.Get("/auth", func(ctx rweb.Context) error {
 		u, p, ok := ctx.BasicAuth()
@@ -204,11 +207,11 @@ func TestBasicAuth(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		hdrs  []rweb.Header
-		user  string
-		pass  string
-		ok    bool
+		name string
+		hdrs []rweb.Header
+		user string
+		pass string
+		ok   bool
 	}{
 		{"valid creds", mk("Basic " + enc("alice:s3cret")), "alice", "s3cret", true},
 		{"empty password is valid per RFC", mk("Basic " + enc("alice:")), "alice", "", true},

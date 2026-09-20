@@ -58,7 +58,7 @@ func (c *Cookie) ToStdCookie() *http.Cookie {
 		Secure:   c.Secure,
 		HttpOnly: c.HttpOnly,
 	}
-	
+
 	// convert SameSiteMode to http.SameSite
 	switch c.SameSite {
 	case SameSiteLaxMode:
@@ -70,7 +70,7 @@ func (c *Cookie) ToStdCookie() *http.Cookie {
 	default:
 		cookie.SameSite = http.SameSiteDefaultMode
 	}
-	
+
 	return cookie
 }
 
@@ -87,7 +87,7 @@ func newCookieFromStd(c *http.Cookie) *Cookie {
 		Secure:   c.Secure,
 		HttpOnly: c.HttpOnly,
 	}
-	
+
 	// convert http.SameSite to SameSiteMode
 	switch c.SameSite {
 	case http.SameSiteLaxMode:
@@ -99,7 +99,7 @@ func newCookieFromStd(c *http.Cookie) *Cookie {
 	default:
 		cookie.SameSite = SameSiteDefaultMode
 	}
-	
+
 	return cookie
 }
 
@@ -122,4 +122,3 @@ type CookieConfig struct {
 	// Must be 16, 24, or 32 bytes for AES-128, AES-192, or AES-256.
 	EncryptionKey []byte
 }
-

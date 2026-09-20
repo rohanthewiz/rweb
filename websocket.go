@@ -54,11 +54,11 @@ const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // Default WebSocket configuration values
 const (
-	defaultMaxMessageSize  = 1024 * 1024 * 10 // 10MB
-	defaultPingInterval    = 30 * time.Second
-	defaultPongTimeout     = 10 * time.Second
-	defaultWriteTimeout    = 10 * time.Second
-	closeHandshakeTimeout  = 2 * time.Second  // max wait for peer's close frame response
+	defaultMaxMessageSize = 1024 * 1024 * 10 // 10MB
+	defaultPingInterval   = 30 * time.Second
+	defaultPongTimeout    = 10 * time.Second
+	defaultWriteTimeout   = 10 * time.Second
+	closeHandshakeTimeout = 2 * time.Second // max wait for peer's close frame response
 )
 
 // WSMessage represents a WebSocket message

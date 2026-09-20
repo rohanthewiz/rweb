@@ -10,9 +10,9 @@ import (
 // Groups can be nested to create hierarchical route structures.
 type Group struct {
 	// prefix is the URL path prefix for all routes in this group
-	prefix   string
+	prefix string
 	// server is a reference to the main server instance for route registration
-	server   *Server
+	server *Server
 	// handlers contains middleware functions that will be applied to all routes in this group
 	handlers []Handler
 }
@@ -23,8 +23,8 @@ type Group struct {
 func (g *Group) Group(prefix string, handlers ...Handler) *Group {
 	return &Group{
 		// Combine parent and child prefixes using path.Join for proper URL construction
-		prefix:   path.Join(g.prefix, prefix),
-		server:   g.server,
+		prefix: path.Join(g.prefix, prefix),
+		server: g.server,
 		// Inherit parent middleware and append any new middleware
 		handlers: append(g.handlers, handlers...),
 	}
@@ -121,10 +121,10 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 	// Construct the full URL path by joining group prefix and route path
 	// The leading "/" ensures proper path formatting
 	fullPath := path.Join("/", g.prefix, routePath)
-	
+
 	// Build the middleware chain - start with the route handler as the final handler
 	finalHandler := handler
-	
+
 	// Wrap handlers in reverse order to ensure they execute in the order they were added.
 	// This creates a chain where each middleware wraps the next one.
 	for i := len(g.handlers) - 1; i >= 0; i-- {
@@ -132,12 +132,12 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 		// to avoid closure variable issues in the loop
 		middleware := g.handlers[i]
 		nextHandler := finalHandler
-		
+
 		finalHandler = func(ctx Context) error {
 			// Track whether the middleware called Next() to continue the chain.
 			// This allows middleware to optionally stop the chain (e.g., for auth failures)
 			nextCalled := false
-			
+
 			// Create a context wrapper that intercepts Next() calls.
 			// This allows us to track when middleware explicitly passes control
 			// to the next handler in the chain.
@@ -148,21 +148,21 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 					return nextHandler(ctx)
 				},
 			}
-			
+
 			// Execute the middleware with our wrapper context
 			err := middleware(wrapper)
-			
+
 			// If middleware didn't call Next() and didn't return an error,
 			// automatically continue to the next handler.
 			// This allows middleware to work without explicitly calling Next().
 			if err == nil && !nextCalled {
 				err = nextHandler(ctx)
 			}
-			
+
 			return err
 		}
 	}
-	
+
 	g.server.AddMethod(method, fullPath, finalHandler)
 }
 

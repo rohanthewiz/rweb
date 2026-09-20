@@ -6,11 +6,12 @@ import "github.com/rohanthewiz/rweb/consts"
 // The tree compresses common prefixes to minimize memory usage and traversal time.
 //
 // Structure example for routes /user, /users, /user/:id:
-//   root
-//    └── "user"  (data: handler for /user)
-//         ├── "s" (data: handler for /users)
-//         └── ":" (parameter node)
-//              └── "id" (data: handler for /user/:id)
+//
+//	root
+//	 └── "user"  (data: handler for /user)
+//	      ├── "s" (data: handler for /users)
+//	      └── ":" (parameter node)
+//	           └── "id" (data: handler for /user/:id)
 //
 // Zero value is ready to use - the root node is embedded, not a pointer.
 type Tree[T any] struct {
@@ -140,10 +141,10 @@ func (tree *Tree[T]) Lookup(path string) (T, []Parameter) {
 // - Goto statements to avoid function call overhead
 func (tree *Tree[T]) LookupNoAlloc(path string, addParameter func(key string, value string)) T {
 	var (
-		i            uint            // Current position in path (unsigned for faster bounds checks)
-		wildcardPath string          // Saved path suffix for wildcard fallback
-		wildcard     *treeNode[T]    // Saved wildcard node for fallback
-		node         = &tree.root     // Current node in traversal
+		i            uint         // Current position in path (unsigned for faster bounds checks)
+		wildcardPath string       // Saved path suffix for wildcard fallback
+		wildcard     *treeNode[T] // Saved wildcard node for fallback
+		node         = &tree.root // Current node in traversal
 	)
 
 	// Optimization: Skip the first loop iteration if the starting characters are equal
