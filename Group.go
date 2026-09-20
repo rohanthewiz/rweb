@@ -91,6 +91,13 @@ func (g *Group) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip 
 	g.server.StaticFiles(fullPath, targetDir, nbrOfTokensToStrip)
 }
 
+// StaticFilesAbs is StaticFiles for a targetDir given as an absolute
+// filesystem path. See Server.StaticFilesAbs for why it is a separate method.
+func (g *Group) StaticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int) {
+	fullPath := path.Join(g.prefix, reqDir)
+	g.server.StaticFilesAbs(fullPath, targetDir, nbrOfTokensToStrip)
+}
+
 // Proxy sets up a reverse proxy with the group prefix.
 // pathPrefix is the URL path relative to the group prefix.
 // targetURL is the backend server URL to proxy requests to.

@@ -570,11 +570,49 @@ func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) 
 
 // StaticFiles maps a route to serve static files from a specified directory after optionally stripping route tokens.
 // If tokens are stripped, the leftmost tokens are removed from the request path before building the file path.
+//
+// targetDir is always taken relative to the process's working directory, and a
+// leading "/" does not change that: "/assets/images" and "assets/images" both
+// mean ./assets/images, and "/" means the working directory itself. To serve a
+// directory by its absolute filesystem path, use StaticFilesAbs.
 // Examples:
 //  1. s.StaticFiles("static/images/", "/assets/images", 2)
 //  2. s.StaticFiles("/css/", "assets/css", 1)
 //  3. s.StaticFiles("/.well-known/", "/", 0)
 func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, false)
+}
+
+// StaticFilesAbs is StaticFiles for a directory named by its absolute
+// filesystem path — one that is not under the working directory, or whose
+// location should not depend on where the process was started: a per-user
+// data or cache directory, say.
+//
+// It is a separate method rather than a smarter StaticFiles because
+// StaticFiles already gives a leading "/" a meaning (see its doc). Treating
+// such a path as absolute there would silently re-point existing routes —
+// StaticFiles("/.well-known/", "/", 0) would start serving the filesystem
+// root. Here the intent is explicit, and a targetDir that is not absolute is
+// refused at registration instead of being guessed at.
+//
+// Token stripping and the traversal protections are exactly as in StaticFiles.
+// Example:
+//
+//	s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)
+//	// GET /editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
+func (s *Server) StaticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int) {
+	if !filepath.IsAbs(targetDir) {
+		fmt.Printf("StaticFilesAbs target dir %q is not an absolute path -- not handling\n", targetDir)
+		return
+	}
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, true)
+}
+
+// staticFiles is the shared implementation. absTarget selects how targetDir
+// is turned into the root directory on disk; everything else — the route,
+// token stripping, traversal rejection, containment check, conditional GET —
+// is common, so the two public methods cannot drift apart on safety.
+func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int, absTarget bool) {
 	if len(reqDir) < 2 {
 		fmt.Println("StaticFiles request dir is too short -- not handling")
 		return
@@ -640,8 +678,22 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		// and require the candidate to be inside the root via `filepath.Rel`.
 		// This catches any unforeseen normalization quirks (e.g. odd separators
 		// on different OSes) without re-implementing them ourselves.
-		rootAbs, rErr := filepath.Abs("." + filepath.Join("/", targetDir))
-		candAbs, cErr := filepath.Abs("." + fileSpec)
+		//
+		// The two modes differ only in where the root is anchored. Relative
+		// (StaticFiles): "." is prefixed, so whatever targetDir looks like it
+		// lands under the working directory. Absolute (StaticFilesAbs):
+		// targetDir is the root as given, and the candidate is joined onto it
+		// directly rather than taken from fileSpec, whose leading "/" would
+		// mangle a Windows root such as C:\data.
+		var rootAbs, candAbs string
+		var rErr, cErr error
+		if absTarget {
+			rootAbs = filepath.Clean(targetDir)
+			candAbs = filepath.Join(rootAbs, strings.Join(rhTokens, "/"), decoded)
+		} else {
+			rootAbs, rErr = filepath.Abs("." + filepath.Join("/", targetDir))
+			candAbs, cErr = filepath.Abs("." + fileSpec)
+		}
 		if rErr != nil || cErr != nil {
 			ctx.SetStatus(consts.StatusNotFound)
 			return nil

@@ -128,6 +128,12 @@ func main() {
 	// e.g. http://localhost:8080/.well-known/some-file.txt
 	s.StaticFiles("/.well-known/", "/", 0)
 
+	// StaticFiles' target is always relative to the working directory -- a leading "/" does not
+	// change that ("/assets/images" above is ./assets/images, and "/" is the working directory).
+	// To serve a directory by its absolute path, e.g. one under the user's home, use StaticFilesAbs.
+	// e.g. http://localhost:8080/editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
+	s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)
+
 	// File upload
 	s.Post("/upload", func(c rweb.Context) error {
 		req := c.Request()
