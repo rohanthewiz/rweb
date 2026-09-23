@@ -15,6 +15,7 @@ Thanks and credit to Akyoto, especially for the radix tree!
 - High performance
 - Low latency
 - Server Sent Events
+- WebSockets, with optional permessage-deflate compression (`s.WebSocketWithOptions`)
 - Flexible static files handling
 - Scales incredibly well with the number of routes
 - Route grouping with middleware support

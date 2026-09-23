@@ -47,6 +47,7 @@ var (
 	ErrWebSocketInvalidOpcode   = errors.New("invalid websocket opcode")
 	ErrWebSocketPayloadTooLarge = errors.New("websocket payload too large")
 	ErrWebSocketBadMask         = errors.New("websocket frame not masked")
+	ErrWebSocketBadRSV          = errors.New("websocket frame has a reserved bit set that no extension negotiated")
 )
 
 // WebSocket GUID as per RFC 6455
@@ -103,9 +104,22 @@ type WSConn struct {
 	doneOnce sync.Once
 
 	// for managing fragmented messages
-	fragmentedMessage []byte
-	fragmentedType    MessageType
+	fragmentedMessage    []byte
+	fragmentedType       MessageType
+	fragmentedCompressed bool // the first fragment had RSV1 (permessage-deflate)
+
+	// deflate is the negotiated permessage-deflate state, nil when the
+	// connection is uncompressed (websocket_deflate.go).
+	deflate *wsDeflate
+
+	// wbuf assembles each outgoing frame — header and payload — so it goes to
+	// the socket in one write rather than two or three. Guarded by writeMutex.
+	wbuf []byte
 }
+
+// maxRetainedWriteBuf caps the frame buffer kept between writes: one large
+// message should not pin its size in memory for the connection's lifetime.
+const maxRetainedWriteBuf = 1 << 20
 
 // NewWSConn creates a new WebSocket connection from an existing net.Conn
 // The isServer parameter indicates if this is a server-side connection
@@ -132,25 +146,27 @@ func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 }
 
 // performHandshake performs the WebSocket handshake on the server side
-// This validates the client's request and sends the appropriate response
-func performHandshake(ctx *context) error {
+// This validates the client's request and sends the appropriate response.
+// The returned deflate state is non-nil when permessage-deflate was
+// negotiated (opts.Compression and a client offer this side can honour).
+func performHandshake(ctx *context, opts WSOptions) (*wsDeflate, error) {
 	// Check for required headers
 	if ctx.request.Header("Upgrade") != "websocket" {
-		return errors.New("missing or invalid Upgrade header")
+		return nil, errors.New("missing or invalid Upgrade header")
 	}
 
 	if !strings.Contains(strings.ToLower(ctx.request.Header("Connection")), "upgrade") {
-		return errors.New("missing or invalid Connection header")
+		return nil, errors.New("missing or invalid Connection header")
 	}
 
 	key := ctx.request.Header("Sec-WebSocket-Key")
 	if key == "" {
-		return errors.New("missing Sec-WebSocket-Key header")
+		return nil, errors.New("missing Sec-WebSocket-Key header")
 	}
 
 	version := ctx.request.Header("Sec-WebSocket-Version")
 	if version != "13" {
-		return errors.New("unsupported WebSocket version")
+		return nil, errors.New("unsupported WebSocket version")
 	}
 
 	// Calculate the accept key
@@ -174,22 +190,41 @@ func performHandshake(ctx *context) error {
 		}
 	}
 
-	return nil
+	var deflate *wsDeflate
+	if opts.Compression {
+		if offer, ok := parseDeflateOffer(ctx.request.Header("Sec-WebSocket-Extensions")); ok {
+			ctx.response.SetHeader("Sec-WebSocket-Extensions", offer.response())
+			deflate = newServerDeflate(offer, opts.CompressionLevel)
+		}
+	}
+	return deflate, nil
 }
 
 // ReadMessage reads a complete message from the WebSocket connection
 // It handles fragmentation and returns the complete message
 func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 	for {
-		frameType, fin, data, err := ws.readFrame()
+		frameType, fin, rsv1, data, err := ws.readFrame()
 		if err != nil {
 			return nil, err
+		}
+		// RSV1 is permessage-deflate's "this message is compressed" (RFC 7692
+		// §6), and only means that on the FIRST frame of a data message. Set
+		// anywhere else, or without the extension, the peer is speaking a
+		// protocol this connection never agreed to.
+		if rsv1 && (ws.deflate == nil || (frameType != wsText && frameType != wsBinary)) {
+			return nil, ErrWebSocketBadRSV
 		}
 
 		switch frameType {
 		case wsText, wsBinary:
 			if fin {
 				// Unfragmented message — the common fast path
+				if rsv1 {
+					if data, err = ws.deflate.decompress(data, ws.maxMessageSize); err != nil {
+						return nil, err
+					}
+				}
 				return &WSMessage{
 					Type: MessageType(frameType),
 					Data: data,
@@ -197,6 +232,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			}
 			// Start of a fragmented message (FIN=0 on first frame per RFC 6455 §5.4)
 			ws.fragmentedType = MessageType(frameType)
+			ws.fragmentedCompressed = rsv1
 			ws.fragmentedMessage = append(ws.fragmentedMessage[:0], data...)
 
 		case wsContinuation:
@@ -205,14 +241,22 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 				return nil, errors.New("unexpected continuation frame")
 			}
 			ws.fragmentedMessage = append(ws.fragmentedMessage, data...)
+			// The per-frame size check sees one fragment at a time; the
+			// message as a whole is held to the same limit.
+			if int64(len(ws.fragmentedMessage)) > ws.maxMessageSize {
+				ws.fragmentedMessage = nil
+				return nil, ErrWebSocketPayloadTooLarge
+			}
 			if fin {
 				// Final fragment — assemble and return the complete message
-				msg := &WSMessage{
-					Type: ws.fragmentedType,
-					Data: ws.fragmentedMessage,
-				}
+				data := ws.fragmentedMessage
 				ws.fragmentedMessage = nil
-				return msg, nil
+				if ws.fragmentedCompressed {
+					if data, err = ws.deflate.decompress(data, ws.maxMessageSize); err != nil {
+						return nil, err
+					}
+				}
+				return &WSMessage{Type: ws.fragmentedType, Data: data}, nil
 			}
 			// More fragments expected — keep reading
 
@@ -265,17 +309,44 @@ func (ws *WSConn) WriteMessage(messageType MessageType, data []byte) error {
 	return ws.writeFrame(int(messageType), data)
 }
 
-// readFrame reads a single WebSocket frame, returning the opcode, FIN bit, and payload.
-// The FIN bit indicates whether this is the final fragment of a message (RFC 6455 §5.2).
-func (ws *WSConn) readFrame() (opcode int, fin bool, payload []byte, err error) {
+// WriteMessages writes several messages of one type in a single write to the
+// socket: each is still its own WebSocket message, but a writer that has a
+// queue to drain pays one syscall (and, on TLS, one flush of records) for the
+// batch instead of one per message.
+func (ws *WSConn) WriteMessages(messageType MessageType, data ...[]byte) error {
+	ws.writeMutex.Lock()
+	defer ws.writeMutex.Unlock()
+
+	if ws.closed {
+		return ErrWebSocketAlreadyClosed
+	}
+	ws.wbuf = ws.wbuf[:0]
+	for _, d := range data {
+		var err error
+		if ws.wbuf, err = ws.appendFrame(ws.wbuf, int(messageType), d); err != nil {
+			return err
+		}
+	}
+	return ws.flushFrames()
+}
+
+// readFrame reads a single WebSocket frame, returning the opcode, FIN bit, RSV1
+// bit, and payload. The FIN bit indicates whether this is the final fragment of
+// a message (RFC 6455 §5.2); RSV1 marks a compressed message when
+// permessage-deflate is in use. RSV2/RSV3 have no meaning here and fail the read.
+func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, err error) {
 	// Read first 2 bytes
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(ws.conn, header); err != nil {
-		return 0, false, nil, err
+		return 0, false, false, nil, err
 	}
 
-	// Parse first byte — FIN (bit 0) and opcode (bits 4-7)
+	// Parse first byte — FIN (bit 0), RSV1-3 (bits 1-3) and opcode (bits 4-7)
 	fin = (header[0] & 0x80) != 0
+	rsv1 = (header[0] & 0x40) != 0
+	if header[0]&0x30 != 0 {
+		return 0, false, false, nil, ErrWebSocketBadRSV
+	}
 	opcode = int(header[0] & 0x0F)
 
 	// Parse second byte
@@ -284,30 +355,30 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, payload []byte, err error) 
 
 	// Client frames must be masked, server frames must not be masked
 	if ws.isServer && !masked {
-		return 0, false, nil, ErrWebSocketBadMask
+		return 0, false, false, nil, ErrWebSocketBadMask
 	}
 	if !ws.isServer && masked {
-		return 0, false, nil, ErrWebSocketBadMask
+		return 0, false, false, nil, ErrWebSocketBadMask
 	}
 
 	// Read extended payload length if needed
 	if payloadLen == 126 {
 		extLen := make([]byte, 2)
 		if _, err := io.ReadFull(ws.conn, extLen); err != nil {
-			return 0, false, nil, err
+			return 0, false, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint16(extLen))
 	} else if payloadLen == 127 {
 		extLen := make([]byte, 8)
 		if _, err := io.ReadFull(ws.conn, extLen); err != nil {
-			return 0, false, nil, err
+			return 0, false, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint64(extLen))
 	}
 
 	// Check payload size
 	if payloadLen > ws.maxMessageSize {
-		return 0, false, nil, ErrWebSocketPayloadTooLarge
+		return 0, false, false, nil, ErrWebSocketPayloadTooLarge
 	}
 
 	// Read mask key if present
@@ -315,14 +386,14 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, payload []byte, err error) 
 	if masked {
 		maskKey = make([]byte, 4)
 		if _, err := io.ReadFull(ws.conn, maskKey); err != nil {
-			return 0, false, nil, err
+			return 0, false, false, nil, err
 		}
 	}
 
 	// Read payload
 	payload = make([]byte, payloadLen)
 	if _, err := io.ReadFull(ws.conn, payload); err != nil {
-		return 0, false, nil, err
+		return 0, false, false, nil, err
 	}
 
 	// Unmask payload if needed
@@ -332,78 +403,88 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, payload []byte, err error) 
 		}
 	}
 
-	return opcode, fin, payload, nil
+	return opcode, fin, rsv1, payload, nil
 }
 
-// writeFrame writes a WebSocket frame
+// writeFrame writes one complete message (or control frame) as a single frame,
+// in a single write. Callers hold writeMutex.
 func (ws *WSConn) writeFrame(opcode int, data []byte) error {
+	var err error
+	if ws.wbuf, err = ws.appendFrame(ws.wbuf[:0], opcode, data); err != nil {
+		return err
+	}
+	return ws.flushFrames()
+}
+
+// flushFrames sends what appendFrame assembled in wbuf, under the write
+// deadline, and lets go of an oversized buffer.
+func (ws *WSConn) flushFrames() error {
 	if ws.writeDeadline.After(time.Now()) {
 		ws.conn.SetWriteDeadline(ws.writeDeadline)
 	}
+	_, err := ws.conn.Write(ws.wbuf)
+	if cap(ws.wbuf) > maxRetainedWriteBuf {
+		ws.wbuf = nil
+	} else {
+		ws.wbuf = ws.wbuf[:0]
+	}
+	return err
+}
 
-	// Create frame header
-	header := make([]byte, 2)
-	header[0] = 0x80 | byte(opcode) // FIN = 1, opcode
+// appendFrame appends one frame carrying data to buf: header, extended
+// length, mask key and (masked) payload, contiguous. Building the frame in one
+// buffer is what lets it leave in one write: the header and the payload used
+// to be separate writes, which on an unbuffered socket is separate syscalls
+// and, with TCP_NODELAY, separate packets.
+//
+// A text or binary message on a connection that negotiated permessage-deflate
+// is compressed first, and marked with RSV1.
+func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, error) {
+	b0 := byte(0x80 | opcode) // FIN = 1, opcode
+	if ws.deflate != nil && (opcode == wsText || opcode == wsBinary) {
+		compressed, err := ws.deflate.compress(data)
+		if err != nil {
+			return buf, err
+		}
+		data = compressed
+		b0 |= 0x40 // RSV1: compressed (RFC 7692 §6)
+	}
 
-	dataLen := len(data)
+	var b1 byte
 	if !ws.isServer {
-		header[1] = 0x80 // Set mask bit for client frames
+		b1 = 0x80 // Set mask bit for client frames
 	}
 
 	// Determine payload length encoding
-	var extLen []byte
-	if dataLen < 126 {
-		header[1] |= byte(dataLen)
-	} else if dataLen <= 65535 {
-		header[1] |= 126
-		extLen = make([]byte, 2)
-		binary.BigEndian.PutUint16(extLen, uint16(dataLen))
-	} else {
-		header[1] |= 127
-		extLen = make([]byte, 8)
-		binary.BigEndian.PutUint64(extLen, uint64(dataLen))
+	dataLen := len(data)
+	switch {
+	case dataLen < 126:
+		buf = append(buf, b0, b1|byte(dataLen))
+	case dataLen <= 65535:
+		buf = append(buf, b0, b1|126)
+		buf = binary.BigEndian.AppendUint16(buf, uint16(dataLen))
+	default:
+		buf = append(buf, b0, b1|127)
+		buf = binary.BigEndian.AppendUint64(buf, uint64(dataLen))
 	}
 
-	// Write header
-	if _, err := ws.conn.Write(header); err != nil {
-		return err
-	}
-
-	// Write extended length if needed
-	if extLen != nil {
-		if _, err := ws.conn.Write(extLen); err != nil {
-			return err
-		}
-	}
-
-	// Write mask and masked data for client frames
-	if !ws.isServer {
-		mask := make([]byte, 4)
-		if _, err := rand.Read(mask); err != nil {
-			return err
-		}
-
-		if _, err := ws.conn.Write(mask); err != nil {
-			return err
-		}
-
-		// Write masked payload
-		masked := make([]byte, len(data))
-		for i := range data {
-			masked[i] = data[i] ^ mask[i%4]
-		}
-
-		if _, err := ws.conn.Write(masked); err != nil {
-			return err
-		}
-	} else {
+	if ws.isServer {
 		// Server frames are not masked
-		if _, err := ws.conn.Write(data); err != nil {
-			return err
-		}
+		return append(buf, data...), nil
 	}
 
-	return nil
+	// Client frames: mask key, then the payload masked with it
+	var mask [4]byte
+	if _, err := rand.Read(mask[:]); err != nil {
+		return buf, err
+	}
+	buf = append(buf, mask[:]...)
+	start := len(buf)
+	buf = append(buf, data...)
+	for i := range data {
+		buf[start+i] ^= mask[i%4]
+	}
+	return buf, nil
 }
 
 // Close closes the WebSocket connection with the given code and reason
@@ -420,7 +501,12 @@ func (ws *WSConn) Close(code int, reason string) error {
 	binary.BigEndian.PutUint16(data[:2], uint16(code))
 	copy(data[2:], reason)
 
-	if err := ws.writeFrame(wsClose, data); err != nil {
+	// Under writeMutex like every other write: frames from two goroutines
+	// must not interleave on the socket, and they share wbuf.
+	ws.writeMutex.Lock()
+	err := ws.writeFrame(wsClose, data)
+	ws.writeMutex.Unlock()
+	if err != nil {
 		// Even if writing the close frame fails, mark as closed
 		ws.closed = true
 		ws.doneOnce.Do(func() { close(ws.done) })
@@ -458,7 +544,9 @@ func (ws *WSConn) handleClose(code int, text string) {
 	ws.doneOnce.Do(func() { close(ws.done) })
 	data := make([]byte, 2)
 	binary.BigEndian.PutUint16(data, uint16(code))
+	ws.writeMutex.Lock()
 	ws.writeFrame(wsClose, data)
+	ws.writeMutex.Unlock()
 	ws.conn.Close()
 }
 

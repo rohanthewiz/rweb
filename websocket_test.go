@@ -152,7 +152,7 @@ func TestWebSocketCloseHandshake(t *testing.T) {
 	// Peer (client) sends a close frame response immediately when it reads one
 	go func() {
 		// Read the close frame from the server
-		_, _, data, err := client.readFrame()
+		_, _, _, data, err := client.readFrame()
 		if err != nil {
 			return
 		}
@@ -286,7 +286,7 @@ func TestWebSocketDoneChannelPingPattern(t *testing.T) {
 	pingReceived := make(chan struct{}, 100)
 	go func() {
 		for {
-			opcode, _, _, err := client.readFrame()
+			opcode, _, _, _, err := client.readFrame()
 			if err != nil {
 				return
 			}

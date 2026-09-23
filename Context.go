@@ -647,6 +647,13 @@ func (ctx *context) HasCookie(name string) bool {
 // UpgradeWebSocket upgrades the HTTP connection to WebSocket protocol.
 // This performs the WebSocket handshake and returns a WebSocket connection.
 func (ctx *context) UpgradeWebSocket() (*WSConn, error) {
+	return ctx.upgradeWebSocket(WSOptions{})
+}
+
+// upgradeWebSocket is UpgradeWebSocket with route options (compression), the
+// form Server.WebSocketWithOptions uses. Kept off the Context interface so
+// adding options never breaks a type that implements it.
+func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 	// Check if already upgraded
 	if ctx.wsUpgraded {
 		return ctx.wsConn, nil
@@ -658,7 +665,8 @@ func (ctx *context) UpgradeWebSocket() (*WSConn, error) {
 	}
 
 	// Perform the WebSocket handshake
-	if err := performHandshake(ctx); err != nil {
+	deflate, err := performHandshake(ctx, opts)
+	if err != nil {
 		return nil, err
 	}
 
@@ -668,6 +676,7 @@ func (ctx *context) UpgradeWebSocket() (*WSConn, error) {
 
 	// Create WebSocket connection
 	ctx.wsConn = NewWSConn(ctx.conn, true)
+	ctx.wsConn.deflate = deflate
 	ctx.wsUpgraded = true
 
 	return ctx.wsConn, nil

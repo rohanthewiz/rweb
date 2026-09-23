@@ -540,6 +540,31 @@ s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
 })
 ```
 
+### Compression (permessage-deflate)
+
+`s.WebSocketWithOptions()` is `s.WebSocket()` with route options. With
+`Compression: true`, rweb negotiates permessage-deflate (RFC 7692) with any
+client that offers it (every browser does); others connect uncompressed.
+Text and binary messages are then compressed transparently — the handler code
+does not change.
+
+```go
+s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, func(ws *rweb.WSConn) error {
+    // ReadMessage / WriteMessage exactly as with s.WebSocket
+    return nil
+})
+```
+
+- Server → client keeps the compressor's 32 KB window between messages
+  (context takeover), so a stream of similar messages (JSON with the same keys)
+  compresses far better than each message alone. Client → server messages are
+  independent (`client_no_context_takeover`).
+- `CompressionLevel` sets the `compress/flate` level; 0 means 2. Level 1 is
+  not a good choice for small messages in Go: it skips matching (and resets its
+  history) for any flush under 128 bytes.
+- The message size limit applies to the decompressed size.
+- Off by default: `s.WebSocket()` and `ctx.UpgradeWebSocket()` never negotiate it.
+
 ### Message Types
 
 ```go
@@ -555,7 +580,8 @@ rweb.PongMessage   // Pong control frame
 ```go
 // Reading and writing
 msg, err := ws.ReadMessage()              // Returns *WSMessage{Type, Data}
-ws.WriteMessage(rweb.TextMessage, data)   // Send a message
+ws.WriteMessage(rweb.TextMessage, data)   // Send a message (one socket write)
+ws.WriteMessages(rweb.TextMessage, a, b)  // Several messages, one socket write
 
 // Connection lifecycle
 ws.Close(1000, "reason")                  // Send close frame and disconnect

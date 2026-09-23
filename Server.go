@@ -476,6 +476,25 @@ func (s *Server) WebSocket(path string, handler WebSocketHandler) {
 	})
 }
 
+// WebSocketWithOptions is WebSocket with per-route options — currently
+// permessage-deflate compression (WSOptions.Compression), negotiated with
+// clients that offer it; others connect uncompressed as before.
+// Usage: s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, handler)
+func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSocketHandler) {
+	s.Get(path, func(ctx Context) error {
+		c, ok := ctx.(*context)
+		if !ok {
+			return errors.New("rweb: WebSocketWithOptions needs the server's own context")
+		}
+		ws, err := c.upgradeWebSocket(opts)
+		if err != nil {
+			fmt.Printf("Failed to upgrade connection to WebSocket: %v\n", err)
+			return err
+		}
+		return handler(ws)
+	})
+}
+
 // Proxy sets up a reverse proxy for the provided path prefix to the specified target URL (targetURL can include a path)
 // The pathPrefix can help us to distinguish between different proxy targets, from which we can strip any unneeded tokens (from the left)  in the handler
 // If there is any prefix left after stripping, it is added to the leftmost of the target URL.
