@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,7 +37,17 @@ type SSEHubOptions struct {
 // hubClient tracks per-client state within the hub.
 // Currently used for drop-counting; extensible for future per-client metadata.
 type hubClient struct {
-	dropped int // consecutive broadcast sends that fell into the default (channel full) branch
+	// dropped counts consecutive broadcast sends that fell into the default
+	// (channel full) branch. It is atomic because broadcastToClients updates it
+	// while holding only the hub's READ lock: concurrent Broadcast calls each
+	// walk the client map at once, and a plain int would be a data race.
+	// Taking the write lock instead would serialize every broadcast just to
+	// protect one counter, so the atomic keeps broadcasts parallel.
+	//
+	// Under concurrent broadcasts "consecutive" is approximate — a success in
+	// one goroutine can reset the count between another's drops — which only
+	// delays eviction of a client that is, by then, draining again.
+	dropped atomic.Int32
 }
 
 // SSEHub manages multiple SSE client connections with fan-out broadcast capability.
@@ -170,11 +181,13 @@ func (h *SSEHub) broadcastToClients(value any) {
 		select {
 		case client <- value:
 			// Successful send — reset the drop counter
-			hc.dropped = 0
+			hc.dropped.Store(0)
 		default:
-			hc.dropped++
-			// Check if this client has exceeded the eviction threshold
-			if h.opts.MaxDropped > 0 && hc.dropped >= h.opts.MaxDropped {
+			// Check if this client has exceeded the eviction threshold.
+			// Use Add's result rather than a separate Load so the check sees
+			// this broadcast's own increment. Two broadcasts may both mark the
+			// same client stale; unregisterLocked is idempotent, so that's fine.
+			if n := hc.dropped.Add(1); h.opts.MaxDropped > 0 && int(n) >= h.opts.MaxDropped {
 				stale = append(stale, client)
 			}
 		}

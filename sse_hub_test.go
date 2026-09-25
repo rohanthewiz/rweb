@@ -375,3 +375,50 @@ func TestSSEHubOnDisconnectCalledOnUnregister(t *testing.T) {
 	hub.Unregister(ch)
 	assert.Equal(t, int32(1), called.Load())
 }
+
+// TestSSEHubConcurrentBroadcast runs many Broadcasts at once against a mix of
+// draining and full clients. Every broadcast touches every client's drop
+// counter while holding only the hub's read lock, so under -race this fails
+// unless that counter is safe for concurrent update.
+func TestSSEHubConcurrentBroadcast(t *testing.T) {
+	hub := NewSSEHub(SSEHubOptions{ChannelSize: 4, MaxDropped: 0}) // no eviction: keep both clients the whole run
+	defer hub.Close()
+
+	// full never drains, so every broadcast after the fourth bumps its counter;
+	// drained is read continuously, so its counter keeps being reset.
+	full := make(chan any, 4)
+	hub.Register(full)
+	drained := make(chan any, 4)
+	hub.Register(drained)
+
+	stop := make(chan struct{})
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case <-drained:
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	const senders, perSender = 8, 200
+	done := make(chan struct{})
+	for i := 0; i < senders; i++ {
+		go func() {
+			for j := 0; j < perSender; j++ {
+				hub.BroadcastRaw(SSEvent{Type: "tick", Data: j})
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < senders; i++ {
+		<-done
+	}
+	close(stop)
+	<-drainDone
+
+	assert.Equal(t, 2, hub.ClientCount())
+}
