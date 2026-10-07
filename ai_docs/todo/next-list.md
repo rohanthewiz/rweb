@@ -31,7 +31,7 @@ code at `3169f85`.
   `merged into N-xxx`. Moving between Open and Roadmap is fine.
 - **Open and Roadmap stay in ID order.**
 
-**Next ID:** N-019
+**Next ID:** N-022
 
 ## Open
 
@@ -50,16 +50,16 @@ code at `3169f85`.
 
 - **N-004** · raised `2026-0509-2315-fix-multipart-form-leak` · value medium
   Make multipart parsing fully lazy by dropping the eager pre-parse in
-  `handleRequest` (`Server.go:1274`). The pre-parse runs before the handler
+  `handleRequest` (`Server.go:1297`). The pre-parse runs before the handler
   chain, so a multipart POST to *any* path — even an unrouted one — is parsed
   and may spill to temp files, up to the 100 MB body cap. The accessors already
-  parse on demand and idempotently (`Request.go:280,314,349`), so removing it
+  parse on demand and idempotently (`Request.go:388,422,457`), so removing it
   should be safe; `WithMultipartMaxMemory` only tunes the cost. Also raised in
   `2026-0509-2336`; lapsed after both.
 
 - **N-005** · raised `2026-0509-2315-fix-multipart-form-leak` · value low
   `GetPostValue` and `FormValue` overlap (`FormValue` falls through to
-  `GetPostValue`, `Request.go:357`). A cleanup could deprecate `GetPostValue`
+  `GetPostValue`, `Request.go:465`). A cleanup could deprecate `GetPostValue`
   to a thin alias. Lapsed. Candidate for Non-goals.
 
 - **N-006** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · value low
@@ -87,7 +87,7 @@ code at `3169f85`.
 
 - **N-015** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
   Decide whether a request with **no** Host header should get 400 (RFC 9112
-  requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1098`):
+  requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1103`):
   hand-rolled clients and some raw-socket tests omit it.
 
 - **N-016** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
@@ -105,6 +105,26 @@ code at `3169f85`.
 - **N-018** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
   Host validation runs on the wire path only; synthetic `s.Request()` calls
   bypass it. `s.Request()` is a test-oriented API. Candidate for Non-goals.
+
+- **N-019** · raised `2026-1006-1954-request-context-cancellation` · value low
+  `Server.Proxy` builds its upstream request with `http.NewRequest`, so a
+  client leaving mid-proxy does not cancel the upstream call. Pass
+  `ctx.Request().Context()` (`http.NewRequestWithContext`). The handler would
+  then return `context.Canceled` for every abandoned proxy request, which the
+  default error handler logs as an `[ERR]` and answers 500 on a dead conn, so
+  skip the error path for `context.Canceled`, as `httputil.ReverseProxy` does.
+
+- **N-020** · raised `2026-1006-1954-request-context-cancellation` · value low
+  Shutdown does not cancel request contexts. `Run` closes the listener on
+  SIGINT/SIGTERM but does not track connections, so in-flight handlers keep
+  their `Request().Context()` live. Needs connection tracking or a
+  server-wide base context that `Run` cancels.
+
+- **N-021** · raised `2026-1006-1954-request-context-cancellation` · value low
+  The installed skill copy `~/.claude/skills/rweb-light-go-webserver/SKILL.md`
+  lags `ai_docs/SKILL.md`: it predates the TLS `TLSAddr`/autocert notes and now
+  the Request Context section. Re-sync it (or make it a link) so sessions using
+  the skill see `Request().Context()`.
 
 ## Roadmap
 
