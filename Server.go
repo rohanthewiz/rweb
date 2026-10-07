@@ -983,8 +983,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 	var method, url string
 	var ctx = s.contextPool.Get().(*context) // get a new context from the pool
 
-	ctx.reader.Reset(conn) // prepare to read from the accepted connection
-	ctx.conn = conn        // store connection for WebSocket upgrades
+	// Prepare to read from the accepted connection. bufio reads through
+	// connReader rather than straight from conn so the disconnect watch
+	// behind Request().Context() can read ahead without losing the byte it
+	// reads (see conn_reader.go).
+	ctx.request.cr.reset(conn)
+	ctx.reader.Reset(&ctx.request.cr)
+	ctx.conn = conn // store connection for WebSocket upgrades
 
 	defer conn.Close()
 
@@ -1210,6 +1215,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
+		// An event stream is sent without Content-Length, so the client finds
+		// its end by the connection closing: never read another request here.
+		// This used to happen only as a side effect — sendSSE leaves a past
+		// read deadline on the conn, so the next read failed — and is now
+		// explicit, since a byte the disconnect watch read ahead would let the
+		// next read start succeeding before it hit that deadline.
+		if ctx.sseEventsChan != nil {
+			return
+		}
+
 		// Clean up the context by zeroing some slices, etc
 		ctx.Clean()
 
@@ -1225,6 +1240,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 // handleRequest handles the given request.
 func (s *Server) handleRequest(ctx *context, method string, url string, respWriter io.Writer) {
+	// The request context (Request().Context()) ends when handleRequest does —
+	// after writeResponse, so an SSE stream keeps it live until the stream
+	// ends. Deferred, so a panic that escapes to the connection's backstop
+	// still stops the disconnect watch before the context goes back to the
+	// pool; a watch goroutine outliving its request would read into the next
+	// connection's state.
+	defer ctx.request.finishContext()
+
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url, s.options.URLOptions)
 
@@ -1305,6 +1328,13 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	if err != nil {
 		s.errorHandler(ctx, err)
 	}
+
+	// The handlers are done with the connection's read side. Stop the
+	// disconnect watch now rather than in the deferred finishContext:
+	// sendSSE starts its own reader on the conn in writeResponse, and two
+	// readers would split the stream between them. The context stays live
+	// (it is only cancelled by the defer), so SSE producers keep running.
+	ctx.request.cr.stopWatch()
 
 	s.writeResponse(ctx, respWriter)
 }

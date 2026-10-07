@@ -736,6 +736,7 @@ req.Header("Authorization") // Request header
 req.Body()                // Raw request body bytes
 req.FormValue("field")    // Form field value
 req.GetPostValue("field") // POST form value
+req.Context()             // context.Context, cancelled when the client disconnects (v0.2.0+)
 ```
 
 `req.Host()` (v0.1.29+) follows RFC 9112: the host from an absolute-form request target if
@@ -762,6 +763,49 @@ s.Use(func(ctx rweb.Context) error {
     return ctx.Next()
 })
 ```
+
+### Request Context (v0.2.0+)
+
+`ctx.Request().Context()` is the request's `context.Context` (net/http's `Request.Context()`
+counterpart). It is cancelled when the client closes the connection while the handler runs, and
+always once the request is finished. Pass it to outbound calls, queries and worker pools:
+
+```go
+s.Post("/batch", func(ctx rweb.Context) error {
+    results := runner.Run(ctx.Request().Context(), jobs) // stops if the tab closes
+    return ctx.WriteJSON(results)
+})
+
+// SSE: the context lives for the whole stream, so a producer can stop when its client leaves
+s.Get("/events", func(ctx rweb.Context) error {
+    rc := ctx.Request().Context()
+    ch := make(chan any)
+    go func() {
+        defer close(ch)
+        for {
+            select {
+            case <-rc.Done():
+                return
+            case ch <- nextEvent():
+            }
+        }
+    }()
+    return ctx.SetSSE(ch, "update")
+})
+```
+
+- Created on first call: a handler that never asks pays nothing. Asking starts a 1-byte
+  background read on the connection (the way net/http detects a client leaving).
+- Obtain it inside the handler; unlike the rweb `Context`, the returned `context.Context` may be
+  kept and used from other goroutines.
+- Disconnects are not watched (only the end of the request cancels) after `UpgradeWebSocket`
+  or `GetConn()` (the connection's reads are theirs now; a WebSocket peer leaving shows up as a
+  `ReadMessage` error), for a pipelined request (the next one is already queued), and for a
+  synthetic `s.Request(...)`.
+- A client that half-closes counts as gone, as with net/http. One that vanishes without closing
+  (sleeping laptop) is not noticed until TCP gives up.
+- Before v0.2.0 rweb had no request context; handlers had to use `context.Background()`, and
+  slow work ran to completion after the client left.
 
 ## Handler Signature
 

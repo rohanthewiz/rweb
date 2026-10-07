@@ -86,7 +86,12 @@ const (
 
 // WSConn represents a WebSocket connection
 type WSConn struct {
-	conn           net.Conn
+	conn net.Conn
+	// r is where frames are read from: conn itself, or — when the client's
+	// first bytes arrived with its upgrade request and HTTP had already read
+	// them — those bytes followed by conn (see upgradeWebSocket). Deadlines
+	// and writes still go to conn directly.
+	r              io.Reader
 	isServer       bool
 	closed         bool
 	closeMutex     sync.Mutex
@@ -126,6 +131,7 @@ const maxRetainedWriteBuf = 1 << 20
 func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 	ws := &WSConn{
 		conn:           conn,
+		r:              conn,
 		isServer:       isServer,
 		maxMessageSize: defaultMaxMessageSize,
 		closeHandlers:  make([]func(int, string), 0),
@@ -337,7 +343,7 @@ func (ws *WSConn) WriteMessages(messageType MessageType, data ...[]byte) error {
 func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, err error) {
 	// Read first 2 bytes
 	header := make([]byte, 2)
-	if _, err := io.ReadFull(ws.conn, header); err != nil {
+	if _, err := io.ReadFull(ws.r, header); err != nil {
 		return 0, false, false, nil, err
 	}
 
@@ -364,13 +370,13 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 	// Read extended payload length if needed
 	if payloadLen == 126 {
 		extLen := make([]byte, 2)
-		if _, err := io.ReadFull(ws.conn, extLen); err != nil {
+		if _, err := io.ReadFull(ws.r, extLen); err != nil {
 			return 0, false, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint16(extLen))
 	} else if payloadLen == 127 {
 		extLen := make([]byte, 8)
-		if _, err := io.ReadFull(ws.conn, extLen); err != nil {
+		if _, err := io.ReadFull(ws.r, extLen); err != nil {
 			return 0, false, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint64(extLen))
@@ -385,14 +391,14 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 	var maskKey []byte
 	if masked {
 		maskKey = make([]byte, 4)
-		if _, err := io.ReadFull(ws.conn, maskKey); err != nil {
+		if _, err := io.ReadFull(ws.r, maskKey); err != nil {
 			return 0, false, false, nil, err
 		}
 	}
 
 	// Read payload
 	payload = make([]byte, payloadLen)
-	if _, err := io.ReadFull(ws.conn, payload); err != nil {
+	if _, err := io.ReadFull(ws.r, payload); err != nil {
 		return 0, false, false, nil, err
 	}
 

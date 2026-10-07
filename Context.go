@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -280,6 +281,11 @@ func (ctx *context) Clean() {
 	ctx.wsUpgraded = false
 	ctx.wsConn = nil
 	ctx.conn = nil
+
+	// handleRequest already finished the request context; repeating it here
+	// guarantees no pooled context carries a live watch or an unfinished
+	// context into its next use, whatever path led here.
+	ctx.request.finishContext()
 }
 
 // SetSSE configures the context for Server-Sent Events streaming.
@@ -670,12 +676,27 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 		return nil, err
 	}
 
+	// From here on the connection's reads belong to the WebSocket. Stop the
+	// disconnect watch (if Request().Context() started one) before anything
+	// else: left running, it would race WSConn for the first frame byte. The
+	// request context itself stays live until the WebSocket handler returns;
+	// a peer closing mid-session surfaces as a ReadMessage error instead.
+	ctx.request.releaseConn()
+
 	// Write the upgrade response immediately
 	// This must happen before any WebSocket frames are sent
 	ctx.server.writeWebSocketUpgradeResponse(ctx, ctx.conn)
 
 	// Create WebSocket connection
 	ctx.wsConn = NewWSConn(ctx.conn, true)
+	// Bytes that arrived behind the upgrade request were already read off the
+	// conn — into ctx.reader's buffer, or by the watch — and belong to the
+	// WebSocket stream, not to HTTP. Feed them to WSConn ahead of the conn so
+	// no frame loses its first bytes. (RFC 6455 has the client wait for the
+	// 101 before sending, so this is normally empty and costs nothing.)
+	if lead := ctx.request.readAhead(); len(lead) > 0 {
+		ctx.wsConn.r = io.MultiReader(bytes.NewReader(lead), ctx.conn)
+	}
 	ctx.wsConn.deflate = deflate
 	ctx.wsUpgraded = true
 
@@ -711,7 +732,14 @@ func (ctx *context) IsWebSocketUpgrade() bool {
 
 // GetConn returns the underlying network connection.
 // This should be used with caution as it bypasses the framework's abstractions.
+//
+// Calling it hands the connection's reads to the caller for the rest of the
+// request: the disconnect watch behind Request().Context() is stopped (it
+// would otherwise read concurrently with the caller and take a byte of
+// theirs), so that context is then cancelled only when the request finishes.
+// For the peer's address, ClientIP needs no connection hand-off.
 func (ctx *context) GetConn() net.Conn {
+	ctx.request.releaseConn()
 	return ctx.conn
 }
 

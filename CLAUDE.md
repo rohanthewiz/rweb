@@ -45,6 +45,7 @@ curl http://localhost:8080/some-json
 - **Request.go/Response.go**: HTTP request and response handling
 - **core/rtr/**: Radix tree router for high-performance route matching
 - **middleware.go**: Middleware chain implementation
+- **conn_reader.go**: The reader under each connection's bufio.Reader; runs the disconnect watch behind `ctx.Request().Context()` (a 1-byte background read, as in net/http). Anything that takes over a conn's reads (WebSocket upgrade, `GetConn`, `sendSSE`) must stop the watch first
 
 ### Key Patterns
 
@@ -56,6 +57,7 @@ curl http://localhost:8080/some-json
 
 ### Important Features
 - **Server-Sent Events (SSE)**: Built-in support via `SSEHandler()`
+- **Request context**: `ctx.Request().Context()` is cancelled when the client disconnects mid-handler, and always when the request ends (after the stream, for SSE)
 - **Static File Serving**: `StaticFiles(urlPrefix, localPath, stripPrefixSegments)`
 - **Reverse Proxy**: `Proxy(urlPrefix, targetURL, stripPrefixSegments)`
 - **File Uploads**: Handled via `GetFormFile()` on Request

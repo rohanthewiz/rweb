@@ -15,6 +15,7 @@ Thanks and credit to Akyoto, especially for the radix tree!
 - High performance
 - Low latency
 - Server Sent Events
+- Request cancellation: `ctx.Request().Context()` is cancelled when the client disconnects (see below)
 - WebSockets, with optional permessage-deflate compression (`s.WebSocketWithOptions`)
 - Flexible static files handling
 - Scales incredibly well with the number of routes
@@ -193,6 +194,31 @@ func main() {
 	log.Fatal(s.Run())
 }
 ```
+
+## Request Context and Cancellation
+
+`ctx.Request().Context()` returns a `context.Context` for the request, like net/http's
+`Request.Context()`. It is cancelled when the client closes the connection while the handler
+is still running, and always once the request is finished. Pass it to slow work so that work
+stops when nobody is waiting for the answer:
+
+```go
+s.Post("/report", func(ctx rweb.Context) error {
+	rows, err := db.QueryContext(ctx.Request().Context(), heavyQuery)
+	if err != nil {
+		return err // context.Canceled if the browser tab was closed
+	}
+	defer rows.Close()
+	// ...
+})
+```
+
+The context is created on first use; handlers that never call it pay nothing. For
+Server-Sent Events it stays live for the whole stream and is cancelled when the client leaves,
+so an event producer can stop on `<-rc.Done()`. After a WebSocket upgrade or `ctx.GetConn()`
+the connection belongs to the caller, so the context is only cancelled when the handler
+returns (a WebSocket peer leaving shows up as a `ReadMessage` error). A pipelined request
+(the client already sent its next one) is not watched either.
 
 ## Route Groups
 

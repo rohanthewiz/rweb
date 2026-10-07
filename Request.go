@@ -3,6 +3,7 @@ package rweb
 import (
 	"bufio"
 	"bytes"
+	stdctx "context" // aliased: this package's own Context interface and context type own the name
 	"fmt"
 	"mime"
 	"mime/multipart"
@@ -50,6 +51,14 @@ type ItfRequest interface {
 	// files exist under the key.
 	GetFormFiles(string) ([]*multipart.FileHeader, error)
 	Body() []byte
+	// Context returns the request's context.Context, the counterpart of
+	// net/http's Request.Context(). It is cancelled when the client closes
+	// the connection while the handler is still running, and in every case
+	// once the request is finished. Pass it to anything slow the handler
+	// starts — outbound HTTP calls, queries, worker pools — so that work stops
+	// when nobody is left to receive its result. See request.Context for the
+	// cases (pipelining, WebSocket, GetConn) where only the second applies.
+	Context() stdctx.Context
 }
 
 // request represents the HTTP request used in the given context.
@@ -83,6 +92,105 @@ type request struct {
 
 	postArgs       Args
 	parsedPostArgs bool
+
+	// cr is the io.Reader under reader. It is per-connection, not
+	// per-request: a byte it read ahead belongs to the next request on the
+	// same connection, so Clean leaves it alone (handleConnection resets it
+	// when the pooled context moves to a new connection).
+	cr connReader
+
+	// reqCtx is the request's context.Context, created on the first
+	// Context() call so a handler that never asks pays nothing. reqCancel
+	// ends it; finishContext calls it when the request is done.
+	reqCtx    stdctx.Context
+	reqCancel stdctx.CancelFunc
+
+	// noWatch is set once something other than the HTTP loop owns the
+	// connection's reads for the rest of this request (a WebSocket upgrade,
+	// a GetConn caller). The disconnect watch is then stopped and never
+	// restarted, since it would steal their bytes.
+	noWatch bool
+}
+
+// Context returns the request's context.Context, created on first use.
+//
+// It is cancelled:
+//   - when the client closes the connection while the handler runs — the
+//     disconnect watch (connReader) sees the close as it happens, without
+//     waiting for a write to fail;
+//   - in every case, once the request is finished: after the response is
+//     written, or for Server-Sent Events after the stream ends (so an SSE
+//     producer goroutine can select on Done to learn its client has gone),
+//     or for a WebSocket after the WebSocket handler returns.
+//
+// Disconnects are not watched for, so only the "request finished" rule
+// applies, when:
+//   - the client has already sent its next request (HTTP pipelining): it has
+//     committed to reading the responses, and a close it makes after that —
+//     shutting down its write side after its last request — must not cancel
+//     requests it is still waiting on;
+//   - the connection has been handed elsewhere: after UpgradeWebSocket (the
+//     WebSocket's own reads report the close) or after GetConn;
+//   - the request is synthetic (Server.Request), which has no connection.
+//
+// Otherwise a read error or EOF counts as gone. That includes a client that
+// half-closes (shuts down its write side) after a request it is still
+// waiting on: on the wire it is indistinguishable from one that left, and
+// net/http treats it the same way. A client that vanishes without closing
+// (a sleeping laptop, a dropped network) is not noticed, as with any server:
+// there is nothing to read until TCP keepalive gives up.
+//
+// The context is tied to this request only. Like the rweb Context itself it
+// must be obtained inside the handler, but unlike the rweb Context it is safe
+// to keep and use from other goroutines after the handler returns.
+func (req *request) Context() stdctx.Context {
+	if req.reqCtx == nil {
+		req.reqCtx, req.reqCancel = stdctx.WithCancel(stdctx.Background())
+		// Buffered() > 0 means the next request is already queued behind this
+		// one: the pipelining case above. A synthetic request's reader is
+		// bufio.NewReader(nil), and its cr has no conn, so startWatch no-ops.
+		if !req.noWatch && req.reader.Buffered() == 0 {
+			req.cr.startWatch(req.reqCancel)
+		}
+	}
+	return req.reqCtx
+}
+
+// releaseConn hands the connection's reads to someone else for the rest of
+// the request (see noWatch): any running watch is stopped and none restarts.
+func (req *request) releaseConn() {
+	req.noWatch = true
+	req.cr.stopWatch()
+}
+
+// readAhead returns, and consumes, the bytes already read off the connection
+// but not yet parsed — whatever reader has buffered, then a byte the watch
+// took — for a protocol taking the connection over (WebSocket). The bytes are
+// copied: reader's buffer belongs to the pooled context and is reused.
+func (req *request) readAhead() []byte {
+	n := req.reader.Buffered()
+	var lead []byte
+	if n > 0 {
+		b, _ := req.reader.Peek(n) // cannot fail: n bytes are buffered
+		lead = append(lead, b...)
+		_, _ = req.reader.Discard(n)
+	}
+	if c, ok := req.cr.takeByte(); ok {
+		lead = append(lead, c) // after the buffer: the watch read it later
+	}
+	return lead
+}
+
+// finishContext ends the request's lifecycle: it stops a still-running watch
+// (it must not outlive the request — the pooled context it points into is
+// about to be reused) and cancels the request context. Idempotent.
+func (req *request) finishContext() {
+	req.cr.stopWatch()
+	if req.reqCancel != nil {
+		req.reqCancel()
+	}
+	req.reqCtx, req.reqCancel = nil, nil
+	req.noWatch = false
 }
 
 // defaultMultipartMaxMemory is the in-memory cap used by ReadForm when the
