@@ -57,12 +57,6 @@ code at `3169f85`.
   Host validation runs on the wire path only; synthetic `s.Request()` calls
   bypass it. `s.Request()` is a test-oriented API. Candidate for Non-goals.
 
-- **N-020** · raised `2026-1006-1954-request-context-cancellation` · value low
-  Shutdown does not cancel request contexts. `Run` closes the listener on
-  SIGINT/SIGTERM but does not track connections, so in-flight handlers keep
-  their `Request().Context()` live. Needs connection tracking or a
-  server-wide base context that `Run` cancels.
-
 - **N-024** · raised `2026-1010-2246-lazy-multipart-parse` · value low
   Synthetic `s.Request()` never runs the per-request `Clean`, because it
   returns the context's own `Response`, which `Clean` would zero. So a
@@ -122,6 +116,18 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-020** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
+  Shutdown did not cancel request contexts. Done with a server-wide base
+  context, not connection tracking: `Server.baseCtx` is the parent of every
+  `Request().Context()`, each connection snapshots it when it starts
+  (`request.baseCtx`, also set by synthetic `s.Request`), and `Run` cancels
+  it after closing the listener. A keep-alive connection now closes after
+  the response it is working on once the base is cancelled; one idle in its
+  read is not woken and serves at most one more request. `Run` renews a
+  cancelled base first, so a server can run again. `Run` still does not
+  wait for in-flight handlers. Tests: `shutdown_test.go` (calls
+  `cancelBaseContext`, the step `Run` takes, instead of signalling the test
+  process).
 - **N-019** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
   `Server.Proxy` did not cancel the upstream call when the client left.
   Done: the upstream request is built with `http.NewRequestWithContext`

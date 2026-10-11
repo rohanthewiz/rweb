@@ -3,6 +3,7 @@ package rweb
 import (
 	"bufio"
 	"bytes"
+	stdctx "context"
 	"crypto/cipher"
 	"crypto/tls"
 	"errors"
@@ -287,6 +288,19 @@ type Server struct {
 	// closed instead of quietly writing plaintext.
 	cookieAEAD    cipher.AEAD
 	cookieAEADErr error
+
+	// baseCtx is the parent of every request context (Request().Context()),
+	// and Run cancels it on shutdown, so in-flight handlers, SSE producers
+	// and outbound calls tied to their request learn the server is going
+	// away. A server-wide context was chosen over tracking connections: it
+	// needs no registry, costs nothing per request, and reaches handlers
+	// that are blocked on something other than the conn. Each connection
+	// snapshots it when it starts (request.baseCtx), so the lock is taken
+	// once per connection, not per request. Run renews it if a previous Run
+	// cancelled it, so a server can be run again. Guarded by baseMu.
+	baseMu     sync.Mutex
+	baseCtx    stdctx.Context
+	baseCancel stdctx.CancelFunc
 }
 
 // NewServer creates a new HTTP server with an optional ServerOptions struct.
@@ -404,8 +418,41 @@ func NewServer(options ...ServerOptions) *Server {
 		log.Printf("[ERR] %v; cookie operations will fail until it is fixed\n", s.cookieAEADErr)
 	}
 
+	s.baseCtx, s.baseCancel = stdctx.WithCancel(stdctx.Background())
+
 	s.contextPool.New = func() any { return s.newContext() }
 	return s
+}
+
+// baseContext returns the context request contexts currently derive from.
+func (s *Server) baseContext() stdctx.Context {
+	s.baseMu.Lock()
+	defer s.baseMu.Unlock()
+	if s.baseCtx == nil { // a Server not built by NewServer
+		return stdctx.Background()
+	}
+	return s.baseCtx
+}
+
+// renewBaseContext replaces a base context that an earlier shutdown
+// cancelled, so a Run after a Run serves live request contexts again.
+// Connections still open from before keep the cancelled one they took.
+func (s *Server) renewBaseContext() {
+	s.baseMu.Lock()
+	defer s.baseMu.Unlock()
+	if s.baseCtx == nil || s.baseCtx.Err() != nil {
+		s.baseCtx, s.baseCancel = stdctx.WithCancel(stdctx.Background())
+	}
+}
+
+// cancelBaseContext cancels every request context derived from the current
+// base: what Run does on shutdown.
+func (s *Server) cancelBaseContext() {
+	s.baseMu.Lock()
+	defer s.baseMu.Unlock()
+	if s.baseCancel != nil {
+		s.baseCancel()
+	}
 }
 
 // routableMethods is the probe order for allowedMethods, and so the order
@@ -735,10 +782,12 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 // recorded for middleware and logging; nobody is left to receive it.
 //
 // Callers check the request context rather than errors.Is(err,
-// context.Canceled). The context ends when the client leaves or when the
-// request is answered, and the latter cannot happen while the handler runs,
-// so a done context means the client left. A genuine upstream failure with
-// the client still connected keeps its error and goes to the error handler.
+// context.Canceled). The context ends when the client leaves, when the
+// server shuts down, or when the request is answered, and the last cannot
+// happen while the handler runs. So a done context means the client left or
+// the server is going away, and in neither case is the error worth a log
+// line. A genuine upstream failure with the client still connected keeps its
+// error and goes to the error handler.
 func clientGone(ctx Context) error {
 	ctx.SetStatus(consts.StatusBadGateway)
 	return nil
@@ -967,6 +1016,7 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	ctx := s.newContext()
 	ctx.synthetic = true
 	ctx.request.headers = headers
+	ctx.request.baseCtx = s.baseContext()
 
 	// Seed the ContentType shortcut from the supplied headers. On a real
 	// connection this happens while reading headers off the wire, and the
@@ -1009,6 +1059,8 @@ func (s *Server) RunWithHttpsRedirect() error {
 // Run starts the server on the given address.
 func (s *Server) Run() (err error) {
 	var listener net.Listener
+
+	s.renewBaseContext()
 
 	if s.options.TLS.UseTLS {
 		tlsConfig := s.options.TLS.Config
@@ -1091,6 +1143,12 @@ func (s *Server) Run() (err error) {
 	<-stop
 	listener.Close()
 
+	// Cancel the request contexts of everything still in flight. Run does
+	// not wait for those handlers; this only tells them to wrap up. Each
+	// keep-alive connection closes after the response it is working on
+	// (see handleConnection).
+	s.cancelBaseContext()
+
 	return nil
 }
 
@@ -1144,6 +1202,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 	ctx.request.cr.reset(conn)
 	ctx.reader.Reset(&ctx.request.cr)
 	ctx.conn = conn // store connection for WebSocket upgrades
+	// The parent for this connection's request contexts; cancelled by Run
+	// on shutdown. Taken once here (see Server.baseCtx).
+	ctx.request.baseCtx = s.baseContext()
 
 	defer conn.Close()
 
@@ -1381,6 +1442,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 		// explicit, since a byte the disconnect watch read ahead would let the
 		// next read start succeeding before it hit that deadline.
 		if ctx.sseEventsChan != nil {
+			return
+		}
+
+		// The server has shut down (Run cancelled the base context): the
+		// response just written is this connection's last. Waiting for
+		// another request would only serve it with a context that is
+		// already cancelled. A connection idle in the read above is not
+		// woken by shutdown; it serves at most one more request and then
+		// closes here.
+		if ctx.request.baseCtx.Err() != nil {
 			return
 		}
 

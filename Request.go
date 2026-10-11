@@ -105,6 +105,12 @@ type request struct {
 	reqCtx    stdctx.Context
 	reqCancel stdctx.CancelFunc
 
+	// baseCtx is reqCtx's parent: the server's base context, which Run
+	// cancels on shutdown. Set per connection by handleConnection (and by
+	// Server.Request); Clean leaves it, since the next request on the
+	// connection has the same parent. Nil means context.Background.
+	baseCtx stdctx.Context
+
 	// noWatch is set once something other than the HTTP loop owns the
 	// connection's reads for the rest of this request (a WebSocket upgrade,
 	// a GetConn caller). The disconnect watch is then stopped and never
@@ -121,7 +127,9 @@ type request struct {
 //   - in every case, once the request is finished: after the response is
 //     written, or for Server-Sent Events after the stream ends (so an SSE
 //     producer goroutine can select on Done to learn its client has gone),
-//     or for a WebSocket after the WebSocket handler returns.
+//     or for a WebSocket after the WebSocket handler returns;
+//   - when the server shuts down (Run receives SIGINT or SIGTERM), for
+//     every request still in flight. Run does not wait for those handlers.
 //
 // Disconnects are not watched for, so only the "request finished" rule
 // applies, when:
@@ -145,7 +153,11 @@ type request struct {
 // to keep and use from other goroutines after the handler returns.
 func (req *request) Context() stdctx.Context {
 	if req.reqCtx == nil {
-		req.reqCtx, req.reqCancel = stdctx.WithCancel(stdctx.Background())
+		parent := req.baseCtx
+		if parent == nil {
+			parent = stdctx.Background()
+		}
+		req.reqCtx, req.reqCancel = stdctx.WithCancel(parent)
 		// Buffered() > 0 means the next request is already queued behind this
 		// one: the pipelining case above. A synthetic request's reader is
 		// bufio.NewReader(nil), and its cr has no conn, so startWatch no-ops.

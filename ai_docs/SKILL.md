@@ -819,7 +819,8 @@ s.Use(func(ctx rweb.Context) error {
 ### Request Context (v0.2.0+)
 
 `ctx.Request().Context()` is the request's `context.Context` (net/http's `Request.Context()`
-counterpart). It is cancelled when the client closes the connection while the handler runs, and
+counterpart). It is cancelled when the client closes the connection while the handler runs, when
+the server shuts down (`Run` got SIGINT/SIGTERM; it does not wait for handlers), and
 always once the request is finished. Pass it to outbound calls, queries and worker pools:
 
 ```go
