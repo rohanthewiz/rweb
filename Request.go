@@ -323,8 +323,9 @@ func (req *request) parsePostArgs() {
 //
 // Idempotent: a successful parse caches the form, and a failed parse caches
 // the error. Subsequent calls return the cached result without re-reading
-// the body. This lets the server eagerly pre-parse while still letting
-// handlers re-call defensively (via GetFormFile etc.) and see the same error.
+// the body. Nothing parses the form before the handler runs: GetFormFile,
+// GetFormFiles and FormValue each call this on first use, and later calls,
+// from those accessors or the handler, see the same cached form or error.
 //
 // Memory limit comes from req.multipartMaxMem (configured via
 // ServerOptions.MultipartMaxMemory); falls back to defaultMultipartMaxMemory
@@ -380,10 +381,10 @@ func (req *request) ParseMultipartForm() error {
 
 // GetFormFile returns the first file for the provided form key.
 //
-// ParseMultipartForm is idempotent — if the server already pre-parsed the
-// form during request handling, this is a near-free no-op. If the pre-parse
-// failed (or never ran), the cached error is returned here so the handler
-// can react to it instead of seeing a generic "no multipart form data".
+// ParseMultipartForm is idempotent: the first accessor to run parses the
+// form, and later calls are a near-free no-op. If the parse failed, the
+// cached error is returned here so the handler can react to it instead of
+// seeing a generic "no multipart form data".
 func (req *request) GetFormFile(key string) (multipart.File, *multipart.FileHeader, error) {
 	if err := req.ParseMultipartForm(); err != nil {
 		return nil, nil, err
@@ -415,9 +416,8 @@ func (req *request) GetFormFile(key string) (multipart.File, *multipart.FileHead
 // (e.g. <input type="file" multiple>). Caller calls .Open() on each
 // header to read; matches the stdlib idiom in mime/multipart.
 //
-// As with GetFormFile, ParseMultipartForm is invoked defensively so a
-// missed/failed pre-parse surfaces here rather than masquerading as
-// "no multipart form data".
+// As with GetFormFile, it parses the form on first use, and a failed parse
+// surfaces here rather than masquerading as "no multipart form data".
 func (req *request) GetFormFiles(key string) ([]*multipart.FileHeader, error) {
 	if err := req.ParseMultipartForm(); err != nil {
 		return nil, err
@@ -450,8 +450,8 @@ func (req *request) GetFormFiles(key string) ([]*multipart.FileHeader, error) {
 // correct discriminator.
 func (req *request) FormValue(key string) string {
 	if hasContentTypePrefix(req.ContentType, consts.BytMultipartFormData) {
-		// Lazy-parse defense: ParseMultipartForm is idempotent, so a successful
-		// server-side pre-parse short-circuits immediately. Errors are swallowed
+		// Parse on first use; ParseMultipartForm is idempotent, so later calls
+		// short-circuit on the cached form or error. Errors are swallowed
 		// here (the caller asked for a value, not an error); use GetFormFile
 		// when the underlying parse error matters.
 		if err := req.ParseMultipartForm(); err != nil || req.multipartForm == nil {

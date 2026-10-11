@@ -47,8 +47,9 @@ type ServerOptions struct {
 	SSECfg SSECfg
 
 	// MultipartMaxMemory is the in-memory cap (in bytes) used when parsing
-	// multipart/form-data bodies. Form parts beyond this cap spill to temp
-	// files (which Cleanup removes after each request). When zero, the
+	// multipart/form-data bodies. The form is parsed only when a handler first
+	// reads it (GetFormFile, GetFormFiles, FormValue). Form parts beyond this
+	// cap spill to temp files (which Cleanup removes after each request). When zero, the
 	// framework default (32 MB, matching net/http) is used. Set this lower
 	// for endpoints that do not expect uploads, or higher for upload-heavy
 	// services where temp-file spillover is undesirable.
@@ -1362,17 +1363,22 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
 	}
 
-	// Parse Post Args or Multipart Form
+	// Parse Post Args.
+	//
+	// Multipart bodies are deliberately NOT parsed here. Parsing happens
+	// before routing, so an eager parse would run for a multipart POST to
+	// any path, even an unrouted one or one whose handler never looks at the
+	// form, and ReadForm spills parts past MultipartMaxMemory to temp files:
+	// up to the 100 MB body cap of disk churn that nobody asked for. Instead
+	// the form is parsed on first use by GetFormFile, GetFormFiles or
+	// FormValue, each of which calls the idempotent ParseMultipartForm (the
+	// result or the error is cached for the rest of the request), and
+	// Clean removes any temp files as before.
+	//
+	// urlencoded bodies are still parsed eagerly: that is an in-memory scan
+	// of a body already read, with no disk cost, and Debug prints the args.
 	if len(ctx.request.body) > 0 {
-		if hasContentTypePrefix(ctx.ContentType, consts.BytMultipartFormData) {
-			if err := ctx.request.ParseMultipartForm(); err != nil {
-				fmt.Printf("Error parsing multipart form: %v\n", err)
-			} else {
-				if s.options.Verbose {
-					fmt.Println("Parsed Multipart Form")
-				}
-			}
-		} else if hasContentTypePrefix(ctx.ContentType, consts.BytFormData) {
+		if hasContentTypePrefix(ctx.ContentType, consts.BytFormData) {
 			ctx.request.parsePostArgs()
 			if s.options.Debug {
 				fmt.Println("** Post Args -->", ctx.request.postArgs.String())

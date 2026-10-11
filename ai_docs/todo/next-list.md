@@ -34,18 +34,9 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-024
+**Next ID:** N-025
 
 ## Open
-
-- **N-004** · raised `2026-0509-2315-fix-multipart-form-leak` · value medium
-  Make multipart parsing fully lazy by dropping the eager pre-parse in
-  `handleRequest` (`Server.go:1297`). The pre-parse runs before the handler
-  chain, so a multipart POST to *any* path — even an unrouted one — is parsed
-  and may spill to temp files, up to the 100 MB body cap. The accessors already
-  parse on demand and idempotently (`Request.go:388,422,457`), so removing it
-  should be safe; `WithMultipartMaxMemory` only tunes the cost. Also raised in
-  `2026-0509-2336`; lapsed after both.
 
 - **N-005** · raised `2026-0509-2315-fix-multipart-form-leak` · value low
   `GetPostValue` and `FormValue` overlap (`FormValue` falls through to
@@ -130,6 +121,13 @@ code at `3169f85`.
   the body for HEAD, `Server.go` near `MethodHead`) and add HEAD to `Allow`
   when GET is routed.
 
+- **N-024** · raised `2026-1010-2246-lazy-multipart-parse` · value low
+  Synthetic `s.Request()` never runs the per-request `Clean`, because it
+  returns the context's own `Response`, which `Clean` would zero. So a
+  multipart form it parses that spills past `MultipartMaxMemory` leaves its
+  temp files behind. Only the test-oriented API is affected; the wire path
+  cleans after every request. Found while doing N-004.
+
 ## Validate
 
 Items whose remaining work is purely testing: run, look, measure, or write or
@@ -166,6 +164,12 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-004** · raised `2026-0509-2315-fix-multipart-form-leak` · closed 2026-10-10, 2026-1010-2246-lazy-multipart-parse
+  Multipart parsing is now fully lazy: the eager `ParseMultipartForm` in
+  `handleRequest` is gone, so a multipart body is parsed (and may spill to
+  temp files) only when a handler calls `GetFormFile`, `GetFormFiles` or
+  `FormValue`. Test `multipart_lazy_test.go` fails on the old code. Raised
+  N-024 on the way.
 - **N-002** · raised `2026-0509-2225-pre-tag-low-hanging-fruit-sweep` · closed 2026-10-10, 2026-1010-2236-cookie-encryption-and-405
   405 Method Not Allowed. Done: on a route miss the default handler probes
   the other methods' tables (`Server.allowedMethods`, miss path only) and

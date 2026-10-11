@@ -328,8 +328,8 @@ func TestPostArgsDoNotLeakIntoFollowingNonFormPost(t *testing.T) {
 // TestMalformedMultipartSurfacesParseError guards the error-caching path:
 // when ParseMultipartForm fails (here, because the Content-Type lacks a
 // boundary parameter), the cached error must reach the handler via
-// GetFormFile rather than being swallowed by the server-side eager parse
-// and replaced with the generic "no multipart form data" message.
+// GetFormFile rather than being swallowed and replaced with the generic
+// "no multipart form data" message.
 //
 // Uses a raw net.Conn because net/http would auto-add a boundary; we need
 // to hand-craft a malformed Content-Type.
