@@ -95,16 +95,6 @@ code at `3169f85`.
   their `Request().Context()` live. Needs connection tracking or a
   server-wide base context that `Run` cancels.
 
-- **N-021** · raised `2026-1006-1954-request-context-cancellation` · value low
-  The installed skill copy `~/.claude/skills/rweb-light-go-webserver/SKILL.md`
-  lags `ai_docs/SKILL.md`. As of 2026-10-10 it already has the TLS
-  `TLSAddr`/autocert notes (the raising doc said it predated them); what it
-  lacks is the "Compression (permessage-deflate)" and "Request Context
-  (v0.2.0+)" sections. Re-sync it (or make it a link) so sessions using the
-  skill see `Request().Context()` and `WriteMessages`/deflate. Since then
-  `ai_docs/SKILL.md` also gained "404 vs 405" and "Encrypted Cookies"
-  (N-001, N-002), which the installed copy lacks too.
-
 - **N-022** · raised `2026-1010-2236-cookie-encryption-and-405` · value medium
   A request with a method the routers have no table for (e.g. `FOO /x`)
   panics in dispatch: `RadixRouter.selectTree` returns nil for it and
@@ -164,6 +154,14 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-021** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-10
+  The installed skill copy lagged `ai_docs/SKILL.md` (missing 404 vs 405,
+  Encrypted Cookies, symlink containment, WebSocket compression and
+  `WriteMessages`, `Scheme`/`Host` notes, Request Context). Done by making
+  `~/.claude/skills/rweb-light-go-webserver/SKILL.md` a symlink to
+  `ai_docs/SKILL.md`, so it can no longer drift; the repo copy was a strict
+  superset, so nothing was lost. This is machine-local (outside the repo):
+  another checkout or machine needs the same `ln -s`.
 - **N-004** · raised `2026-0509-2315-fix-multipart-form-leak` · closed 2026-10-10, 2026-1010-2246-lazy-multipart-parse
   Multipart parsing is now fully lazy: the eager `ParseMultipartForm` in
   `handleRequest` is gone, so a multipart body is parsed (and may spill to
