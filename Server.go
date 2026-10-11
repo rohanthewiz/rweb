@@ -341,10 +341,30 @@ func NewServer(options ...ServerOptions) *Server {
 			// Try exact match first
 			hdlr = s.hashRouter.Lookup(ctx.request.method, ctx.request.path)
 			if hdlr == nil {
+				// The wire path already answers unknown methods with 501
+				// before any handler runs; this catches the synthetic
+				// s.Request(...), which has no such gate. Checked on the
+				// hash-miss path only, so exact-route hits pay nothing.
+				if !isValidRequestMethod(ctx.request.method) {
+					if s.options.Debug {
+						fmt.Printf("Unknown method %q -- returning 501\n", ctx.request.method)
+					}
+					ctx.SetStatus(consts.StatusNotImplemented)
+					return nil
+				}
 				if s.options.Debug {
 					fmt.Println("Route not found in hash router (it could be a dynamic route)  -- trying radix router")
 				}
 				hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
+			}
+
+			// HEAD is served by the GET handler when no HEAD route matches
+			// (RFC 9110 §9.3.2: HEAD is GET without the body). The handler
+			// runs as for GET and sees Method() == "HEAD"; writeResponse
+			// sends its headers, Content-Length included, and drops the
+			// body. An explicit s.Head(...) route still takes precedence.
+			if hdlr == nil && ctx.request.method == consts.MethodHead {
+				hdlr = s.lookupGetForHead(ctx)
 			}
 
 			if hdlr == nil {
@@ -413,15 +433,41 @@ func discardParam(string, string) {}
 // catch-all wildcard (e.g. GET "/*path") makes every path "exist" for GET, so
 // a POST anywhere under it is a 405 rather than a 404. That is correct: the
 // server would serve a GET there.
+//
+// HEAD is listed wherever GET is, since dispatch serves HEAD with the GET
+// handler. routableMethods puts GET first, so getRouted is known by the time
+// HEAD is probed.
 func (s *Server) allowedMethods(path string) string {
 	var allow []string
+	getRouted := false
 	for _, m := range routableMethods {
-		if s.hashRouter.Lookup(m, path) != nil ||
-			s.radixRouter.LookupNoAlloc(m, path, discardParam) != nil {
+		routed := s.hashRouter.Lookup(m, path) != nil ||
+			s.radixRouter.LookupNoAlloc(m, path, discardParam) != nil
+		if m == consts.MethodGet {
+			getRouted = routed
+		} else if m == consts.MethodHead {
+			routed = routed || getRouted
+		}
+		if routed {
 			allow = append(allow, m)
 		}
 	}
 	return strings.Join(allow, ", ")
+}
+
+// lookupGetForHead finds the GET handler for a HEAD request that matched no
+// HEAD route, with the same hash-then-radix order as dispatch.
+//
+// The failed HEAD radix lookup may already have recorded :params: the tree
+// reports a param as soon as its segment is consumed, before it knows whether
+// the rest of the path matches. Those are dropped first, so the GET handler
+// sees only the params of its own route, not duplicates or a stranger's.
+func (s *Server) lookupGetForHead(ctx *context) Handler {
+	ctx.request.params = ctx.request.params[:0]
+	if h := s.hashRouter.Lookup(consts.MethodGet, ctx.request.path); h != nil {
+		return h
+	}
+	return s.radixRouter.LookupNoAlloc(consts.MethodGet, ctx.request.path, ctx.request.addParameter)
 }
 
 // NewServerWithOptions creates a new HTTP server with functional options.
@@ -1101,8 +1147,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		method = message[:space]
 
+		// A method the routers keep no table for can never be served, so it
+		// is answered here, before any handler runs. 501 rather than 405:
+		// 405 means "this resource, not this method", 501 "this server, for
+		// no resource" (RFC 9110 §15.6.2). Extension methods (PROPFIND,
+		// PURGE, ...) are well-formed HTTP and land here too.
 		if !isValidRequestMethod(method) {
-			_, _ = io.WriteString(conn, consts.HTTPBadMethod)
+			_, _ = io.WriteString(conn, consts.HTTPNotImplemented)
 			return
 		}
 
@@ -1484,6 +1535,20 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
 		fmt.Println("Error writing headers: ", err)
+	}
+
+	// HEAD to an event stream (reachable since HEAD falls back to GET, or via
+	// an explicit s.Head route): the headers above are the whole response.
+	// Streaming would put a body on a HEAD and hold the connection open for
+	// a client that will never read it. The SSE cleanup still runs, so an
+	// SSEHub registration made by the handler is undone at once. The
+	// connection loop closes the conn after any response with an events
+	// channel, which is harmless here.
+	if ctx.sseEventsChan != nil && ctx.request.method == consts.MethodHead {
+		if ctx.sseCleanup != nil {
+			ctx.sseCleanup()
+		}
+		return
 	}
 
 	// Body

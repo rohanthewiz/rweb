@@ -189,6 +189,25 @@ func TestMethods(t *testing.T) {
 	}
 }
 
+// A method with no tree is "no route", not a nil-tree panic, and only the
+// exact string "GET" reaches the GET tree.
+func TestUnknownMethod(t *testing.T) {
+	r := rtr.New[string]()
+	r.Add(consts.MethodGet, "/", "root")
+	r.Add(consts.MethodGet, "/users/:id", "user")
+
+	for _, method := range []string{"FOO", "GOT", "G", ""} {
+		data, params := r.Lookup(method, "/users/42")
+		assert.Equal(t, data, "")
+		assert.Equal(t, len(params), 0)
+
+		added := 0
+		data = r.LookupNoAlloc(method, "/", func(string, string) { added++ })
+		assert.Equal(t, data, "")
+		assert.Equal(t, added, 0)
+	}
+}
+
 func TestGitHub(t *testing.T) {
 	routes := testdata.Routes("testdata/github.txt")
 	r := rtr.New[string]()
@@ -280,4 +299,16 @@ func TestMemoryUsage(t *testing.T) {
 	})
 
 	t.Logf("%d bytes", result.MemBytes)
+}
+
+// Same contract for the hash router: only the exact string "GET" reaches
+// the GET map, and an unknown or empty method finds nothing.
+func TestHashRouterUnknownMethod(t *testing.T) {
+	r := rtr.NewHashRouter[string]()
+	r.Add(consts.MethodGet, "/x", "x")
+
+	assert.Equal(t, r.Lookup(consts.MethodGet, "/x"), "x")
+	for _, method := range []string{"FOO", "GOT", "G", ""} {
+		assert.Equal(t, r.Lookup(method, "/x"), "")
+	}
 }

@@ -108,11 +108,13 @@ func (hr *HashRouter[T]) ListRoutes() (routes []RouteList) {
 // Returns the zero value of T if no handler is found.
 //
 // Performance optimization:
-// - GET requests are optimized with a direct check (most common HTTP method)
-// - Single character comparison avoids full string comparison
-// - Direct map access provides O(1) lookup time
+//   - GET requests are optimized with a direct check (most common HTTP method)
+//   - The check is a full compare against "GET", not method[0] == 'G': that let
+//     any G-method ("GOT") hit GET routes and panicked on "". Comparing three
+//     bytes against a constant costs the same in practice.
+//   - Direct map access provides O(1) lookup time
 func (hr *HashRouter[T]) Lookup(method string, path string) T {
-	if method[0] == 'G' {
+	if method == consts.MethodGet {
 		return hr.get[path]
 	}
 

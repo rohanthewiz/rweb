@@ -305,7 +305,7 @@ func TestBadRequestMethod(t *testing.T) {
 
 		response, err := io.ReadAll(conn)
 		assert.Nil(t, err)
-		assert.Equal(t, string(response), consts.HTTPBadMethod)
+		assert.Equal(t, consts.HTTPNotImplemented, string(response))
 	}()
 
 	_ = s.Run()

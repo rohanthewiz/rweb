@@ -737,6 +737,13 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 // IsWebSocketUpgrade checks if the request is a WebSocket upgrade request.
 // It verifies the presence and values of required WebSocket headers.
 func (ctx *context) IsWebSocketUpgrade() bool {
+	// The opening handshake is a GET (RFC 6455 §4.1). A HEAD now reaches GET
+	// routes, s.WebSocket's included, and must not take the connection over:
+	// it is answered like any GET-route HEAD, with headers and no body.
+	if ctx.request.method == consts.MethodHead {
+		return false
+	}
+
 	// Check Upgrade header
 	if ctx.request.Header("Upgrade") != "websocket" {
 		return false

@@ -32,10 +32,10 @@ func TestMethodNotAllowed(t *testing.T) {
 		allow        string
 	}{
 		{"GET", "/items", 200, ""},
-		{"PUT", "/items", 405, "GET, POST"},
-		{"HEAD", "/items", 405, "GET, POST"}, // HEAD is not implied by GET
-		{"PATCH", "/users/42", 405, "GET, DELETE"},
-		{"POST", "/files/a/b.txt", 405, "GET"},
+		{"PUT", "/items", 405, "GET, HEAD, POST"},
+		{"HEAD", "/items", 200, ""}, // HEAD is served by the GET handler
+		{"PATCH", "/users/42", 405, "GET, HEAD, DELETE"},
+		{"POST", "/files/a/b.txt", 405, "GET, HEAD"},
 		{"GET", "/api/thing", 405, "PUT"},
 		{"PUT", "/api/thing", 200, ""},
 		{"GET", "/nowhere", 404, ""},
@@ -89,7 +89,7 @@ func TestMethodNotAllowedOverWire(t *testing.T) {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 		assert.Equal(t, "405 Method Not Allowed", resp.Status)
-		assert.Equal(t, "GET", resp.Header.Get("Allow"))
+		assert.Equal(t, "GET, HEAD", resp.Header.Get("Allow"))
 		assert.Equal(t, "", string(body))
 	}()
 

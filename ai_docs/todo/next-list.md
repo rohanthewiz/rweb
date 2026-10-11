@@ -34,7 +34,7 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-025
+**Next ID:** N-026
 
 ## Open
 
@@ -95,28 +95,20 @@ code at `3169f85`.
   their `Request().Context()` live. Needs connection tracking or a
   server-wide base context that `Run` cancels.
 
-- **N-022** · raised `2026-1010-2236-cookie-encryption-and-405` · value medium
-  A request with a method the routers have no table for (e.g. `FOO /x`)
-  panics in dispatch: `RadixRouter.selectTree` returns nil for it and
-  `LookupNoAlloc` dereferences that nil tree (`Server.go` default handler).
-  The panic is recovered, so the client gets a 500 and the log an `[ERR]`
-  with a stack, per request. Should be `501 Not Implemented` (RFC 9110
-  §15.6.2) or 405; `HashRouter.Lookup` already copes (nil map). Found while
-  doing N-002; predates it.
-
-- **N-023** · raised `2026-1010-2236-cookie-encryption-and-405` · value low
-  HEAD is not implied by GET: a HEAD to a GET-only route gets 405 `Allow: GET`
-  (404 before N-002). RFC 9110 §9.3.2 expects HEAD wherever GET is served.
-  Could fall back to the GET handler for HEAD (the write path already drops
-  the body for HEAD, `Server.go` near `MethodHead`) and add HEAD to `Allow`
-  when GET is routed.
-
 - **N-024** · raised `2026-1010-2246-lazy-multipart-parse` · value low
   Synthetic `s.Request()` never runs the per-request `Clean`, because it
   returns the context's own `Response`, which `Clean` would zero. So a
   multipart form it parses that spills past `MultipartMaxMemory` leaves its
   temp files behind. Only the test-oriented API is affected; the wire path
   cleans after every request. Found while doing N-004.
+
+- **N-025** · raised `2026-1010-2307-head-fallback-and-501-unknown-method` · value low
+  A request to a WebSocket route that is not an upgrade (a plain GET, or now
+  a HEAD, which falls back to it) gets `500` and an `[ERR]` log line per
+  request: `s.WebSocket`/`WebSocketWithOptions` return
+  `ErrWebSocketNotUpgraded` to the error handler. Should be `426 Upgrade
+  Required` with `Upgrade: websocket` (RFC 9110 §15.5.22), or 400, and no
+  error log. Found while doing N-023.
 
 ## Validate
 
@@ -154,7 +146,26 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
-- **N-021** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-10
+- **N-023** · raised `2026-1010-2236-cookie-encryption-and-405` · closed 2026-10-10, 2026-1010-2307-head-fallback-and-501-unknown-method
+  HEAD is not implied by GET. Done: a HEAD that matches no HEAD route falls
+  back to the GET handler (`lookupGetForHead`, which first drops any :params
+  the failed HEAD radix lookup recorded), and `Allow` lists HEAD wherever GET
+  is routed. Two GET-route kinds needed care: a HEAD to an SSE route sends
+  the headers only (no stream, SSE cleanup still runs), and
+  `IsWebSocketUpgrade` is false for HEAD so a WebSocket route never upgrades
+  on it. Tests: `head_and_unknown_method_test.go`.
+- **N-022** · raised `2026-1010-2236-cookie-encryption-and-405` · closed 2026-10-10, 2026-1010-2307-head-fallback-and-501-unknown-method
+  Unknown method panicked in dispatch. Premise was half right: the panic
+  happened only for synthetic `s.Request(...)`; on the wire
+  `isValidRequestMethod` already rejected the method, but answered with
+  `consts.HTTPBadMethod`, a request line (`BAD-METHOD / HTTP/1.1`), not a
+  response (`TestBadRequestMethod` sent it and expected it echoed back). Also
+  found: both routers' GET fast path was `method[0] == 'G'`, so `GOT /x` was
+  served by the GET route. Done: wire and synthetic paths answer
+  `501 Not Implemented` (`consts.HTTPNotImplemented`); `RadixRouter`
+  lookups treat a method with no tree as no route; the GET fast path in
+  both routers is a full compare (no benchmark change).
+- **N-021** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-10, 2026-1010-2307-head-fallback-and-501-unknown-method
   The installed skill copy lagged `ai_docs/SKILL.md` (missing 404 vs 405,
   Encrypted Cookies, symlink containment, WebSocket compression and
   `WriteMessages`, `Scheme`/`Host` notes, Request Context). Done by making

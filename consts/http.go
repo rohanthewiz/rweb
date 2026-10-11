@@ -24,8 +24,14 @@ const (
 	SchemeDelimiter = "://"
 	Localhost       = "localhost"
 
-	HTTPBadRequest      = "HTTP/1.1 400 Bad Request\r\n\r\n"
-	HTTPBadMethod       = "BAD-METHOD / HTTP/1.1\r\n\r\n"
+	HTTPBadRequest = "HTTP/1.1 400 Bad Request\r\n\r\n"
+	// HTTPBadMethod is a request line with a method no router serves; tests
+	// send it. It is not a response: the server answers HTTPNotImplemented.
+	HTTPBadMethod = "BAD-METHOD / HTTP/1.1\r\n\r\n"
+	// HTTPNotImplemented answers a request method the server does not
+	// recognize (RFC 9110 §15.6.2). Content-Length: 0 frames the empty body;
+	// the connection is closed after it.
+	HTTPNotImplemented  = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 	HTTPInternalError   = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
 	HTTPPayloadTooLarge = "HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n"
 )

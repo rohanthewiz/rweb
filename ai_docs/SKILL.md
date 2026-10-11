@@ -108,12 +108,22 @@ s.Get("/greet/:name", handler)    // Matches /greet/john, /greet/mary
 s.Get("/greet/city", handler)     // Exact match takes priority for /greet/city
 ```
 
-### 404 vs 405 (v0.2.1+)
+### 404, 405 and 501 (v0.2.1+)
 
 A request whose path is routed, but not under its method, gets
 `405 Method Not Allowed` with an `Allow` header listing the methods that are
-routed (e.g. `Allow: GET, POST`). A path routed under no method still gets
-`404`. HEAD is not implied by GET: register `s.Head(...)` to serve it.
+routed (e.g. `Allow: GET, HEAD, POST`). A path routed under no method still gets
+`404`. A method rweb has no routes for at all (`PROPFIND`, `PURGE`, ...) gets
+`501 Not Implemented`, before any middleware runs.
+
+### HEAD (v0.2.1+)
+
+A HEAD with no HEAD route is served by the GET handler: it runs as for GET
+(`ctx.Request().Method()` reports `"HEAD"`), and the response carries GET's
+headers, `Content-Length` included, without the body. `Allow` lists HEAD
+wherever GET is routed. An explicit `s.Head(...)` route still takes precedence,
+e.g. to skip expensive body work. A HEAD to an SSE route gets the stream's
+headers and no events; a HEAD never upgrades a WebSocket route.
 
 ## Response Types
 

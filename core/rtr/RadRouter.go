@@ -56,11 +56,18 @@ func (router *RadixRouter[T]) Add(method string, path string, handler T) {
 // - Allocates memory for parameter slice if route has parameters
 // - Use LookupNoAlloc for zero-allocation lookups
 func (router *RadixRouter[T]) Lookup(method string, path string) (T, []Parameter) {
-	if method[0] == 'G' {
+	// Full compare, not method[0] == 'G': that let any G-method ("GOT")
+	// match GET routes and panicked on "". A three-byte compare against a
+	// constant costs the same in practice.
+	if method == consts.MethodGet {
 		return router.get.Lookup(path)
 	}
 
 	tree := router.selectTree(method)
+	if tree == nil { // a method with no tree has no routes
+		var zero T
+		return zero, nil
+	}
 	return tree.Lookup(path)
 }
 
@@ -74,11 +81,15 @@ func (router *RadixRouter[T]) Lookup(method string, path string) (T, []Parameter
 //
 // The addParameter callback is called for each parameter found in order.
 func (router *RadixRouter[T]) LookupNoAlloc(method string, path string, addParameter func(string, string)) T {
-	if method[0] == 'G' {
+	if method == consts.MethodGet { // see Lookup
 		return router.get.LookupNoAlloc(path, addParameter)
 	}
 
 	tree := router.selectTree(method)
+	if tree == nil { // a method with no tree has no routes
+		var zero T
+		return zero
+	}
 	return tree.LookupNoAlloc(path, addParameter)
 }
 
@@ -104,7 +115,9 @@ func (router *RadixRouter[T]) Map(transform func(T) T) {
 }
 
 // selectTree returns the tree by the given HTTP method.
-// Returns nil for unknown methods to allow graceful handling.
+// Returns nil for unknown methods; Lookup and LookupNoAlloc treat that as
+// "no route". Add still dereferences it: registering a route under a method
+// the router cannot serve is a programming error, caught at startup.
 //
 // Implementation note:
 // - Returns pointer to embedded tree struct (not a copy)
