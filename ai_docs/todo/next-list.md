@@ -57,13 +57,6 @@ code at `3169f85`.
   Host validation runs on the wire path only; synthetic `s.Request()` calls
   bypass it. `s.Request()` is a test-oriented API. Candidate for Non-goals.
 
-- **N-026** · raised `2026-1011-0036-os-root-static-containment` · value low
-  `examples/websocket` does not compile: `main.go:122` passes functional
-  options (`rweb.WithAddress`, `rweb.WithVerbose`) to `rweb.NewServer`, which
-  takes a `ServerOptions` struct; it wants `NewServerWithOptions`. Predates
-  N-017 (at `e76054b` its `go.mod` also needed a tidy). Found while
-  building the examples after the go-directive bump.
-
 ## Validate
 
 Items whose remaining work is purely testing: run, look, measure, or write or
@@ -101,6 +94,11 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-026** · raised `2026-1011-0036-os-root-static-containment` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
+  `examples/websocket` did not compile. Done: `main.go` calls
+  `rweb.NewServerWithOptions` for its functional options. All four example
+  modules and `./examples/...` build; the example was run and served `/`
+  (200) and a plain GET to `/ws/echo` (426, from N-025).
 - **N-025** · raised `2026-1010-2307-head-fallback-and-501-unknown-method` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
   A non-upgrade request to a WebSocket route got 500 and an `[ERR]` line.
   Done: `s.WebSocket` and `s.WebSocketWithOptions` check

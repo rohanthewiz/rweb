@@ -118,7 +118,7 @@ func (h *Hub) ClientCount() int {
 }
 
 func main() {
-	s := rweb.NewServer(
+	s := rweb.NewServerWithOptions(
 		rweb.WithAddress(":8080"),
 		rweb.WithVerbose(),
 	)
