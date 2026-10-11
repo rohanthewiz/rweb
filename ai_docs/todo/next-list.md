@@ -24,29 +24,19 @@ code at `3169f85`.
     to route around yet
   - `low` — a gap nobody has bumped into, or contingent on something that does
     not exist
-- **Sections by intent**: Open is what we pick up next; Roadmap is wanted but
-  later; Non-goals is what we are likely never to do.
-- **Nothing leaves Open or Roadmap without a line in another section** — done
-  goes to Closed, declined goes to Non-goals, duplicates go to Closed as
-  `merged into N-xxx`. Moving between Open and Roadmap is fine.
-- **Open and Roadmap stay in ID order.**
+- **Sections by intent**: Open is the next build work; Validate is the next
+  testing (run, look, measure, or write or repair a test; no product change
+  planned); Roadmap is wanted but later; Non-goals is what we are likely never
+  to do.
+- **Nothing leaves Open, Validate or Roadmap without a line in another
+  section** — done goes to Closed, declined goes to Non-goals, duplicates go
+  to Closed as `merged into N-xxx`. Moving among Open, Validate and Roadmap is
+  fine.
+- **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-022
+**Next ID:** N-024
 
 ## Open
-
-- **N-001** · raised `2026-0509-2225-pre-tag-low-hanging-fruit-sweep` · value medium
-  `CookieConfig.EncryptionKey` is declared but never read. Its doc comment
-  (`Cookie.go:121`) says it "enables automatic cookie value encryption", so a
-  caller who sets it gets plaintext cookies while believing they are encrypted.
-  Cheapest honest step: correct the comment to say it is not implemented; the
-  full fix is AES-GCM wiring in the cookie set/get paths. Deferred in the raising
-  doc as bigger than tag-prep, then lapsed (never carried).
-
-- **N-002** · raised `2026-0509-2225-pre-tag-low-hanging-fruit-sweep` · value low
-  405 Method Not Allowed: the router does not track methods per path, so a
-  request with the wrong method gets 404. Deferred in the raising doc, then
-  lapsed.
 
 - **N-004** · raised `2026-0509-2315-fix-multipart-form-leak` · value medium
   Make multipart parsing fully lazy by dropping the eager pre-parse in
@@ -90,12 +80,6 @@ code at `3169f85`.
   requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1103`):
   hand-rolled clients and some raw-socket tests omit it.
 
-- **N-016** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
-  The keep-alive `ctx.conn` restore was verified through `GetConn()` only. No
-  test drives a WebSocket upgrade or an SSE stream as the *second* request on a
-  reused connection (checked `websocket_test.go`, `websocket_deflate_test.go`,
-  `sse_test.go`, `sse_hub_test.go`).
-
 - **N-017** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
   `StaticContainSymlinks` leaves a check-to-read race between `EvalSymlinks`
   and `os.ReadFile` (noted at `Server.go:765`). Closing it needs `os.Root`,
@@ -122,9 +106,45 @@ code at `3169f85`.
 
 - **N-021** · raised `2026-1006-1954-request-context-cancellation` · value low
   The installed skill copy `~/.claude/skills/rweb-light-go-webserver/SKILL.md`
-  lags `ai_docs/SKILL.md`: it predates the TLS `TLSAddr`/autocert notes and now
-  the Request Context section. Re-sync it (or make it a link) so sessions using
-  the skill see `Request().Context()`.
+  lags `ai_docs/SKILL.md`. As of 2026-10-10 it already has the TLS
+  `TLSAddr`/autocert notes (the raising doc said it predated them); what it
+  lacks is the "Compression (permessage-deflate)" and "Request Context
+  (v0.2.0+)" sections. Re-sync it (or make it a link) so sessions using the
+  skill see `Request().Context()` and `WriteMessages`/deflate. Since then
+  `ai_docs/SKILL.md` also gained "404 vs 405" and "Encrypted Cookies"
+  (N-001, N-002), which the installed copy lacks too.
+
+- **N-022** · raised `2026-1010-2236-cookie-encryption-and-405` · value medium
+  A request with a method the routers have no table for (e.g. `FOO /x`)
+  panics in dispatch: `RadixRouter.selectTree` returns nil for it and
+  `LookupNoAlloc` dereferences that nil tree (`Server.go` default handler).
+  The panic is recovered, so the client gets a 500 and the log an `[ERR]`
+  with a stack, per request. Should be `501 Not Implemented` (RFC 9110
+  §15.6.2) or 405; `HashRouter.Lookup` already copes (nil map). Found while
+  doing N-002; predates it.
+
+- **N-023** · raised `2026-1010-2236-cookie-encryption-and-405` · value low
+  HEAD is not implied by GET: a HEAD to a GET-only route gets 405 `Allow: GET`
+  (404 before N-002). RFC 9110 §9.3.2 expects HEAD wherever GET is served.
+  Could fall back to the GET handler for HEAD (the write path already drops
+  the body for HEAD, `Server.go` near `MethodHead`) and add HEAD to `Allow`
+  when GET is routed.
+
+## Validate
+
+Items whose remaining work is purely testing: run, look, measure, or write or
+repair the test that covers it. No product change is planned unless the check
+finds a defect. Same item form as Open.
+
+- **N-016** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
+  The keep-alive `ctx.conn` restore was verified through `GetConn()` only. No
+  test drives a WebSocket upgrade or an SSE stream as the *second* request on a
+  reused connection (checked `websocket_test.go`, `websocket_deflate_test.go`,
+  `sse_test.go`, `sse_hub_test.go`). Re-checked 2026-10-10 after `0700738`:
+  `request_context_test.go` adds WS and SSE tests, but each upgrades or streams
+  on the conn's first request; `TestRequestContextKeepAlive` reuses a conn only
+  for plain requests. Still owed. Moved here from Open 2026-10-10 (pure test
+  work).
 
 ## Roadmap
 
@@ -146,6 +166,17 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-002** · raised `2026-0509-2225-pre-tag-low-hanging-fruit-sweep` · closed 2026-10-10, 2026-1010-2236-cookie-encryption-and-405
+  405 Method Not Allowed. Done: on a route miss the default handler probes
+  the other methods' tables (`Server.allowedMethods`, miss path only) and
+  answers 405 with `Allow` when the path is routed under any of them.
+  Tests: `method_not_allowed_test.go`. Raised N-022 and N-023 on the way.
+- **N-001** · raised `2026-0509-2225-pre-tag-low-hanging-fruit-sweep` · closed 2026-10-10, 2026-1010-2236-cookie-encryption-and-405
+  `CookieConfig.EncryptionKey` was declared but never read. Done with the
+  full fix, not the comment: AES-GCM seal/open in `SetCookieWithOptions` and
+  `GetCookie`, cookie name as additional data, `ErrCookieDecrypt` on any
+  failure, and a bad key fails closed (logged at `NewServer`, returned by
+  every cookie set/get). Tests: `Cookie_encrypt_test.go`.
 - **N-014** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · closed 2026-10-03
   Tag a release v0.1.31. Done: `v0.1.31` contains `8e70974`; `v0.1.32` is also
   tagged.

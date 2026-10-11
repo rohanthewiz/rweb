@@ -336,6 +336,13 @@ By default, RWeb cookies are secure:
 - `Secure: true` - Automatically enabled when using TLS
 - `Path: "/"` - Available site-wide by default
 
+Set `CookieConfig.EncryptionKey` (16, 24 or 32 bytes) to encrypt and
+authenticate every cookie value with AES-GCM. `GetCookie` returns the
+plaintext, or `rweb.ErrCookieDecrypt` for a value that was tampered with,
+sealed under another key or cookie name, or never encrypted. A key of the
+wrong length fails closed: cookie operations return an error rather than
+writing plaintext.
+
 ### Complete Example
 
 For a comprehensive example including session management, login/logout, flash messages, and remember me functionality, see [examples/cookies/main.go](examples/cookies/main.go).

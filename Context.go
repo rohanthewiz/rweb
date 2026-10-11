@@ -570,6 +570,25 @@ func (ctx *context) SetCookieWithOptions(cookie *Cookie) error {
 
 	// convert to standard cookie and add header (multiple Set-Cookie headers are allowed)
 	stdCookie := cookie.ToStdCookie()
+
+	// Encrypt the value when CookieConfig.EncryptionKey is set. Only the wire
+	// copy (stdCookie) is sealed; the caller's *Cookie keeps its plaintext so
+	// a struct reused across calls is never sealed twice. Deletion cookies
+	// (MaxAge < 0) are left alone: the browser drops them without storing the
+	// value, so there is nothing to protect.
+	if ctx.server != nil && cookie.MaxAge >= 0 {
+		if ctx.server.cookieAEADErr != nil {
+			return ctx.server.cookieAEADErr // fail closed: never send plaintext
+		}
+		if aead := ctx.server.cookieAEAD; aead != nil {
+			sealed, err := sealCookieValue(aead, cookie.Name, cookie.Value)
+			if err != nil {
+				return err
+			}
+			stdCookie.Value = sealed
+		}
+	}
+
 	ctx.response.AddHeader("Set-Cookie", stdCookie.String())
 
 	return nil
@@ -586,6 +605,18 @@ func (ctx *context) GetCookie(name string) (string, error) {
 	cookie, exists := ctx.parsedCookies[name]
 	if !exists {
 		return "", errors.New("cookie not found")
+	}
+
+	// Open the value when CookieConfig.EncryptionKey is set. parsedCookies
+	// keeps the sealed form, so decryption happens per call; it is cheap next
+	// to the request, and caching plaintext would need its own invalidation.
+	if ctx.server != nil {
+		if ctx.server.cookieAEADErr != nil {
+			return "", ctx.server.cookieAEADErr
+		}
+		if aead := ctx.server.cookieAEAD; aead != nil {
+			return openCookieValue(aead, name, cookie.Value)
+		}
 	}
 
 	return cookie.Value, nil

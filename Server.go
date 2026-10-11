@@ -3,6 +3,7 @@ package rweb
 import (
 	"bufio"
 	"bytes"
+	"crypto/cipher"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -274,6 +275,13 @@ type Server struct {
 	errorHandler func(Context, error)
 	options      ServerOptions
 	listenAddr   string // the actual listen address used by net.Listen
+
+	// cookieAEAD seals and opens cookie values when
+	// options.Cookie.EncryptionKey is set; nil means encryption is off.
+	// cookieAEADErr holds a bad-key error so cookie operations can fail
+	// closed instead of quietly writing plaintext.
+	cookieAEAD    cipher.AEAD
+	cookieAEADErr error
 }
 
 // NewServer creates a new HTTP server with an optional ServerOptions struct.
@@ -339,6 +347,19 @@ func NewServer(options ...ServerOptions) *Server {
 			}
 
 			if hdlr == nil {
+				// No route for this method. If the path is routed under some
+				// other method the resource exists, so the answer is 405 with
+				// an Allow header listing what is accepted (RFC 9110 §15.5.6),
+				// not 404. The probe runs only on this miss path, so matched
+				// requests pay nothing for it.
+				if allow := s.allowedMethods(ctx.request.path); allow != "" {
+					if s.options.Debug {
+						fmt.Printf("Path routed for %s only -- returning 405\n", allow)
+					}
+					ctx.response.SetHeader(consts.HeaderAllow, allow)
+					ctx.SetStatus(consts.StatusMethodNotAllowed)
+					return nil
+				}
 				if s.options.Debug {
 					fmt.Println("Route not found in radix router either -- returning 404")
 				}
@@ -350,8 +371,56 @@ func NewServer(options ...ServerOptions) *Server {
 		},
 	}
 
+	// Build the cookie cipher once, up front. A bad key is logged here
+	// rather than panicking (NewServer has no error return), and is also
+	// returned by every cookie set/get, so it cannot go unnoticed.
+	s.cookieAEAD, s.cookieAEADErr = newCookieAEAD(opts.Cookie.EncryptionKey)
+	if s.cookieAEADErr != nil {
+		log.Printf("[ERR] %v; cookie operations will fail until it is fixed\n", s.cookieAEADErr)
+	}
+
 	s.contextPool.New = func() any { return s.newContext() }
 	return s
+}
+
+// routableMethods is the probe order for allowedMethods, and so the order
+// methods appear in an Allow header. It is every method the routers keep a
+// table for; a method outside this list can never be routed.
+var routableMethods = [...]string{
+	consts.MethodGet, consts.MethodHead, consts.MethodPost, consts.MethodPut,
+	consts.MethodPatch, consts.MethodDelete, consts.MethodOptions,
+	consts.MethodConnect, consts.MethodTrace,
+}
+
+// discardParam is the addParameter callback for allowedMethods' radix probes.
+// A probe only asks "is there a route?"; letting it record :params on the
+// request would leak them into whatever runs next. Package-level so the probe
+// allocates no closure.
+func discardParam(string, string) {}
+
+// allowedMethods returns the methods with a route for path, comma-separated
+// for an Allow header, or "" if the path is not routed under any method.
+//
+// The routers keep one table per method and nothing per path, so rather than
+// maintain a second path→methods index (which would have to mirror both
+// routers' matching rules, :params and *wildcards included), this asks each
+// method's table the same question the request just asked. That is at most
+// nine lookups, and only for requests that were about to 404 anyway.
+//
+// Matching is the same as for dispatch: hash router for exact paths, then
+// the radix router for :param and *wildcard routes. One consequence is that a
+// catch-all wildcard (e.g. GET "/*path") makes every path "exist" for GET, so
+// a POST anywhere under it is a 405 rather than a 404. That is correct: the
+// server would serve a GET there.
+func (s *Server) allowedMethods(path string) string {
+	var allow []string
+	for _, m := range routableMethods {
+		if s.hashRouter.Lookup(m, path) != nil ||
+			s.radixRouter.LookupNoAlloc(m, path, discardParam) != nil {
+			allow = append(allow, m)
+		}
+	}
+	return strings.Join(allow, ", ")
 }
 
 // NewServerWithOptions creates a new HTTP server with functional options.

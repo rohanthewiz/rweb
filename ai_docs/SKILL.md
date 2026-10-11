@@ -108,6 +108,13 @@ s.Get("/greet/:name", handler)    // Matches /greet/john, /greet/mary
 s.Get("/greet/city", handler)     // Exact match takes priority for /greet/city
 ```
 
+### 404 vs 405 (v0.2.1+)
+
+A request whose path is routed, but not under its method, gets
+`405 Method Not Allowed` with an `Allow` header listing the methods that are
+routed (e.g. `Allow: GET, POST`). A path routed under no method still gets
+`404`. HEAD is not implied by GET: register `s.Head(...)` to serve it.
+
 ## Response Types
 
 ```go
@@ -261,6 +268,31 @@ ctx.DeleteCookie("name")
 // Get and clear (useful for flash messages)
 value, err := ctx.GetCookieAndClear("flash")
 ```
+
+### Encrypted Cookies (v0.2.1+)
+
+Set `CookieConfig.EncryptionKey` (16, 24 or 32 bytes: AES-128/192/256) and
+every cookie value is sealed with AES-GCM on `SetCookie`/`SetCookieWithOptions`
+and opened on `GetCookie`/`GetCookieAndClear`. Handlers only see plaintext.
+
+```go
+s := rweb.NewServerWithOptions(rweb.WithCookie(rweb.CookieConfig{
+    EncryptionKey: key, // e.g. 32 random bytes loaded from config, not source
+}))
+
+v, err := ctx.GetCookie("session")
+if errors.Is(err, rweb.ErrCookieDecrypt) {
+    // tampered, sealed under another key or cookie name, or never encrypted
+}
+```
+
+- Applies to **all** cookies the server reads: one it did not seal (set by
+  client-side JS, or before the key was configured) fails with `ErrCookieDecrypt`.
+- The cookie name is authenticated, so a sealed value can't be moved to another cookie.
+- `HasCookie` reports presence only; it does not decrypt.
+- A key of the wrong length fails closed: `NewServer` logs it, and every cookie
+  set/get returns the key error instead of falling back to plaintext.
+- Rotating the key invalidates every existing cookie.
 
 ## Static Files
 
