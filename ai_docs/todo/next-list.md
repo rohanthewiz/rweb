@@ -57,13 +57,6 @@ code at `3169f85`.
   Host validation runs on the wire path only; synthetic `s.Request()` calls
   bypass it. `s.Request()` is a test-oriented API. Candidate for Non-goals.
 
-- **N-024** · raised `2026-1010-2246-lazy-multipart-parse` · value low
-  Synthetic `s.Request()` never runs the per-request `Clean`, because it
-  returns the context's own `Response`, which `Clean` would zero. So a
-  multipart form it parses that spills past `MultipartMaxMemory` leaves its
-  temp files behind. Only the test-oriented API is affected; the wire path
-  cleans after every request. Found while doing N-004.
-
 - **N-025** · raised `2026-1010-2307-head-fallback-and-501-unknown-method` · value low
   A request to a WebSocket route that is not an upgrade (a plain GET, or now
   a HEAD, which falls back to it) gets `500` and an `[ERR]` log line per
@@ -116,6 +109,13 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-024** · raised `2026-1010-2246-lazy-multipart-parse` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
+  Synthetic `s.Request()` left a spilled multipart form's temp files
+  behind, because it cannot run the per-request `Clean` (that would zero
+  the `Response` it returns). Done: after `handleRequest` it calls
+  `ctx.request.CleanupMultipartForm()`, which touches only the request
+  half. Test: `TestMultipartParsedOnlyOnUse` now asserts the temp dir is
+  empty after the synthetic requests (2 files left on the old code).
 - **N-020** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
   Shutdown did not cancel request contexts. Done with a server-wide base
   context, not connection tracking: `Server.baseCtx` is the parent of every

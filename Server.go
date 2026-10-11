@@ -1037,6 +1037,14 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	}
 
 	s.handleRequest(ctx, method, url, io.Discard)
+
+	// The full per-request Clean cannot run here: it would zero the
+	// Response handed back below. But the request half is never seen again,
+	// so release what it holds outside memory: a multipart form the handler
+	// parsed may have spilled parts past MultipartMaxMemory to temp files,
+	// which would otherwise be left on disk.
+	ctx.request.CleanupMultipartForm()
+
 	return ctx.Response()
 }
 

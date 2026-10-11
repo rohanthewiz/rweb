@@ -91,9 +91,11 @@ func TestMultipartParsedOnlyOnUse(t *testing.T) {
 	resp = post("/reads-file")
 	assert.Equal(t, 200, resp.Status())
 	assert.Equal(t, "big.bin", string(resp.Body()))
-	// Cleanup of the spill files is checked over the wire in
-	// TestMultipartLazyParseCleanedUp: synthetic s.Request() never runs the
-	// per-request Clean, since it hands back the context's own Response.
+
+	// Synthetic s.Request() cannot run the per-request Clean (it hands back
+	// the context's own Response), but it still removes the spill files.
+	// Over the wire this is TestMultipartLazyParseCleanedUp.
+	assert.Equal(t, 0, tempEntries(t, tmp))
 }
 
 // A form parsed lazily by the handler still has its spill files removed by
