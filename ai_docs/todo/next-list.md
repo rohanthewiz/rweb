@@ -38,13 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-006** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · value low
-  Remove the `var _ = context.Background` guard at `Request_leak_test.go:516`.
-  The raising doc said `context` stays in use through
-  `httptrace.WithClientTrace`; it does not — `req.Context()` is a method and
-  needs no import, so the guard is the import's only use. Removing it means
-  removing the `"context"` import too. Lapsed.
-
 - **N-007** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · value low
   Dead code flagged by `staticcheck ./...`: 13 U1000 hits — unused funcs in
   `args.go` (`visitArgsKey`, `delAllArgsBytes`, `appendArgBytes`,
@@ -142,6 +135,11 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-006** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · closed 2026-10-10
+  The `var _ = context.Background` guard in `Request_leak_test.go` was the
+  `"context"` import's only use (`req.Context()` is a method and needs no
+  import). Done: removed the guard, its comment, and the import; `go vet` and
+  `go test ./...` pass.
 - **N-023** · raised `2026-1010-2236-cookie-encryption-and-405` · closed 2026-10-10, 2026-1010-2307-head-fallback-and-501-unknown-method
   HEAD is not implied by GET. Done: a HEAD that matches no HEAD route falls
   back to the GET handler (`lookupGetForHead`, which first drops any :params

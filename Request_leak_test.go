@@ -13,7 +13,6 @@ package rweb_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -509,8 +508,3 @@ func TestContentTypeDoesNotLeakAcrossRequests(t *testing.T) {
 	_ = s.Run()
 	<-clientDone
 }
-
-// Compile-time guard that we still import context (used implicitly by
-// httptrace.WithClientTrace via req.Context()). Remove if unused warnings
-// appear during refactor.
-var _ = context.Background
