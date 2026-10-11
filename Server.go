@@ -877,7 +877,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		// not exist, which is a 404 regardless.
 		//
 		// This narrows, but cannot close, the window between check and read:
-		// a link swapped in after EvalSymlinks is still followed by ReadFile.
+		// a link swapped in after EvalSymlinks is still followed by Open.
 		// Closing it needs openat-style traversal (os.Root, Go 1.24+), which
 		// the module's go 1.23 directive rules out for now.
 		if s.options.StaticContainSymlinks {
@@ -895,8 +895,18 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 			}
 		}
 
-		info, statErr := os.Stat(candAbs)
+		// Open first and Stat the open file, rather than Stat the path and
+		// open it afterwards: the size, mod time and directory check then
+		// describe the very file whose bytes are sent, not whatever the path
+		// pointed at a moment earlier.
+		f, openErr := os.Open(candAbs)
+		if openErr != nil {
+			ctx.SetStatus(consts.StatusNotFound)
+			return nil
+		}
+		info, statErr := f.Stat()
 		if statErr != nil || info.IsDir() {
+			_ = f.Close()
 			ctx.SetStatus(consts.StatusNotFound)
 			return nil
 		}
@@ -908,18 +918,30 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		if ims := ctx.Request().Header(consts.HeaderIfModifiedSince); ims != "" {
 			if t, tErr := http.ParseTime(ims); tErr == nil &&
 				!modTime.Truncate(time.Second).After(t) {
+				_ = f.Close()
 				ctx.SetStatus(consts.StatusNotModified)
 				return nil
 			}
 		}
 
-		body, err := os.ReadFile(candAbs)
+		// Sets Content-Type, Last-Modified (so clients can revalidate with
+		// If-Modified-Since) and the download headers where they apply.
+		setFileHeaders(ctx, filepath.Base(candAbs), modTime)
+
+		// Stream the file rather than read it into memory: the response
+		// takes ownership of f and writeResponse copies it to the conn (see
+		// response.bodyFile). The Context here is always our *context; the
+		// fallback only keeps a foreign Response implementation working.
+		if res, ok := ctx.Response().(*response); ok {
+			res.setBodyFile(f, info.Size())
+			return nil
+		}
+		defer f.Close()
+		body, err := io.ReadAll(f)
 		if err != nil {
 			return err
 		}
-
-		// Sets Last-Modified so clients can revalidate with If-Modified-Since
-		return FileWithModTime(ctx, filepath.Base(candAbs), body, modTime)
+		return ctx.Bytes(body)
 	})
 }
 
@@ -928,6 +950,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 // However it is very useful inside tests where you don't want to spin up a real web server.
 func (s *Server) Request(method string, url string, headers []Header, body io.Reader) Response {
 	ctx := s.newContext()
+	ctx.synthetic = true
 	ctx.request.headers = headers
 
 	// Seed the ContentType shortcut from the supplied headers. On a real
@@ -1514,11 +1537,19 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	}
 	tmp.WriteString(consts.CRLF)
 
+	// A synthetic request hands its response back in memory, so a pending
+	// body file (a static file) is read into the body here; streaming it
+	// would send it to io.Discard and leave Body empty.
+	if ctx.synthetic {
+		ctx.response.materializeBody()
+	}
+
 	if ctx.sseEventsChan == nil { // For SSE -- don't set content-length
-		// Content-Length
+		// Content-Length: the in-memory body plus any body file still to be
+		// streamed after it (see response.bodyFile).
 		tmp.WriteString(consts.HeaderContentLength)
 		tmp.WriteString(consts.ColonSpace)
-		tmp.WriteString(strconv.Itoa(len(ctx.response.body)))
+		tmp.WriteString(strconv.FormatInt(int64(len(ctx.response.body))+ctx.response.bodyFileSize, 10))
 		tmp.WriteString(consts.CRLF)
 	}
 
@@ -1557,12 +1588,50 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		// Content-Length above) but MUST NOT include a body (RFC 7231 §4.3.2)
 		if ctx.request.method != consts.MethodHead {
 			_, _ = respWriter.Write(ctx.response.body)
+			s.writeBodyFile(ctx, respWriter)
 		}
+		// A HEAD never reads the file at all; this just releases it.
+		ctx.response.closeBodyFile()
 	} else {
 		// fmt.Println("RWEB: SSE events channel is set -- sending events")
 		err = s.sendSSE(ctx, respWriter)
 		if err != nil {
 			fmt.Println("Error sending SSE events: ", err)
+		}
+	}
+}
+
+// writeBodyFile streams a pending body file to the client after the
+// in-memory body, then releases it.
+//
+// io.CopyN hands the conn an *io.LimitedReader over the *os.File, which
+// *net.TCPConn.ReadFrom recognises: the copy runs as sendfile(2) in the
+// kernel, with no user-space buffer. Other writers (a *tls.Conn, a test's
+// buffer) get an ordinary buffered copy. The limit matters too: a file that
+// grew since its size was taken must not run past the Content-Length
+// already sent.
+//
+// A copy that ends short — the file shrank, or the client went away —
+// leaves the client waiting for bytes promised by Content-Length, and on a
+// keep-alive connection the next response would be read as the rest of
+// this body. The only way to delimit the body now is to close the
+// connection, so we do; the request loop's next read then fails and it
+// returns.
+func (s *Server) writeBodyFile(ctx *context, respWriter io.Writer) {
+	f, size := ctx.response.bodyFile, ctx.response.bodyFileSize
+	if f == nil {
+		return
+	}
+	ctx.response.bodyFile, ctx.response.bodyFileSize = nil, 0
+	defer f.Close()
+
+	n, err := io.CopyN(respWriter, f, size)
+	if n < size {
+		if s.options.Debug {
+			fmt.Printf("rweb: body file %s cut short at %d of %d bytes: %v\n", f.Name(), n, size, err)
+		}
+		if ctx.conn != nil {
+			_ = ctx.conn.Close()
 		}
 	}
 }

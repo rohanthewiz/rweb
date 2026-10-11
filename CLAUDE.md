@@ -58,7 +58,7 @@ curl http://localhost:8080/some-json
 ### Important Features
 - **Server-Sent Events (SSE)**: Built-in support via `SSEHandler()`
 - **Request context**: `ctx.Request().Context()` is cancelled when the client disconnects mid-handler, and always when the request ends (after the stream, for SSE)
-- **Static File Serving**: `StaticFiles(urlPrefix, localPath, stripPrefixSegments)`
+- **Static File Serving**: `StaticFiles(urlPrefix, localPath, stripPrefixSegments)` — streamed from disk via a pending body file (`response.bodyFile`); touching the body (`Body`, `Write`, `SetBody`) loads it into memory first
 - **Reverse Proxy**: `Proxy(urlPrefix, targetURL, stripPrefixSegments)`
 - **File Uploads**: Handled via `GetFormFile()` on Request
 - **Multiple Response Types**: JSON, HTML, Text, CSS, File responses

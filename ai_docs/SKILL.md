@@ -350,6 +350,10 @@ admin.StaticFilesAbs("/files/", "/var/lib/myapp/files", 2) // strips "admin" and
   appear, then are served with no restart.
 - Both methods apply global middleware, reject `..` (plain or percent-encoded) and NUL,
   refuse directories, and honor `If-Modified-Since` with a 304.
+- Files are streamed from disk, not read into memory (`sendfile` on plain TCP), and a HEAD
+  never reads the file. Middleware that calls `ctx.Response().Body()`, `SetBody` or writes
+  after `ctx.Next()` still sees the file's bytes: touching the body loads it, for that
+  request only.
 - Symlinks are followed wherever they point (as nginx and `net/http` do). If the served
   directory is writable by anyone less trusted than the operator — uploads, extracted
   archives, per-user content — set `StaticContainSymlinks` (v0.1.31+): a link resolving

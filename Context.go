@@ -213,6 +213,11 @@ type context struct {
 	// Scratch buffer reused by writeResponse to assemble the status line
 	// and headers, avoiding a per-request allocation
 	respBuf bytes.Buffer
+	// synthetic marks a context made by Server.Request, whose response is
+	// returned in memory rather than written to a connection. writeResponse
+	// reads a pending body file into the body for it instead of streaming
+	// the file to a writer that discards it.
+	synthetic bool
 }
 
 // Clean resets the context for reuse in the next request.
@@ -225,6 +230,9 @@ func (ctx *context) Clean() {
 	ctx.request.body = ctx.request.body[:0]
 	ctx.response.headers = ctx.response.headers[:0]
 	ctx.response.body = ctx.response.body[:0]
+	// A body file still pending here was never sent (an error path, or a
+	// synthetic request whose caller never read Body); release it.
+	ctx.response.closeBodyFile()
 	ctx.params = ctx.params[:0]
 
 	// ContentType is a cached []byte shortcut populated when the
@@ -310,6 +318,7 @@ func (ctx *context) Server() *Server {
 // This is the low-level method used by other write methods.
 // The bytes are appended to any existing response body content.
 func (ctx *context) Bytes(body []byte) error {
+	ctx.response.materializeBody()
 	ctx.response.body = append(ctx.response.body, body...)
 	return nil
 }
@@ -385,6 +394,7 @@ func (ctx *context) SetStatus(status int) Context {
 // allowing you to set custom headers before writing.
 // The string is appended to any existing response body content.
 func (ctx *context) WriteString(body string) error {
+	ctx.response.materializeBody()
 	ctx.response.body = append(ctx.response.body, body...)
 	return nil
 }

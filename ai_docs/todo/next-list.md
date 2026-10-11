@@ -48,12 +48,6 @@ code at `3169f85`.
   `Server.go:512`. Raised as editor lint hints; the `Cookie_test.go`
   `unusedwrite` hint it also named no longer reproduces. Lapsed.
 
-- **N-010** · raised `2026-0701-2109-http-server-fixes-and-optimizations` · value low
-  Static files are read fully into memory per request (`os.ReadFile`,
-  `Server.go:800`); stream them instead. First written as the non-goal
-  "streaming static files", reopened as an open item in `2026-0919-2153`. The
-  user excluded it from the `2026-0919-2229` session.
-
 - **N-015** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
   Decide whether a request with **no** Host header should get 400 (RFC 9112
   requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1103`):
@@ -135,7 +129,18 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
-- **N-006** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · closed 2026-10-10
+- **N-010** · raised `2026-0701-2109-http-server-fixes-and-optimizations` · closed 2026-10-11, 2026-1011-0017-stream-static-files
+  Static files were read fully into memory per request. Done: the static
+  handler opens the file, Stats the open file (size, mod time and dir check
+  describe the bytes sent), and attaches it to the response as a pending
+  body file; `writeResponse` sends it with `io.CopyN` (sendfile on plain
+  TCP), closing the connection if the copy comes up short of the
+  Content-Length already sent. HEAD and 304 never read the file. Anything
+  that touches the body (`Body`, `Write`, `SetBody`, `ctx.Bytes`,
+  `WriteString`) loads it first, so body-rewriting middleware such as
+  `critical` behaves as before; synthetic `Request()` loads it too. Tests:
+  `static_stream_test.go` (TCP and TLS).
+- **N-006** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · closed 2026-10-10, 2026-1011-0017-stream-static-files
   The `var _ = context.Background` guard in `Request_leak_test.go` was the
   `"context"` import's only use (`req.Context()` is a method and needs no
   import). Done: removed the guard, its comment, and the import; `go vet` and

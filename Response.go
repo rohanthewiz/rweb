@@ -3,6 +3,9 @@ package rweb
 import (
 	"encoding/json"
 	"io"
+	"log"
+	"os"
+	"slices"
 
 	"github.com/rohanthewiz/rweb/consts"
 )
@@ -27,11 +30,69 @@ type response struct {
 	body    []byte
 	headers []Header
 	status  uint16
+
+	// bodyFile, when set, is the tail of the body still on disk: the
+	// response body is body followed by the first bodyFileSize bytes of
+	// bodyFile. writeResponse copies it straight to the connection
+	// (sendfile where the OS and conn type allow), so a static file is
+	// never held in memory just to be sent.
+	//
+	// The file is pending, not hidden: anything that reads or changes the
+	// body through this type (Body, Write, SetBody, ctx.Bytes, ...) first
+	// pulls it into body with materializeBody, so a middleware that
+	// rewrites the response after Next() sees the same bytes it always did
+	// and only that request pays for the read. Whoever clears the field
+	// closes the file; Clean is the backstop.
+	bodyFile     *os.File
+	bodyFileSize int64
 }
 
 // Body returns the response body.
 func (res *response) Body() []byte {
+	res.materializeBody()
 	return res.body
+}
+
+// setBodyFile makes the first size bytes of f the tail of the body, to be
+// streamed when the response is written. The response owns f from here on.
+// A file already pending is closed and replaced, as SetBody would replace
+// an in-memory body.
+func (res *response) setBodyFile(f *os.File, size int64) {
+	res.closeBodyFile()
+	res.bodyFile = f
+	res.bodyFileSize = size
+}
+
+// materializeBody reads a pending body file into body, after whatever body
+// already holds, and releases the file. It is a nil check when nothing is
+// pending, so every body accessor can call it unconditionally.
+//
+// If the file comes up short (it shrank after it was opened) body keeps
+// what was read, so Content-Length still matches the bytes sent. A read
+// error is logged rather than returned because Body has no error result.
+func (res *response) materializeBody() {
+	if res.bodyFile == nil {
+		return
+	}
+	f, size := res.bodyFile, res.bodyFileSize
+	res.bodyFile, res.bodyFileSize = nil, 0
+	defer f.Close()
+
+	n := len(res.body)
+	res.body = slices.Grow(res.body, int(size))[:n+int(size)]
+	read, err := io.ReadFull(f, res.body[n:])
+	res.body = res.body[:n+read]
+	if err != nil {
+		log.Printf("rweb: reading response body file %s: %v", f.Name(), err)
+	}
+}
+
+// closeBodyFile drops a pending body file without reading it.
+func (res *response) closeBodyFile() {
+	if res.bodyFile != nil {
+		_ = res.bodyFile.Close()
+		res.bodyFile, res.bodyFileSize = nil, 0
+	}
 }
 
 // Header returns the header value for the given key.
@@ -61,7 +122,9 @@ func (res *response) AddHeader(key string, value string) {
 }
 
 // SetBody replaces the response body with the new contents.
+// A pending body file is part of the body being replaced, so it is dropped.
 func (res *response) SetBody(body []byte) {
+	res.closeBodyFile()
 	res.body = body
 }
 
@@ -77,12 +140,14 @@ func (res *response) Status() int {
 
 // Write implements the io.Writer interface.
 func (res *response) Write(body []byte) (int, error) {
+	res.materializeBody() // appended bytes go after a pending file, not before it
 	res.body = append(res.body, body...)
 	return len(body), nil
 }
 
 // WriteString implements the io.StringWriter interface.
 func (res *response) WriteString(body string) (int, error) {
+	res.materializeBody()
 	res.body = append(res.body, body...)
 	return len(body), nil
 }
