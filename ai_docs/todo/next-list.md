@@ -38,10 +38,7 @@ code at `3169f85`.
 
 ## Open
 
-- **N-015** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
-  Decide whether a request with **no** Host header should get 400 (RFC 9112
-  requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1338`):
-  hand-rolled clients and some raw-socket tests omit it.
+_(none)_
 
 ## Validate
 
@@ -74,6 +71,7 @@ items here as you see fit)_
 - **N-013** · declined `2026-0701-2109-http-server-fixes-and-optimizations` — `Connection: close` handling. Same; the server does not act on a client's `Connection: close`.
 - **N-005** · declined `2026-1010-2320-decline-n005-getpostvalue` (raised `2026-0509-2315-fix-multipart-form-leak`) — Deprecate `GetPostValue` in favor of `FormValue`. Not a real overlap: `GetPostValue` is the narrow urlencoded-only read that never triggers a multipart parse, documented as such on the `Request` interface; `FormValue` covers both encodings. Deprecating would only make linters flag existing callers (`examples/cookies`, tests, one outside project) for no defect.
 - **N-018** · declined `2026-1011-1337-decline-n018-synthetic-host` (raised `2026-0919-2229-next-list-scheme-host-symlinks`) — Host validation for synthetic `s.Request()` calls. The check (`Server.go:1331`, RFC 9112 §3.2: duplicate or malformed Host → 400) guards the wire, where a proxy in front may disagree with us about which Host line counts. `s.Request()` is a test-oriented API whose headers come from the caller's own code, so there is no hop to disagree with and no untrusted input to refuse.
+- **N-015** · declined `2026-1011-1431-decline-n015-missing-host` (raised `2026-0919-2229-next-list-scheme-host-symlinks`) — 400 for a request with no Host header (RFC 9112 §3.2 requires one on HTTP/1.1). Nothing to smuggle without a Host line, and the `"localhost"` fallback grants nothing a client could not get by sending `Host: localhost` (DNS rebinding needs a browser, which always sends one). Enforcing it properly would mean parsing the request-line version, which the server ignores today (`Server.go:1282`), and hostless HTTP/1.0 would keep the fallback anyway. Reasoning recorded at the check (`Server.go:1336`).
 
 ## Closed
 

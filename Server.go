@@ -1333,10 +1333,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 				// A malformed value is refused for the sake of whatever echoes
 				// Host() into a redirect, a link or a log line.
 				//
-				// A *missing* Host is still tolerated (Host() falls back to
-				// "localhost"), although the RFC wants 400 for that too:
-				// plenty of hand-rolled clients and raw-socket tests omit it,
-				// and an absent header cannot smuggle anything.
+				// A *missing* Host is tolerated on purpose (Host() falls back
+				// to "localhost"), although the RFC wants 400 for that too on
+				// HTTP/1.1 (decided in next-list N-015):
+				//   - nothing to smuggle: with no Host line there is no second
+				//     line for a hop to read differently;
+				//   - the fallback grants nothing: a client able to omit Host
+				//     could just as well send "Host: localhost", and the
+				//     DNS-rebinding case needs a browser, which always sends one;
+				//   - the request line's version is not parsed, and HTTP/1.0
+				//     may omit Host legitimately, so enforcing it would mean
+				//     version parsing while the fallback stayed for 1.0 anyway;
+				//   - hand-rolled clients and raw-socket tests omit it.
 				if sawHost || !isValidHostHeader(value) {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
 					return
