@@ -57,14 +57,6 @@ code at `3169f85`.
   Host validation runs on the wire path only; synthetic `s.Request()` calls
   bypass it. `s.Request()` is a test-oriented API. Candidate for Non-goals.
 
-- **N-019** · raised `2026-1006-1954-request-context-cancellation` · value low
-  `Server.Proxy` builds its upstream request with `http.NewRequest`, so a
-  client leaving mid-proxy does not cancel the upstream call. Pass
-  `ctx.Request().Context()` (`http.NewRequestWithContext`). The handler would
-  then return `context.Canceled` for every abandoned proxy request, which the
-  default error handler logs as an `[ERR]` and answers 500 on a dead conn, so
-  skip the error path for `context.Canceled`, as `httputil.ReverseProxy` does.
-
 - **N-020** · raised `2026-1006-1954-request-context-cancellation` · value low
   Shutdown does not cancel request contexts. `Run` closes the listener on
   SIGINT/SIGTERM but does not track connections, so in-flight handlers keep
@@ -130,6 +122,15 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-019** · raised `2026-1006-1954-request-context-cancellation` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
+  `Server.Proxy` did not cancel the upstream call when the client left.
+  Done: the upstream request is built with `http.NewRequestWithContext`
+  and `ctx.Request().Context()`. When `Do` or the body read fails and the
+  request context is done, the handler records 502 and returns nil
+  (`clientGone`), so no `[ERR]` line and no 500 page for a dead conn; a
+  genuine upstream failure still reaches the error handler. The upstream
+  body is now closed on the read-error path too. Tests:
+  `proxy_cancel_test.go` (TCP and TLS; times out on the old code).
 - **N-017** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · closed 2026-10-11, 2026-1011-0036-os-root-static-containment
   `StaticContainSymlinks` had a check-to-read race between `EvalSymlinks`
   and the open. Done: `go` directive raised to `1.24.0` (root and the four

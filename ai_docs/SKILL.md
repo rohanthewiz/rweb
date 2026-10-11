@@ -767,6 +767,11 @@ if err != nil {
 }
 ```
 
+The upstream call carries the client's request context: a client that disconnects mid-proxy
+cancels the upstream request, and the abandoned request is recorded as 502 without calling the
+error handler (no `[ERR]` log line). An upstream failure with the client still connected goes to
+the error handler as before.
+
 ## Request Information
 
 ```go

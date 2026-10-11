@@ -663,11 +663,16 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 
 		var req *http.Request
 
+		// Tie the upstream call to the client's request context, so a client
+		// that disconnects mid-proxy cancels the upstream request instead of
+		// leaving it to run (and be read in full) for nobody.
+		reqCtx := ctxReq.Context()
+
 		if ctxReq.Body() != nil {
 			buf := bytes.NewBuffer(ctxReq.Body())
-			req, err = http.NewRequest(ctx.Request().Method(), proxyURL, buf)
+			req, err = http.NewRequestWithContext(reqCtx, ctx.Request().Method(), proxyURL, buf)
 		} else {
-			req, err = http.NewRequest(ctx.Request().Method(), proxyURL, nil)
+			req, err = http.NewRequestWithContext(reqCtx, ctx.Request().Method(), proxyURL, nil)
 		}
 		if err != nil {
 			return err
@@ -680,14 +685,20 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
+			if reqCtx.Err() != nil {
+				return clientGone(ctx)
+			}
 			return err
 		}
 
 		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close() // on the error path too, so the upstream conn is released
 		if err != nil {
+			if reqCtx.Err() != nil {
+				return clientGone(ctx)
+			}
 			return err
 		}
-		_ = resp.Body.Close()
 
 		err = ctx.Bytes(body)
 		if err != nil {
@@ -712,6 +723,24 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 	s.setMethodProxyHandler(path.Join("/", pathPrefix, "*path"), hdlr)
 	// The wildcard route does not handle the root of the prefix, so have to handle that separately
 	s.setMethodProxyHandler(path.Join("/", pathPrefix), hdlr)
+	return nil
+}
+
+// clientGone ends a proxy request whose client disconnected while the
+// upstream call was in flight. The upstream error is then just the
+// cancellation we caused (context.Canceled, wrapped in a *url.Error), so it
+// is not handed to the error handler: the default one would log an [ERR] line
+// for every abandoned request and write a 500 page to a dead connection.
+// httputil.ReverseProxy likewise stays quiet on a cancelled client. 502 is
+// recorded for middleware and logging; nobody is left to receive it.
+//
+// Callers check the request context rather than errors.Is(err,
+// context.Canceled). The context ends when the client leaves or when the
+// request is answered, and the latter cannot happen while the handler runs,
+// so a done context means the client left. A genuine upstream failure with
+// the client still connected keeps its error and goes to the error handler.
+func clientGone(ctx Context) error {
+	ctx.SetStatus(consts.StatusBadGateway)
 	return nil
 }
 
