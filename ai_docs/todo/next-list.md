@@ -38,11 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-005** · raised `2026-0509-2315-fix-multipart-form-leak` · value low
-  `GetPostValue` and `FormValue` overlap (`FormValue` falls through to
-  `GetPostValue`, `Request.go:465`). A cleanup could deprecate `GetPostValue`
-  to a thin alias. Lapsed. Candidate for Non-goals.
-
 - **N-006** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · value low
   Remove the `var _ = context.Background` guard at `Request_leak_test.go:516`.
   The raising doc said `context` stays in use through
@@ -139,6 +134,7 @@ items here as you see fit)_
 - **N-011** · declined `2026-0701-2109-http-server-fixes-and-optimizations` — Streaming proxy responses. Out of scope for that review and carried as a deliberate non-goal since.
 - **N-012** · declined `2026-0701-2109-http-server-fixes-and-optimizations` — Header count/size limits. Same; still none in `Server.go`.
 - **N-013** · declined `2026-0701-2109-http-server-fixes-and-optimizations` — `Connection: close` handling. Same; the server does not act on a client's `Connection: close`.
+- **N-005** · declined `2026-1010-2320-decline-n005-getpostvalue` (raised `2026-0509-2315-fix-multipart-form-leak`) — Deprecate `GetPostValue` in favor of `FormValue`. Not a real overlap: `GetPostValue` is the narrow urlencoded-only read that never triggers a multipart parse, documented as such on the `Request` interface; `FormValue` covers both encodings. Deprecating would only make linters flag existing callers (`examples/cookies`, tests, one outside project) for no defect.
 
 ## Closed
 
