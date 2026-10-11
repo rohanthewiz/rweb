@@ -3,14 +3,11 @@
 package rweb
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -188,77 +185,10 @@ func ParseUfloat(buf []byte) (float64, error) {
 	return res, err
 }
 
-var (
-	errEmptyHexNum    = errors.New("empty hex number")
-	errTooLargeHexNum = errors.New("too large hex number")
-)
-
-func readHexInt(r *bufio.Reader) (int, error) {
-	var k, i, n int
-	for {
-		c, err := r.ReadByte()
-		if err != nil {
-			if err == io.EOF && i > 0 {
-				return n, nil
-			}
-			return -1, err
-		}
-		k = int(hex2intTable[c])
-		if k == 16 {
-			if i == 0 {
-				return -1, errEmptyHexNum
-			}
-			if err := r.UnreadByte(); err != nil {
-				return -1, err
-			}
-			return n, nil
-		}
-		if i >= consts.MaxHexIntChars {
-			return -1, errTooLargeHexNum
-		}
-		n = (n << 4) | k
-		i++
-	}
-}
-
-var hexIntBufPool sync.Pool
-
-func writeHexInt(w *bufio.Writer, n int) error {
-	if n < 0 {
-		// developer sanity-check
-		panic("BUG: int must be positive")
-	}
-
-	v := hexIntBufPool.Get()
-	if v == nil {
-		v = make([]byte, consts.MaxHexIntChars+1)
-	}
-	buf := v.([]byte)
-	i := len(buf) - 1
-	for {
-		buf[i] = lowerhex[n&0xf]
-		n >>= 4
-		if n == 0 {
-			break
-		}
-		i--
-	}
-	_, err := w.Write(buf[i:])
-	hexIntBufPool.Put(v)
-	return err
-}
-
 const (
 	upperhex = "0123456789ABCDEF"
 	lowerhex = "0123456789abcdef"
 )
-
-func lowercaseBytes(b []byte) {
-	for i := 0; i < len(b); i++ {
-		p := &b[i]
-		*p = toLowerTable[*p]
-	}
-}
 
 // AppendUnquotedArg appends url-decoded src to dst and returns appended dst.
 //

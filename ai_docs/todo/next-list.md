@@ -38,16 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-007** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · value low
-  Dead code flagged by `staticcheck ./...`: 13 U1000 hits — unused funcs in
-  `args.go` (`visitArgsKey`, `delAllArgsBytes`, `appendArgBytes`,
-  `decodeArgAppendNoPlus`, `peekAllArgBytesToDst`, `peekArgsKeys`), unused
-  funcs/vars in `bytesconv.go` (`readHexInt`, `writeHexInt`, `lowercaseBytes`,
-  `hexIntBufPool`, `errEmptyHexNum`, `errTooLargeHexNum`), and
-  `consts/text_bytes.go:4` `defaultContentType` — plus one S1017 at
-  `Server.go:512`. Raised as editor lint hints; the `Cookie_test.go`
-  `unusedwrite` hint it also named no longer reproduces. Lapsed.
-
 - **N-015** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
   Decide whether a request with **no** Host header should get 400 (RFC 9112
   requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1338`):
@@ -91,6 +81,17 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-007** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · closed 2026-10-11, 2026-1011-1411-n007-staticcheck-dead-code
+  Dead code and one simplification flagged by `staticcheck ./...`. Done
+  (re-run with `honnef.co/go/tools` v0.8.1, since the installed binary
+  predates go1.24): removed the 13 U1000 hits — `args.go` (`visitArgsKey`,
+  `delAllArgsBytes`, `appendArgBytes`, `decodeArgAppendNoPlus`,
+  `peekAllArgBytesToDst`, `peekArgsKeys`), `bytesconv.go` (`readHexInt`,
+  `writeHexInt`, `lowercaseBytes`, `hexIntBufPool`, `errEmptyHexNum`,
+  `errTooLargeHexNum`, plus the `bufio`/`io`/`sync` imports only they used),
+  `consts/text_bytes.go` `defaultContentType` — and the S1017 in
+  `Server.Proxy` (now `strings.TrimPrefix`). Exported `consts.MaxHexIntChars`
+  kept. `staticcheck ./...` is now clean.
 - **N-026** · raised `2026-1011-0036-os-root-static-containment` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
   `examples/websocket` did not compile. Done: `main.go` calls
   `rweb.NewServerWithOptions` for its functional options. All four example

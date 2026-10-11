@@ -356,13 +356,6 @@ func visitArgs(args []argsKV, f func(k, v []byte)) {
 	}
 }
 
-func visitArgsKey(args []argsKV, f func(k []byte)) {
-	for i, n := 0, len(args); i < n; i++ {
-		kv := &args[i]
-		f(kv.key)
-	}
-}
-
 func copyArgs(dst, src []argsKV) []argsKV {
 	if cap(dst) < len(src) {
 		tmp := make([]argsKV, len(src))
@@ -390,10 +383,6 @@ func copyArgs(dst, src []argsKV) []argsKV {
 		dstKV.noValue = srcKV.noValue
 	}
 	return dst
-}
-
-func delAllArgsBytes(args []argsKV, key []byte) []argsKV {
-	return delAllArgs(args, b2s(key))
 }
 
 func delAllArgs(args []argsKV, key string) []argsKV {
@@ -430,10 +419,6 @@ func setArg(h []argsKV, key, value string, noValue bool) []argsKV {
 		}
 	}
 	return appendArg(h, key, value, noValue)
-}
-
-func appendArgBytes(h []argsKV, key, value []byte, noValue bool) []argsKV {
-	return appendArg(h, b2s(key), b2s(value), noValue)
 }
 
 func appendArg(args []argsKV, key, value string, noValue bool) []argsKV {
@@ -582,59 +567,6 @@ func decodeArgAppend(dst, src []byte) []byte {
 		default:
 			dst = append(dst, c)
 		}
-	}
-	return dst
-}
-
-// decodeArgAppendNoPlus is almost identical to decodeArgAppend, but it doesn't
-// substitute '+' with ' '.
-//
-// The function is copy-pasted from decodeArgAppend due to the performance
-// reasons only.
-func decodeArgAppendNoPlus(dst, src []byte) []byte {
-	idx := bytes.IndexByte(src, '%')
-	if idx < 0 {
-		// fast path: src doesn't contain encoded chars
-		return append(dst, src...)
-	}
-	dst = append(dst, src[:idx]...)
-
-	// slow path
-	for i := idx; i < len(src); i++ {
-		c := src[i]
-		if c == '%' {
-			if i+2 >= len(src) {
-				return append(dst, src[i:]...)
-			}
-			x2 := hex2intTable[src[i+2]]
-			x1 := hex2intTable[src[i+1]]
-			if x1 == 16 || x2 == 16 {
-				dst = append(dst, '%')
-			} else {
-				dst = append(dst, x1<<4|x2)
-				i += 2
-			}
-		} else {
-			dst = append(dst, c)
-		}
-	}
-	return dst
-}
-
-func peekAllArgBytesToDst(dst [][]byte, h []argsKV, k []byte) [][]byte {
-	for i, n := 0, len(h); i < n; i++ {
-		kv := &h[i]
-		if bytes.Equal(kv.key, k) {
-			dst = append(dst, kv.value)
-		}
-	}
-	return dst
-}
-
-func peekArgsKeys(dst [][]byte, h []argsKV) [][]byte {
-	for i, n := 0, len(h); i < n; i++ {
-		kv := &h[i]
-		dst = append(dst, kv.key)
 	}
 	return dst
 }

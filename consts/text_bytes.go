@@ -1,10 +1,6 @@
 package consts
 
 var (
-	defaultContentType = []byte("text/plain; charset=utf-8")
-)
-
-var (
 	BytSlash                    = []byte("/")
 	BytSlashSlash               = []byte("//")
 	BytSlashDotDot              = []byte("/..")

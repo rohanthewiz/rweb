@@ -682,10 +682,8 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 	urlWithoutPath := tURL.Scheme + "://" + tURL.Host
 	// We will not map to the level of the query string // qry := tURL.RawQuery
 
-	// Normalize path prefix by removing any leading slashes
-	if strings.HasPrefix(pathPrefix, "/") {
-		pathPrefix = pathPrefix[1:]
-	}
+	// Normalize path prefix by removing a leading slash
+	pathPrefix = strings.TrimPrefix(pathPrefix, "/")
 
 	// Strip off the left (most significant tokens as those can act as a switch between targets) -- keep the right side tokens here
 	strippedPrefix := pathPrefix
