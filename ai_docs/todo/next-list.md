@@ -57,14 +57,6 @@ code at `3169f85`.
   Host validation runs on the wire path only; synthetic `s.Request()` calls
   bypass it. `s.Request()` is a test-oriented API. Candidate for Non-goals.
 
-- **N-025** · raised `2026-1010-2307-head-fallback-and-501-unknown-method` · value low
-  A request to a WebSocket route that is not an upgrade (a plain GET, or now
-  a HEAD, which falls back to it) gets `500` and an `[ERR]` log line per
-  request: `s.WebSocket`/`WebSocketWithOptions` return
-  `ErrWebSocketNotUpgraded` to the error handler. Should be `426 Upgrade
-  Required` with `Upgrade: websocket` (RFC 9110 §15.5.22), or 400, and no
-  error log. Found while doing N-023.
-
 - **N-026** · raised `2026-1011-0036-os-root-static-containment` · value low
   `examples/websocket` does not compile: `main.go:122` passes functional
   options (`rweb.WithAddress`, `rweb.WithVerbose`) to `rweb.NewServer`, which
@@ -109,6 +101,19 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-025** · raised `2026-1010-2307-head-fallback-and-501-unknown-method` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
+  A non-upgrade request to a WebSocket route got 500 and an `[ERR]` line.
+  Done: `s.WebSocket` and `s.WebSocketWithOptions` check
+  `IsWebSocketUpgrade` first and answer through `rejectWebSocketRequest`
+  (`websocket.go`) with nil error: no `Upgrade: websocket` (plain GET, any
+  HEAD) → 426 with `Upgrade: websocket` and `Connection: Upgrade`; wrong
+  `Sec-WebSocket-Version` → 426 with `Sec-WebSocket-Version: 13` (RFC 6455
+  §4.4); missing key or `Connection: upgrade` → 400. Added
+  `consts.StatusUpgradeRequired`. Also made the `Upgrade` token
+  case-insensitive in `IsWebSocketUpgrade` and `performHandshake` (RFC 6455
+  §4.2.1), since the reject path compares it that way. A manual
+  `ctx.UpgradeWebSocket()` in a user handler still returns
+  `ErrWebSocketNotUpgraded`. Tests: `websocket_reject_test.go`.
 - **N-024** · raised `2026-1010-2246-lazy-multipart-parse` · closed 2026-10-11, 2026-1011-0045-next-list-sweep
   Synthetic `s.Request()` left a spilled multipart form's temp files
   behind, because it cannot run the per-request `Clean` (that would zero

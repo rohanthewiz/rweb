@@ -629,6 +629,10 @@ type WebSocketHandler func(*WSConn) error
 // Usage: s.WebSocket("/ws", func(ws *WSConn) error { ... })
 func (s *Server) WebSocket(path string, handler WebSocketHandler) {
 	s.Get(path, func(ctx Context) error {
+		if !ctx.IsWebSocketUpgrade() {
+			return rejectWebSocketRequest(ctx)
+		}
+
 		// Upgrade the connection to WebSocket
 		ws, err := ctx.UpgradeWebSocket()
 		if err != nil {
@@ -652,6 +656,9 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 		c, ok := ctx.(*context)
 		if !ok {
 			return errors.New("rweb: WebSocketWithOptions needs the server's own context")
+		}
+		if !c.IsWebSocketUpgrade() {
+			return rejectWebSocketRequest(ctx)
 		}
 		ws, err := c.upgradeWebSocket(opts)
 		if err != nil {

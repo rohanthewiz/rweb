@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rohanthewiz/rweb/consts"
 )
 
 // WebSocket opcodes as defined in RFC 6455
@@ -155,9 +157,45 @@ func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 // This validates the client's request and sends the appropriate response.
 // The returned deflate state is non-nil when permessage-deflate was
 // negotiated (opts.Compression and a client offer this side can honour).
+// rejectWebSocketRequest answers a request to a WebSocket route
+// (s.WebSocket, s.WebSocketWithOptions) that is not a valid opening
+// handshake. Such a request is the client's mistake, not a server failure,
+// so it is answered here with a 4xx and returns nil: handing
+// ErrWebSocketNotUpgraded to the error handler meant a 500 and an [ERR] log
+// line for every browser tab or health check that GETs the URL.
+//
+//	no "Upgrade: websocket" (a plain GET, or a HEAD) -> 426, Upgrade: websocket
+//	                                                    (RFC 9110 §15.5.22)
+//	an upgrade with Sec-WebSocket-Version other than 13 -> 426, Sec-WebSocket-Version: 13
+//	                                                    (RFC 6455 §4.4)
+//	an upgrade missing Connection: upgrade or the key  -> 400 (RFC 6455 §4.2.2)
+//
+// A HEAD never upgrades (see IsWebSocketUpgrade) and gets the 426 its GET
+// counterpart would, whatever headers it carries.
+func rejectWebSocketRequest(ctx Context) error {
+	req := ctx.Request()
+	isHandshakeAttempt := req.Method() == consts.MethodGet &&
+		strings.EqualFold(req.Header("Upgrade"), "websocket")
+
+	switch {
+	case !isHandshakeAttempt:
+		// A sender of Upgrade must also list it in Connection (RFC 9110
+		// §7.8), so intermediaries do not forward it.
+		ctx.Response().SetHeader("Upgrade", "websocket")
+		ctx.Response().SetHeader("Connection", "Upgrade")
+		return ctx.SetStatus(consts.StatusUpgradeRequired).WriteString("Upgrade Required: this endpoint serves WebSocket connections only")
+	case req.Header("Sec-WebSocket-Version") != "13":
+		ctx.Response().SetHeader("Sec-WebSocket-Version", "13")
+		return ctx.SetStatus(consts.StatusUpgradeRequired).WriteString("Upgrade Required: unsupported WebSocket version; this server speaks 13")
+	default:
+		return ctx.SetStatus(consts.StatusBadRequest).WriteString("Bad Request: incomplete WebSocket handshake")
+	}
+}
+
 func performHandshake(ctx *context, opts WSOptions) (*wsDeflate, error) {
-	// Check for required headers
-	if ctx.request.Header("Upgrade") != "websocket" {
+	// Check for required headers. The Upgrade token is case-insensitive
+	// (RFC 6455 §4.2.1).
+	if !strings.EqualFold(ctx.request.Header("Upgrade"), "websocket") {
 		return nil, errors.New("missing or invalid Upgrade header")
 	}
 

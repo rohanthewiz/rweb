@@ -558,6 +558,10 @@ evtSource.onerror = function() {
 
 Use `s.WebSocket()` to register a handler that receives an upgraded `*rweb.WSConn`.
 The framework handles the HTTP upgrade handshake automatically.
+A request to the route that is not a valid handshake never reaches the handler and is
+not logged as an error: a plain GET or a HEAD gets `426 Upgrade Required` with
+`Upgrade: websocket`, an unsupported `Sec-WebSocket-Version` gets 426 with
+`Sec-WebSocket-Version: 13`, and an incomplete handshake gets 400.
 
 ```go
 s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {

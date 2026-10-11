@@ -35,6 +35,7 @@ const ( // HTTP status codes
 	StatusRequestTimeout    = 408
 	StatusConflict          = 409
 	StatusGone              = 410
+	StatusUpgradeRequired   = 426
 
 	StatusInternalServerError     = 500
 	StatusNotImplemented          = 501
@@ -78,6 +79,7 @@ var StatusTextFromCode = map[int]string{
 	StatusRequestTimeout:    "Request Timeout",
 	StatusConflict:          "Conflict",
 	StatusGone:              "Gone",
+	StatusUpgradeRequired:   "Upgrade Required",
 
 	StatusInternalServerError:     "Internal Server Error",
 	StatusNotImplemented:          "Not Implemented",

@@ -754,8 +754,8 @@ func (ctx *context) IsWebSocketUpgrade() bool {
 		return false
 	}
 
-	// Check Upgrade header
-	if ctx.request.Header("Upgrade") != "websocket" {
+	// Check Upgrade header; its token is case-insensitive (RFC 6455 §4.2.1)
+	if !strings.EqualFold(ctx.request.Header("Upgrade"), "websocket") {
 		return false
 	}
 
