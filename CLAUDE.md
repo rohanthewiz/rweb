@@ -115,7 +115,7 @@ s.Get("/profile", func(ctx rweb.Context) error {
 
 ## Important Notes
 
-- Go 1.22+ required
+- Go 1.24+ required (`os.Root`, used by `StaticContainSymlinks`)
 - Minimal dependencies (only test assertion library)
 - Server addresses should use ":8080" format (not "localhost:8080") for Docker compatibility
 - The radix tree router provides O(log n) route matching performance

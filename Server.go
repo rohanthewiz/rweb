@@ -75,6 +75,10 @@ type ServerOptions struct {
 	// hold — the root is writable by less-trusted parties (upload or
 	// extraction directories, per-user content), where a planted link would
 	// otherwise expose any file the process can read.
+	//
+	// The file is opened through an os.Root on the served directory, so the
+	// check and the open are one step: a link swapped in mid-request cannot
+	// redirect it (see openContained).
 	StaticContainSymlinks bool
 }
 
@@ -866,40 +870,22 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 
 		// The check above is lexical: it proves the *name* is under the root,
 		// not the file the name resolves to. With StaticContainSymlinks the
-		// same test is repeated on the resolved paths:
+		// file is opened through an os.Root on the served directory, so the
+		// containment check and the open are one operation and a link
+		// swapped in between them has nothing to slip past. See
+		// openContained for how links that stay inside the root are served.
 		//
-		//	root/logo.png -> root/img/logo.png   resolves inside   -> served
-		//	root/secrets  -> /etc                resolves outside  -> 404
-		//
-		// The root is resolved too, otherwise a root that is itself a symlink
-		// (a "current" release link, macOS's /tmp -> /private/tmp) would make
-		// every file look like an escape. A path that fails to resolve does
-		// not exist, which is a 404 regardless.
-		//
-		// This narrows, but cannot close, the window between check and read:
-		// a link swapped in after EvalSymlinks is still followed by Open.
-		// Closing it needs openat-style traversal (os.Root, Go 1.24+), which
-		// the module's go 1.23 directive rules out for now.
-		if s.options.StaticContainSymlinks {
-			rootReal, rootErr := filepath.EvalSymlinks(rootAbs)
-			candReal, candErr := filepath.EvalSymlinks(candAbs)
-			if rootErr != nil || candErr != nil {
-				ctx.SetStatus(consts.StatusNotFound)
-				return nil
-			}
-			realRel, realRelErr := filepath.Rel(rootReal, candReal)
-			if realRelErr != nil || realRel == ".." ||
-				strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
-				ctx.SetStatus(consts.StatusNotFound)
-				return nil
-			}
-		}
-
 		// Open first and Stat the open file, rather than Stat the path and
 		// open it afterwards: the size, mod time and directory check then
 		// describe the very file whose bytes are sent, not whatever the path
 		// pointed at a moment earlier.
-		f, openErr := os.Open(candAbs)
+		var f *os.File
+		var openErr error
+		if s.options.StaticContainSymlinks {
+			f, openErr = openContained(rootAbs, rel)
+		} else {
+			f, openErr = os.Open(candAbs)
+		}
 		if openErr != nil {
 			ctx.SetStatus(consts.StatusNotFound)
 			return nil

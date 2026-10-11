@@ -34,7 +34,7 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-026
+**Next ID:** N-027
 
 ## Open
 
@@ -52,12 +52,6 @@ code at `3169f85`.
   Decide whether a request with **no** Host header should get 400 (RFC 9112
   requires it for HTTP/1.1). Tolerated deliberately today (`Server.go:1103`):
   hand-rolled clients and some raw-socket tests omit it.
-
-- **N-017** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
-  `StaticContainSymlinks` leaves a check-to-read race between `EvalSymlinks`
-  and `os.ReadFile` (noted at `Server.go:765`). Closing it needs `os.Root`,
-  i.e. raising the `go` directive in `go.mod` from `1.23.0` to `1.24`+. Go
-  1.23 is out of support, so the bump is cheaper than when this was raised.
 
 - **N-018** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
   Host validation runs on the wire path only; synthetic `s.Request()` calls
@@ -91,6 +85,13 @@ code at `3169f85`.
   `ErrWebSocketNotUpgraded` to the error handler. Should be `426 Upgrade
   Required` with `Upgrade: websocket` (RFC 9110 §15.5.22), or 400, and no
   error log. Found while doing N-023.
+
+- **N-026** · raised `2026-1011-0036-os-root-static-containment` · value low
+  `examples/websocket` does not compile: `main.go:122` passes functional
+  options (`rweb.WithAddress`, `rweb.WithVerbose`) to `rweb.NewServer`, which
+  takes a `ServerOptions` struct; it wants `NewServerWithOptions`. Predates
+  N-017 (at `e76054b` its `go.mod` also needed a tidy). Found while
+  building the examples after the go-directive bump.
 
 ## Validate
 
@@ -129,6 +130,19 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-017** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · closed 2026-10-11, 2026-1011-0036-os-root-static-containment
+  `StaticContainSymlinks` had a check-to-read race between `EvalSymlinks`
+  and the open. Done: `go` directive raised to `1.24.0` (root and the four
+  example modules; `toolchain go1.23.4` dropped), and with the option on the
+  static handler opens through `os.Root` (`openContained`,
+  `static_contain.go`), so check and open are one step. `os.Root` refuses
+  absolute symlinks even when they point inside, so a refused open falls
+  back to resolving with `EvalSymlinks` and reopening the link-free real
+  path through the same Root: still contained, and in-root absolute links
+  keep serving. Tests: `TestStaticFilesContainRelativeSymlinks`,
+  `TestStaticFilesContainSymlinksSwapRace` (rename-swaps a dir link among
+  inside / relative-outside / absolute-outside; the old code served the
+  outside file within ~70–250 requests, the new code never does in 5000).
 - **N-010** · raised `2026-0701-2109-http-server-fixes-and-optimizations` · closed 2026-10-11, 2026-1011-0017-stream-static-files
   Static files were read fully into memory per request. Done: the static
   handler opens the file, Stats the open file (size, mod time and dir check

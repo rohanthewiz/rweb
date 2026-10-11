@@ -234,3 +234,116 @@ func TestStaticFilesContainSymlinks(t *testing.T) {
 		}
 	}
 }
+
+// Relative links take os.Root's own path (absolute ones, above, take the
+// EvalSymlinks fallback in openContained), so they get cases of their own:
+//
+//	root/rel-inside.txt -> sub/deep.txt     stays within the root
+//	root/rel-escape.txt -> ../secret.txt    leaves the root
+//	root/updir          -> ..               a directory link out of the root
+func TestStaticFilesContainRelativeSymlinks(t *testing.T) {
+	absRoot := staticFixture(t)
+	link := func(target, name string) {
+		if err := os.Symlink(target, filepath.Join(absRoot, name)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	link(filepath.Join("sub", "deep.txt"), "rel-inside.txt")
+	link(filepath.Join("..", "secret.txt"), "rel-escape.txt")
+	link("..", "updir")
+
+	s := rweb.NewServerWithOptions(rweb.WithStaticContainSymlinks())
+	s.StaticFilesAbs("/files/", absRoot, 1)
+
+	cases := []struct {
+		url        string
+		wantStatus int
+		wantBody   string
+	}{
+		{"/files/rel-inside.txt", 200, "abs-deep"},
+		{"/files/rel-escape.txt", 404, ""},
+		{"/files/updir/secret.txt", 404, ""},
+		{"/files/updir/root/allowed.txt", 200, "from-abs"}, // leaves, then resolves back inside
+		{"/files/updir", 404, ""},
+	}
+	for _, c := range cases {
+		status, body := get(s, c.url)
+		if status != c.wantStatus || (c.wantStatus == 200 && body != c.wantBody) {
+			t.Errorf("%s: got %d %q, want %d %q", c.url, status, body, c.wantStatus, c.wantBody)
+		}
+	}
+}
+
+// The check-to-read race (N-017). A directory link under the root is
+// swapped, atomically by rename, among three targets while requests run:
+//
+//	root/d -> real            relative, inside      (os.Root path)
+//	root/d -> ../out          relative, outside     (os.Root path)
+//	root/d -> <abs>/out       absolute, outside     (fallback path)
+//
+// An EvalSymlinks check followed by a separate open serves out/x.txt
+// whenever the link moves to an outside target between the two; opening
+// through os.Root makes that impossible, so the outside body must never
+// appear. Each request may see either inside target or a 404.
+func TestStaticFilesContainSymlinksSwapRace(t *testing.T) {
+	absRoot := staticFixture(t)
+	outDir := filepath.Join(filepath.Dir(absRoot), "out")
+	for dir, body := range map[string]string{
+		filepath.Join(absRoot, "real"): "inside",
+		outDir:                         "OUTSIDE",
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linkPath := filepath.Join(absRoot, "d")
+	if err := os.Symlink("real", linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	s := rweb.NewServerWithOptions(rweb.WithStaticContainSymlinks())
+	s.StaticFilesAbs("/files/", absRoot, 1)
+
+	// The swapper builds each new link under a temp name and renames it
+	// over root/d, so the name always exists and only its target changes.
+	targets := []string{"real", filepath.Join("..", "out"), outDir}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tmp := filepath.Join(absRoot, ".d.tmp")
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.Remove(tmp)
+			if err := os.Symlink(targets[i%len(targets)], tmp); err != nil {
+				continue
+			}
+			_ = os.Rename(tmp, linkPath)
+		}
+	}()
+
+	var served, refused int
+	for i := 0; i < 5000; i++ {
+		status, body := get(s, "/files/d/x.txt")
+		switch {
+		case body == "OUTSIDE":
+			close(stop)
+			<-done
+			t.Fatalf("request %d served a file outside the root through a swapped link", i)
+		case status == 200:
+			served++
+		default:
+			refused++
+		}
+	}
+	close(stop)
+	<-done
+	t.Logf("served inside: %d, refused: %d", served, refused)
+}

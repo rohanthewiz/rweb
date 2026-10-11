@@ -358,7 +358,8 @@ admin.StaticFilesAbs("/files/", "/var/lib/myapp/files", 2) // strips "admin" and
   directory is writable by anyone less trusted than the operator — uploads, extracted
   archives, per-user content — set `StaticContainSymlinks` (v0.1.31+): a link resolving
   outside the root then 404s, while links inside it, and a root that is itself a link,
-  still serve.
+  still serve. The file is opened through `os.Root`, so a link swapped in while the
+  request runs cannot slip past the check.
 
 ```go
 s := rweb.NewServer(rweb.ServerOptions{Address: ":8080", StaticContainSymlinks: true})
