@@ -58,7 +58,8 @@ curl http://localhost:8080/some-json
 ### Important Features
 - **Server-Sent Events (SSE)**: Built-in support via `SSEHandler()`
 - **Request context**: `ctx.Request().Context()` is cancelled when the client disconnects mid-handler, when `Run` shuts down (it derives from `Server.baseCtx`; keep-alive conns then close after their current response), and always when the request ends (after the stream, for SSE)
-- **Static File Serving**: `StaticFiles(urlPrefix, localPath, stripPrefixSegments)` — streamed from disk via a pending body file (`response.bodyFile`); touching the body (`Body`, `Write`, `SetBody`) loads it into memory first
+- **Static File Serving**: `StaticFiles(urlPrefix, localPath, stripPrefixSegments)` — streamed from disk via a pending body stream (`response.bodyStream`); touching the body (`Body`, `Write`, `SetBody`) loads it into memory first
+- **Streamed bodies**: `rweb.Stream(ctx, r, size)` sends any `io.Reader` after the handler returns (size → Content-Length; negative → chunked); `rweb.SendFile`/`SendFileAs` stream a file from disk with file headers and 304 support. A handler error drops a pending stream; a failed/short stream closes the conn so the client sees a truncated body
 - **Reverse Proxy**: `Proxy(urlPrefix, targetURL, stripPrefixSegments)`
 - **File Uploads**: Handled via `GetFormFile()` on Request
 - **Multiple Response Types**: JSON, HTML, Text, CSS, File responses

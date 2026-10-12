@@ -1,6 +1,6 @@
 package rweb
 
-// Tests for streamed static files (response.bodyFile): StaticFiles attaches
+// Tests for streamed static files (response.bodyStream): StaticFiles attaches
 // the opened file to the response instead of reading it into memory, and
 // writeResponse copies it to the connection. They run over raw keep-alive
 // connections on both transports, because the two take different copy paths
@@ -116,11 +116,12 @@ func TestStaticFileIsStreamedNotBuffered(t *testing.T) {
 				err := ctx.Next()
 				if ctx.Request().Path() == "/pub/big.bin" {
 					res := &ctx.(*context).response
-					if len(res.body) != 0 || res.bodyFile == nil || res.bodyFileSize != int64(len(big)) {
+					f, _ := res.bodyStream.(*os.File)
+					if len(res.body) != 0 || f == nil || res.bodyStreamSize != int64(len(big)) {
 						t.Errorf("after the static handler: %d body bytes, file %v, size %d; want 0, pending, %d",
-							len(res.body), res.bodyFile != nil, res.bodyFileSize, len(big))
+							len(res.body), f != nil, res.bodyStreamSize, len(big))
 					}
-					files <- res.bodyFile
+					files <- f
 				}
 				return err
 			})

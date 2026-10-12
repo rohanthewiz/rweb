@@ -983,14 +983,10 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 
 		// Honor If-Modified-Since: reply 304 without reading or resending
 		// the file when the client's cached copy is still current.
-		// Last-Modified has one-second resolution, so compare at that grain.
-		if ims := ctx.Request().Header(consts.HeaderIfModifiedSince); ims != "" {
-			if t, tErr := http.ParseTime(ims); tErr == nil &&
-				!modTime.Truncate(time.Second).After(t) {
-				_ = f.Close()
-				ctx.SetStatus(consts.StatusNotModified)
-				return nil
-			}
+		if notModifiedSince(ctx, modTime) {
+			_ = f.Close()
+			ctx.SetStatus(consts.StatusNotModified)
+			return nil
 		}
 
 		// Sets Content-Type, Last-Modified (so clients can revalidate with
@@ -999,18 +995,8 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 
 		// Stream the file rather than read it into memory: the response
 		// takes ownership of f and writeResponse copies it to the conn (see
-		// response.bodyFile). The Context here is always our *context; the
-		// fallback only keeps a foreign Response implementation working.
-		if res, ok := ctx.Response().(*response); ok {
-			res.setBodyFile(f, info.Size())
-			return nil
-		}
-		defer f.Close()
-		body, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		return ctx.Bytes(body)
+		// response.bodyStream).
+		return Stream(ctx, f, info.Size())
 	})
 }
 
@@ -1582,6 +1568,12 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		return s.handlers[0](ctx)
 	}()
 	if err != nil {
+		// An error response replaces a stream the handler attached before
+		// failing (rweb.Stream, SendFile). The error handler writes its
+		// page through the body accessors, which would otherwise read the
+		// whole stream into memory first, a dump of any size included,
+		// only to send it with an error page glued to the end.
+		ctx.response.closeBodyStream()
 		s.errorHandler(ctx, err)
 	}
 
@@ -1645,18 +1637,28 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	tmp.WriteString(consts.CRLF)
 
 	// A synthetic request hands its response back in memory, so a pending
-	// body file (a static file) is read into the body here; streaming it
-	// would send it to io.Discard and leave Body empty.
+	// body stream (a static file, rweb.Stream) is read into the body here;
+	// streaming it would send it to io.Discard and leave Body empty.
 	if ctx.synthetic {
 		ctx.response.materializeBody()
 	}
 
-	if ctx.sseEventsChan == nil { // For SSE -- don't set content-length
-		// Content-Length: the in-memory body plus any body file still to be
-		// streamed after it (see response.bodyFile).
-		tmp.WriteString(consts.HeaderContentLength)
-		tmp.WriteString(consts.ColonSpace)
-		tmp.WriteString(strconv.FormatInt(int64(len(ctx.response.body))+ctx.response.bodyFileSize, 10))
+	// Body framing. SSE has neither header: the stream ends when the
+	// connection does. Otherwise a body of unknown length (a pending stream
+	// with no size) is chunked, and every other body states its length:
+	// the in-memory body plus any sized stream still to be sent after it
+	// (see response.bodyStream).
+	chunked := ctx.response.bodyChunked()
+	if ctx.sseEventsChan == nil {
+		if chunked {
+			tmp.WriteString(consts.HeaderTransferEncoding)
+			tmp.WriteString(consts.ColonSpace)
+			tmp.WriteString("chunked")
+		} else {
+			tmp.WriteString(consts.HeaderContentLength)
+			tmp.WriteString(consts.ColonSpace)
+			tmp.WriteString(strconv.FormatInt(int64(len(ctx.response.body))+max(ctx.response.bodyStreamSize, 0), 10))
+		}
 		tmp.WriteString(consts.CRLF)
 	}
 
@@ -1694,11 +1696,15 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		// HEAD responses carry the same headers a GET would (including
 		// Content-Length above) but MUST NOT include a body (RFC 7231 §4.3.2)
 		if ctx.request.method != consts.MethodHead {
-			_, _ = respWriter.Write(ctx.response.body)
-			s.writeBodyFile(ctx, respWriter)
+			if chunked {
+				s.writeChunkedBody(ctx, respWriter)
+			} else {
+				_, _ = respWriter.Write(ctx.response.body)
+				s.writeBodyStream(ctx, respWriter)
+			}
 		}
-		// A HEAD never reads the file at all; this just releases it.
-		ctx.response.closeBodyFile()
+		// A HEAD never reads the stream at all; this just releases it.
+		ctx.response.closeBodyStream()
 	} else {
 		// fmt.Println("RWEB: SSE events channel is set -- sending events")
 		err = s.sendSSE(ctx, respWriter)
@@ -1708,38 +1714,133 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	}
 }
 
-// writeBodyFile streams a pending body file to the client after the
-// in-memory body, then releases it.
+// writeBodyStream streams a pending body stream of known size to the
+// client after the in-memory body, then releases it.
 //
-// io.CopyN hands the conn an *io.LimitedReader over the *os.File, which
-// *net.TCPConn.ReadFrom recognises: the copy runs as sendfile(2) in the
-// kernel, with no user-space buffer. Other writers (a *tls.Conn, a test's
-// buffer) get an ordinary buffered copy. The limit matters too: a file that
-// grew since its size was taken must not run past the Content-Length
-// already sent.
+// io.CopyN hands the conn an *io.LimitedReader over the stream. When the
+// stream is an *os.File, *net.TCPConn.ReadFrom recognises the pair and the
+// copy runs as sendfile(2) in the kernel, with no user-space buffer. Other
+// streams, and other writers (a *tls.Conn, a test's buffer), get an
+// ordinary buffered copy. The limit matters too: a file that grew since its
+// size was taken, or a reader with more than it was sized at, must not run
+// past the Content-Length already sent.
 //
-// A copy that ends short — the file shrank, or the client went away —
-// leaves the client waiting for bytes promised by Content-Length, and on a
-// keep-alive connection the next response would be read as the rest of
-// this body. The only way to delimit the body now is to close the
-// connection, so we do; the request loop's next read then fails and it
-// returns.
-func (s *Server) writeBodyFile(ctx *context, respWriter io.Writer) {
-	f, size := ctx.response.bodyFile, ctx.response.bodyFileSize
-	if f == nil {
+// A copy that ends short (the file shrank, the reader failed, or the client
+// went away) leaves the client waiting for bytes promised by
+// Content-Length, and on a keep-alive connection the next response would be
+// read as the rest of this body. The only way to delimit the body now is to
+// close the connection, so we do; the request loop's next read then fails
+// and it returns.
+func (s *Server) writeBodyStream(ctx *context, respWriter io.Writer) {
+	r, size := ctx.response.bodyStream, ctx.response.bodyStreamSize
+	if r == nil {
 		return
 	}
-	ctx.response.bodyFile, ctx.response.bodyFileSize = nil, 0
-	defer f.Close()
+	ctx.response.bodyStream, ctx.response.bodyStreamSize = nil, 0
+	defer closeStream(r)
 
-	n, err := io.CopyN(respWriter, f, size)
+	n, err := io.CopyN(respWriter, r, size)
 	if n < size {
 		if s.options.Debug {
-			fmt.Printf("rweb: body file %s cut short at %d of %d bytes: %v\n", f.Name(), n, size, err)
+			fmt.Printf("rweb: body stream %s cut short at %d of %d bytes: %v\n", streamName(r), n, size, err)
 		}
 		if ctx.conn != nil {
 			_ = ctx.conn.Close()
 		}
+	}
+}
+
+// chunkBufSize is the most payload a chunk of a streamed body carries.
+// It matches io.Copy's buffer, so a producer writing through an io.Pipe in
+// io.Copy-sized pieces maps one write to one chunk.
+const chunkBufSize = 32 << 10
+
+// chunkHeadRoom is reserved in front of each chunk's payload for its size
+// line: up to 4 hex digits for chunkBufSize, plus CRLF, with spare.
+const chunkHeadRoom = 10
+
+// writeChunkedBody sends the in-memory body and then the pending stream of
+// unknown length with chunked transfer encoding (RFC 9112 §7.1), and
+// releases the stream.
+//
+// Each chunk goes out in a single Write, the size line, payload and CRLF
+// laid out in one buffer, so a chunk costs one syscall on plain TCP and
+// one record on TLS. The payload is read into the buffer after headroom
+// left for the size line, which is then written right-aligned against it:
+//
+//	buf: [ pad | "7d00\r\n" | payload ............ | "\r\n" ]
+//	           ^start         ^chunkHeadRoom        ^chunkHeadRoom+n
+//
+// Whatever the stream's Read returns is sent at once, not held back to
+// fill a chunk: a producer that writes slowly (a dump in progress) shows
+// the client steady progress instead of long silences.
+//
+// The body ends with the zero-length last chunk only when the stream
+// reached EOF. On a read error the last chunk is withheld and the
+// connection closed, so the client sees a truncated body rather than a
+// complete-looking one: a failed dump must not download as a short but
+// valid file. A failed write (the client went away) closes it too; the
+// stream is closed either way, which is what stops its producer.
+func (s *Server) writeChunkedBody(ctx *context, respWriter io.Writer) {
+	r := ctx.response.bodyStream
+	ctx.response.bodyStream, ctx.response.bodyStreamSize = nil, 0
+	defer closeStream(r)
+
+	buf := make([]byte, chunkHeadRoom+chunkBufSize+2)
+	writeChunk := func(n int) error {
+		start := chunkHeadRoom - len(consts.CRLF)
+		copy(buf[start:], consts.CRLF)
+		hexLen := strconv.FormatInt(int64(n), 16)
+		start -= len(hexLen)
+		copy(buf[start:], hexLen)
+		end := chunkHeadRoom + n
+		copy(buf[end:], consts.CRLF)
+		_, err := respWriter.Write(buf[start : end+len(consts.CRLF)])
+		return err
+	}
+	fail := func(what string, err error) {
+		if s.options.Debug {
+			fmt.Printf("rweb: chunked body stream %s: %s: %v\n", streamName(r), what, err)
+		}
+		if ctx.conn != nil {
+			_ = ctx.conn.Close()
+		}
+	}
+
+	// The in-memory body, if any, comes first. It is sent in pieces of the
+	// buffer's size rather than one chunk of its own, which would mean a
+	// second buffer layout just for it.
+	for body := ctx.response.body; len(body) > 0; {
+		n := copy(buf[chunkHeadRoom:chunkHeadRoom+chunkBufSize], body)
+		body = body[n:]
+		if err := writeChunk(n); err != nil {
+			fail("write", err)
+			return
+		}
+	}
+
+	for {
+		n, err := r.Read(buf[chunkHeadRoom : chunkHeadRoom+chunkBufSize])
+		// A zero-length chunk is the end-of-body marker, so an empty read
+		// must never be sent as one.
+		if n > 0 {
+			if wErr := writeChunk(n); wErr != nil {
+				fail("write", wErr)
+				return
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fail("read", err)
+			return
+		}
+	}
+
+	// Last chunk, and an empty trailer section.
+	if _, err := io.WriteString(respWriter, "0\r\n\r\n"); err != nil {
+		fail("write", err)
 	}
 }
 

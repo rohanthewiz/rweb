@@ -121,6 +121,24 @@ func main() {
 		return rweb.File(ctx, "the.css", body)
 	})
 
+	// Large files and generated downloads are streamed, never held in memory.
+	// SendFile/SendFileAs stream a file from disk (sendfile(2) on plain TCP) with
+	// headers by extension, Last-Modified and If-Modified-Since -> 304.
+	s.Get("/backup", func(ctx rweb.Context) error {
+		return rweb.SendFileAs(ctx, "/var/backups/tmp-8341.dump", "db.dump")
+	})
+
+	// Stream sends any io.Reader. Pass its size for a Content-Length, or -1 when it is
+	// unknown until EOF (sent with chunked encoding). The copy runs after the handler
+	// returns, so produce into an io.Pipe from a goroutine. If the producer fails
+	// (CloseWithError), the client gets a truncated download, never a short "complete" one.
+	s.Get("/export", func(ctx rweb.Context) error {
+		pr, pw := io.Pipe()
+		go func() { pw.CloseWithError(writeExport(ctx.Request().Context(), pw)) }()
+		ctx.Response().SetHeader("Content-Disposition", `attachment; filename="export.csv"`)
+		return rweb.Stream(ctx, pr, -1)
+	})
+
 	// e.g. http://localhost:8080/static/images/laptop.png
 	s.StaticFiles("static/images/", "/assets/images", 2)
 

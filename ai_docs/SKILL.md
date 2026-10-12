@@ -140,8 +140,18 @@ ctx.WriteJSON(map[string]string{"status": "ok"})
 // CSS helper
 rweb.CSS(ctx, "body { color: red; }")
 
-// File download
+// File download (bytes already in memory)
 rweb.File(ctx, "filename.txt", fileBytes)
+
+// Large file from disk -- streamed, never read into memory
+rweb.SendFile(ctx, "/data/report.pdf")
+rweb.SendFileAs(ctx, "/tmp/dump-8341.bin", "db.dump") // choose the download name
+
+// Any io.Reader -- size for Content-Length, or -1 for chunked (unknown length).
+// The copy runs after the handler returns: produce into an io.Pipe from a goroutine.
+pr, pw := io.Pipe()
+go func() { pw.CloseWithError(writeDump(ctx.Request().Context(), pw)) }()
+rweb.Stream(ctx, pr, -1)
 
 // Set status code
 ctx.SetStatus(404).WriteString("Not found")

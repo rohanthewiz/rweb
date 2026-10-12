@@ -1,10 +1,11 @@
 package rweb
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
-	"os"
 	"slices"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -31,20 +32,28 @@ type response struct {
 	headers []Header
 	status  uint16
 
-	// bodyFile, when set, is the tail of the body still on disk: the
-	// response body is body followed by the first bodyFileSize bytes of
-	// bodyFile. writeResponse copies it straight to the connection
-	// (sendfile where the OS and conn type allow), so a static file is
-	// never held in memory just to be sent.
+	// bodyStream, when set, is the tail of the body not yet read: the
+	// response body is body followed by bodyStream, which is either exactly
+	// bodyStreamSize bytes or, when bodyStreamSize is negative, everything
+	// up to EOF. writeResponse copies it straight to the connection instead
+	// of the handler reading it into memory first, so a large file or a
+	// generated download (a database dump, an export) costs a copy buffer,
+	// not its own size.
 	//
-	// The file is pending, not hidden: anything that reads or changes the
+	//	known size (>= 0)  Content-Length: len(body)+size, then body, then
+	//	                   the stream. An *os.File goes out by sendfile(2)
+	//	                   on plain TCP.
+	//	unknown size (< 0) Transfer-Encoding: chunked, body and stream sent
+	//	                   as chunks, ended by the zero-length chunk.
+	//
+	// The stream is pending, not hidden: anything that reads or changes the
 	// body through this type (Body, Write, SetBody, ctx.Bytes, ...) first
 	// pulls it into body with materializeBody, so a middleware that
 	// rewrites the response after Next() sees the same bytes it always did
 	// and only that request pays for the read. Whoever clears the field
-	// closes the file; Clean is the backstop.
-	bodyFile     *os.File
-	bodyFileSize int64
+	// closes the stream (when it is an io.Closer); Clean is the backstop.
+	bodyStream     io.Reader
+	bodyStreamSize int64
 }
 
 // Body returns the response body.
@@ -53,46 +62,87 @@ func (res *response) Body() []byte {
 	return res.body
 }
 
-// setBodyFile makes the first size bytes of f the tail of the body, to be
-// streamed when the response is written. The response owns f from here on.
-// A file already pending is closed and replaced, as SetBody would replace
-// an in-memory body.
-func (res *response) setBodyFile(f *os.File, size int64) {
-	res.closeBodyFile()
-	res.bodyFile = f
-	res.bodyFileSize = size
+// setBodyStream makes r the tail of the body, to be streamed when the
+// response is written: exactly size bytes of it, or all of it up to EOF
+// when size is negative. The response owns r from here on and closes it
+// if it is an io.Closer. A stream already pending is closed and replaced,
+// as SetBody would replace an in-memory body.
+func (res *response) setBodyStream(r io.Reader, size int64) {
+	res.closeBodyStream()
+	if size < 0 {
+		size = -1 // one spelling of "unknown", so checks can compare to it
+	}
+	res.bodyStream = r
+	res.bodyStreamSize = size
 }
 
-// materializeBody reads a pending body file into body, after whatever body
-// already holds, and releases the file. It is a nil check when nothing is
-// pending, so every body accessor can call it unconditionally.
+// bodyChunked reports whether the response goes out with chunked transfer
+// encoding: only when a stream of unknown length is still pending.
+func (res *response) bodyChunked() bool {
+	return res.bodyStream != nil && res.bodyStreamSize < 0
+}
+
+// materializeBody reads a pending body stream into body, after whatever
+// body already holds, and releases the stream. It is a nil check when
+// nothing is pending, so every body accessor can call it unconditionally.
 //
-// If the file comes up short (it shrank after it was opened) body keeps
-// what was read, so Content-Length still matches the bytes sent. A read
-// error is logged rather than returned because Body has no error result.
+// If a sized stream comes up short (a file that shrank after it was
+// opened) body keeps what was read, so Content-Length still matches the
+// bytes sent. A read error is logged rather than returned because Body has
+// no error result.
 func (res *response) materializeBody() {
-	if res.bodyFile == nil {
+	if res.bodyStream == nil {
 		return
 	}
-	f, size := res.bodyFile, res.bodyFileSize
-	res.bodyFile, res.bodyFileSize = nil, 0
-	defer f.Close()
+	r, size := res.bodyStream, res.bodyStreamSize
+	res.bodyStream, res.bodyStreamSize = nil, 0
+	defer closeStream(r)
 
-	n := len(res.body)
-	res.body = slices.Grow(res.body, int(size))[:n+int(size)]
-	read, err := io.ReadFull(f, res.body[n:])
-	res.body = res.body[:n+read]
+	var err error
+	if size < 0 {
+		// Unknown length: grow as needed. bytes.Buffer starts with body's
+		// bytes as its unread content and ReadFrom appends after them.
+		buf := bytes.NewBuffer(res.body)
+		_, err = buf.ReadFrom(r)
+		res.body = buf.Bytes()
+	} else {
+		// Known length: one allocation, and ReadFull into an exact-size
+		// window never reads past size even if the source has more.
+		n := len(res.body)
+		res.body = slices.Grow(res.body, int(size))[:n+int(size)]
+		var read int
+		read, err = io.ReadFull(r, res.body[n:])
+		res.body = res.body[:n+read]
+	}
 	if err != nil {
-		log.Printf("rweb: reading response body file %s: %v", f.Name(), err)
+		log.Printf("rweb: reading response body stream %s: %v", streamName(r), err)
 	}
 }
 
-// closeBodyFile drops a pending body file without reading it.
-func (res *response) closeBodyFile() {
-	if res.bodyFile != nil {
-		_ = res.bodyFile.Close()
-		res.bodyFile, res.bodyFileSize = nil, 0
+// closeBodyStream drops a pending body stream without reading it.
+func (res *response) closeBodyStream() {
+	if res.bodyStream != nil {
+		closeStream(res.bodyStream)
+		res.bodyStream, res.bodyStreamSize = nil, 0
 	}
+}
+
+// closeStream closes r if it can be closed. Closing is how the producer
+// behind a stream learns it is no longer wanted: the writer side of an
+// io.Pipe gets io.ErrClosedPipe, an *os.File releases its descriptor.
+func closeStream(r io.Reader) {
+	if c, ok := r.(io.Closer); ok {
+		_ = c.Close()
+	}
+}
+
+// streamName names a stream in log lines: the file name for an *os.File
+// (or anything else with a Name method), otherwise its type.
+func streamName(r io.Reader) string {
+	if n, ok := r.(interface{ Name() string }); ok {
+		return n.Name()
+	}
+	return fmt.Sprintf("%T", r)
 }
 
 // Header returns the header value for the given key.
@@ -122,9 +172,9 @@ func (res *response) AddHeader(key string, value string) {
 }
 
 // SetBody replaces the response body with the new contents.
-// A pending body file is part of the body being replaced, so it is dropped.
+// A pending body stream is part of the body being replaced, so it is dropped.
 func (res *response) SetBody(body []byte) {
-	res.closeBodyFile()
+	res.closeBodyStream()
 	res.body = body
 }
 
@@ -140,7 +190,7 @@ func (res *response) Status() int {
 
 // Write implements the io.Writer interface.
 func (res *response) Write(body []byte) (int, error) {
-	res.materializeBody() // appended bytes go after a pending file, not before it
+	res.materializeBody() // appended bytes go after a pending stream, not before it
 	res.body = append(res.body, body...)
 	return len(body), nil
 }

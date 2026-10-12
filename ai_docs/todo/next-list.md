@@ -34,7 +34,7 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-027
+**Next ID:** N-028
 
 ## Open
 
@@ -71,6 +71,16 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-027** · raised `2026-1011-2314-stream-response-bodies` (from the cats-todo backlog) · closed 2026-10-11, 2026-1011-2314-stream-response-bodies
+  A downstream app could not stream a database-dump download: every response
+  was held in memory, so it kept dumps over 512 MB on the server and logged
+  their path. Done: the static-only pending `response.bodyFile` became
+  `response.bodyStream` (any `io.Reader`, sized or until EOF), with public
+  `rweb.Stream(ctx, r, size)` (size → Content-Length, negative → chunked),
+  `rweb.SendFile` and `rweb.SendFileAs`. StaticFiles now goes through
+  `Stream`. A failed or short stream closes the conn (truncated, never a
+  complete-looking body); a handler error drops a pending stream. Tests in
+  `stream_body_test.go`, tcp and tls.
 - **N-016** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · closed 2026-10-11, 2026-1011-2014-n016-keepalive-ws-sse-tests
   No test drove a WebSocket upgrade or an SSE stream as a later request on a
   reused connection, so the keep-alive `ctx.conn` restore (`Server.go`, end of

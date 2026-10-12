@@ -2,8 +2,11 @@ package rweb
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -254,6 +257,120 @@ func File(ctx Context, filename string, body []byte) error {
 func FileWithModTime(ctx Context, filename string, body []byte, modTime time.Time) error {
 	setFileHeaders(ctx, filename, modTime)
 	return ctx.Bytes(body)
+}
+
+// Stream sends r as the response body without reading it into memory: the
+// handler returns, and r is copied to the client as the response is
+// written. size is r's length in bytes when known, and the response
+// carries it as Content-Length. A negative size means "until EOF"; the
+// body then goes out with chunked transfer encoding, so a body whose size
+// is unknown until it ends (a dump piped from a subprocess, an export
+// built row by row) needs no temp file and no buffer of its own size.
+// Anything already written to the body is sent before r.
+//
+// The response owns r: it is closed, if it is an io.Closer, once sent,
+// replaced, or dropped. Because the copy happens after the handler
+// returns, a producer must not be torn down by a defer in the handler.
+// Run it in a goroutine that writes to an io.Pipe instead:
+//
+//	pr, pw := io.Pipe()
+//	go func() {
+//		// ctx.Request().Context() stays live until the body is sent.
+//		pw.CloseWithError(dump(ctx.Request().Context(), pw))
+//	}()
+//	ctx.Response().SetHeader("Content-Disposition", `attachment; filename="db.dump"`)
+//	return rweb.Stream(ctx, pr, -1)
+//
+// If the producer fails (CloseWithError with a non-nil error) or a sized
+// r ends short, the connection is closed before the body is complete, so
+// the client sees a failed download rather than a short file that looks
+// whole. If the client goes away, r is closed and the producer's next
+// write fails with io.ErrClosedPipe.
+//
+// The stream stays pending until the response is written, so middleware
+// can still read or rewrite it after Next(), at the cost of reading it
+// into memory (see response.bodyStream). A handler returning an error
+// after Stream drops the stream: the error response replaces it. A HEAD
+// request gets the headers alone and r is never read. Chunked encoding is
+// HTTP/1.1; an HTTP/1.0 client cannot read a body of unknown size.
+func Stream(ctx Context, r io.Reader, size int64) error {
+	// The Context here is always our *context; the fallback only keeps a
+	// foreign Response implementation working, at the cost of buffering.
+	if res, ok := ctx.Response().(*response); ok {
+		res.setBodyStream(r, size)
+		return nil
+	}
+	defer closeStream(r)
+	if size >= 0 {
+		r = io.LimitReader(r, size)
+	}
+	_, err := io.Copy(ctx.Response(), r)
+	return err
+}
+
+// SendFile streams the file at path as the response, with headers chosen
+// by its extension as in File, Last-Modified from the file, and a 304 for
+// a client whose cached copy is still current. The file is never read
+// into memory: it is copied to the connection after the handler returns,
+// by sendfile(2) on plain TCP (see Stream). Downloadable types are offered
+// under the file's base name; use SendFileAs to choose another.
+//
+// A missing file, or a directory, is returned as an error that matches
+// os.ErrNotExist, for the handler to turn into a 404 if it likes.
+func SendFile(ctx Context, path string) error {
+	return SendFileAs(ctx, path, filepath.Base(path))
+}
+
+// SendFileAs is SendFile with name in place of the file's own base name:
+// it picks the Content-Type and, for downloadable types, is the name the
+// browser saves the file as. Useful when the file on disk has a temporary
+// or internal name, such as a dump written to a scratch directory.
+func SendFileAs(ctx Context, path, name string) error {
+	// Open first and Stat the open file: the size and mod time then
+	// describe the very file whose bytes are sent, not whatever the path
+	// pointed at a moment earlier.
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	if info.IsDir() {
+		_ = f.Close()
+		return &os.PathError{Op: "send", Path: path, Err: errIsDir}
+	}
+
+	if notModifiedSince(ctx, info.ModTime()) {
+		_ = f.Close()
+		ctx.SetStatus(consts.StatusNotModified)
+		return nil
+	}
+
+	setFileHeaders(ctx, name, info.ModTime())
+	return Stream(ctx, f, info.Size())
+}
+
+// errIsDir is what SendFile reports for a directory. It wraps
+// os.ErrNotExist because, to a client asking for a file, a directory at
+// that path is no file at all, and it keeps one errors.Is check enough to
+// map both cases to a 404.
+var errIsDir = fmt.Errorf("is a directory: %w", os.ErrNotExist)
+
+// notModifiedSince reports whether the request's If-Modified-Since shows
+// the client already holds the version last modified at modTime, so a 304
+// can be sent instead of the body. Last-Modified has one-second
+// resolution, so the comparison is made at that grain. An absent or
+// unparseable header means the body must be sent.
+func notModifiedSince(ctx Context, modTime time.Time) bool {
+	ims := ctx.Request().Header(consts.HeaderIfModifiedSince)
+	if ims == "" {
+		return false
+	}
+	t, err := http.ParseTime(ims)
+	return err == nil && !modTime.Truncate(time.Second).After(t)
 }
 
 // JS sends the body with the content type set to `text/javascript`.

@@ -215,8 +215,8 @@ type context struct {
 	respBuf bytes.Buffer
 	// synthetic marks a context made by Server.Request, whose response is
 	// returned in memory rather than written to a connection. writeResponse
-	// reads a pending body file into the body for it instead of streaming
-	// the file to a writer that discards it.
+	// reads a pending body stream into the body for it instead of streaming
+	// it to a writer that discards it.
 	synthetic bool
 }
 
@@ -230,9 +230,9 @@ func (ctx *context) Clean() {
 	ctx.request.body = ctx.request.body[:0]
 	ctx.response.headers = ctx.response.headers[:0]
 	ctx.response.body = ctx.response.body[:0]
-	// A body file still pending here was never sent (an error path, or a
+	// A body stream still pending here was never sent (an error path, or a
 	// synthetic request whose caller never read Body); release it.
-	ctx.response.closeBodyFile()
+	ctx.response.closeBodyStream()
 	ctx.params = ctx.params[:0]
 
 	// ContentType is a cached []byte shortcut populated when the
