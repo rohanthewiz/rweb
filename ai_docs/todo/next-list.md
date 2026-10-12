@@ -46,15 +46,7 @@ Items whose remaining work is purely testing: run, look, measure, or write or
 repair the test that covers it. No product change is planned unless the check
 finds a defect. Same item form as Open.
 
-- **N-016** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · value low
-  The keep-alive `ctx.conn` restore was verified through `GetConn()` only. No
-  test drives a WebSocket upgrade or an SSE stream as the *second* request on a
-  reused connection (checked `websocket_test.go`, `websocket_deflate_test.go`,
-  `sse_test.go`, `sse_hub_test.go`). Re-checked 2026-10-10 after `0700738`:
-  `request_context_test.go` adds WS and SSE tests, but each upgrades or streams
-  on the conn's first request; `TestRequestContextKeepAlive` reuses a conn only
-  for plain requests. Still owed. Moved here from Open 2026-10-10 (pure test
-  work).
+_(none)_
 
 ## Roadmap
 
@@ -79,6 +71,17 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-016** · raised `2026-0919-2229-next-list-scheme-host-symlinks` · closed 2026-10-11, 2026-1011-2014-n016-keepalive-ws-sse-tests
+  No test drove a WebSocket upgrade or an SSE stream as a later request on a
+  reused connection, so the keep-alive `ctx.conn` restore (`Server.go`, end of
+  the `handleConnection` loop) was covered only through `GetConn()`. Done:
+  `request_context_test.go` adds `TestRequestContextWebSocketAfterKeepAlive`
+  and `TestRequestContextSSEAfterKeepAlive` (tcp and tls), each serving two
+  plain requests before the upgrade or stream. The SSE producer goes quiet
+  after its events, so `sendSSE`'s read on `ctx.conn` is the only disconnect
+  signal. With the restore line commented out, both fail (the upgrade panics on
+  a nil conn; the stream never sees the client leave); restored, both pass,
+  and `go test -race ./...` is green.
 - **N-007** · raised `2026-0509-2336-fix-multipart-form-state-leaks` · closed 2026-10-11, 2026-1011-1411-n007-staticcheck-dead-code
   Dead code and one simplification flagged by `staticcheck ./...`. Done
   (re-run with `honnef.co/go/tools` v0.8.1, since the installed binary

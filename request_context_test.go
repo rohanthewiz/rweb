@@ -623,3 +623,113 @@ func TestRequestContextSSEServerEnds(t *testing.T) {
 	}
 	recv(t, producerDone, "producer exit")
 }
+
+// --- Takeover on a reused connection -----------------------------------------
+//
+// handleConnection serves keep-alive requests with one pooled context, and
+// Clean() between them drops ctx.conn, which the loop then restores. The
+// WebSocket and SSE paths are the ones that read ctx.conn directly
+// (UpgradeWebSocket wraps it, sendSSE parks its disconnect read on it), so
+// these tests run each as the *second and later* request on a connection,
+// after plain requests have gone through the Clean/restore step:
+//
+//	conn ── GET /plain ── GET /plain ── Clean() + restore ── upgrade | stream
+//	                                          ▲
+//	                            ctx.conn nil here without the restore
+
+// A WebSocket upgrade after keep-alive requests: the 101 and the echo prove
+// the upgrade got the live conn, and the context is cancelled when the peer
+// leaves, as for an upgrade on a fresh connection.
+func TestRequestContextWebSocketAfterKeepAlive(t *testing.T) {
+	for _, tr := range transports {
+		t.Run(tr.name, func(t *testing.T) {
+			ctxs := make(chan stdctx.Context, 1)
+			s := wsServer(ctxs, nil)
+			s.Get("/plain", func(ctx Context) error {
+				return ctx.WriteString("plain")
+			})
+			c := dialTest(t, serveTest(t, s, tr), tr)
+			br := bufio.NewReader(c)
+
+			for i := 0; i < 2; i++ {
+				writeAll(t, c, getReq("/plain"))
+				if status, body := readBody(t, br); status != 200 || body != "plain" {
+					t.Fatalf("keep-alive request %d: %d %q", i, status, body)
+				}
+			}
+
+			writeAll(t, c, wsUpgradeReq)
+			ws := wsClient(t, c, br)
+			rc := recv(t, ctxs, "request context")
+			for _, m := range []string{"one", "two"} {
+				if err := ws.WriteMessage(TextMessage, []byte(m)); err != nil {
+					t.Fatal(err)
+				}
+				expectEcho(t, ws, m)
+			}
+			if rc.Err() != nil {
+				t.Fatalf("context ended during a live WebSocket session: %v", rc.Err())
+			}
+
+			_ = c.Close()
+			waitDone(t, rc, "after the WebSocket peer left")
+		})
+	}
+}
+
+// An SSE stream after keep-alive requests must still see the client leave.
+// The producer sends a few events and then goes quiet, waiting only on the
+// request context. That leaves sendSSE's read on ctx.conn as the sole
+// disconnect signal: the request-context watch is stopped before the stream
+// starts, and with no events there is no failed write to notice the close
+// either. Were ctx.conn nil, that read would never start and the stream (and
+// producer) would outlive the client.
+func TestRequestContextSSEAfterKeepAlive(t *testing.T) {
+	for _, tr := range transports {
+		t.Run(tr.name, func(t *testing.T) {
+			const events = 3
+			producerDone := make(chan struct{})
+			s := NewServer()
+			s.Get("/plain", func(ctx Context) error {
+				return ctx.WriteString("plain")
+			})
+			s.Get("/events", func(ctx Context) error {
+				rc := ctx.Request().Context()
+				ch := make(chan any)
+				go func() {
+					defer close(producerDone)
+					for i := 0; i < events; i++ {
+						select {
+						case <-rc.Done():
+							return
+						case ch <- fmt.Sprintf("tick %d", i):
+						}
+					}
+					// Quiet from here on; the channel stays open so only a
+					// detected disconnect can end the stream.
+					<-rc.Done()
+				}()
+				return ctx.SetSSE(ch, "tick")
+			})
+			c := dialTest(t, serveTest(t, s, tr), tr)
+			br := bufio.NewReader(c)
+
+			for i := 0; i < 2; i++ {
+				writeAll(t, c, getReq("/plain"))
+				if status, body := readBody(t, br); status != 200 || body != "plain" {
+					t.Fatalf("keep-alive request %d: %d %q", i, status, body)
+				}
+			}
+
+			writeAll(t, c, "GET /events HTTP/1.1\r\nHost: test\r\nAccept: text/event-stream\r\n\r\n")
+			readEvents(t, br, events)
+
+			_ = c.Close()
+			select {
+			case <-producerDone:
+			case <-time.After(waitFor):
+				t.Fatal("SSE stream on a reused connection did not notice the client leave")
+			}
+		})
+	}
+}
