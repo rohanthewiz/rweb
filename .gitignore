@@ -4,6 +4,8 @@
 .DS_Store
 .qodo
 .claude/
+.cats-todo/
+.ced/
 
 play/
 testing/
