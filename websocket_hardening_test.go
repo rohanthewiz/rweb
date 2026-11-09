@@ -233,6 +233,14 @@ func drain(c net.Conn) {
 // after the 101.
 func upgradeOn(t *testing.T, s *Server, extraHeaders string) (net.Conn, *bufio.Reader) {
 	t.Helper()
+	c, br, _ := upgradeResp(t, s, extraHeaders)
+	return c, br
+}
+
+// upgradeResp is upgradeOn that also returns the 101 response, for its
+// headers.
+func upgradeResp(t *testing.T, s *Server, extraHeaders string) (net.Conn, *bufio.Reader, *http.Response) {
+	t.Helper()
 	tr := transports[0]
 	c := dialTest(t, serveTest(t, s, tr), tr)
 	t.Cleanup(func() { _ = c.Close() })
@@ -246,7 +254,7 @@ func upgradeOn(t *testing.T, s *Server, extraHeaders string) (net.Conn, *bufio.R
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("upgrade: status %d, want 101", resp.StatusCode)
 	}
-	return c, br
+	return c, br, resp
 }
 
 // A peer that stops reading must not block a writer forever: with
@@ -601,5 +609,62 @@ func TestWebSocketAppReadDeadlineCleared(t *testing.T) {
 	case r := <-res:
 		t.Fatalf("read ended after the app cleared its deadline: %v", r.err)
 	default:
+	}
+}
+
+// --- subprotocols ------------------------------------------------------------
+
+// The server picks the first subprotocol the client offers that the route
+// lists (the client orders its offer by preference), and answers with no
+// Sec-WebSocket-Protocol at all when nothing matches or the route lists
+// none: echoing an offer back unchecked claimed a protocol the handler may
+// not speak.
+func TestWebSocketSubprotocolSelection(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured []string // nil and opts==nil: s.WebSocket
+		useOpts    bool
+		offered    []string // one Sec-WebSocket-Protocol line each
+		want       string
+	}{
+		{"s.WebSocket lists none", nil, false, []string{"chat, superchat"}, ""},
+		{"options list none", nil, true, []string{"chat"}, ""},
+		{"first offered that is listed", []string{"superchat", "chat"}, true, []string{"chat, superchat"}, "chat"},
+		{"skips unlisted offers", []string{"v2"}, true, []string{"v1, v2"}, "v2"},
+		{"no match", []string{"v2"}, true, []string{"v1"}, ""},
+		{"nothing offered", []string{"chat"}, true, nil, ""},
+		{"offer split over header lines", []string{"b"}, true, []string{"a", "b"}, "b"},
+		{"case-sensitive", []string{"Chat"}, true, []string{"chat"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer()
+			got := make(chan string, 1)
+			h := func(ws *WSConn) error {
+				got <- ws.Subprotocol()
+				return nil
+			}
+			if tc.useOpts {
+				s.WebSocketWithOptions("/ws", WSOptions{Subprotocols: tc.configured}, h)
+			} else {
+				s.WebSocket("/ws", h)
+			}
+			extra := ""
+			for _, o := range tc.offered {
+				extra += "Sec-WebSocket-Protocol: " + o + "\r\n"
+			}
+			_, _, resp := upgradeResp(t, s, extra)
+
+			hdr, present := resp.Header["Sec-Websocket-Protocol"]
+			if tc.want == "" && present {
+				t.Fatalf("Sec-WebSocket-Protocol %q sent, want none", hdr)
+			}
+			if tc.want != "" && (len(hdr) != 1 || hdr[0] != tc.want) {
+				t.Fatalf("Sec-WebSocket-Protocol %q, want %q", hdr, tc.want)
+			}
+			if p := recv(t, got, "handler"); p != tc.want {
+				t.Fatalf("ws.Subprotocol() = %q, want %q", p, tc.want)
+			}
+		})
 	}
 }

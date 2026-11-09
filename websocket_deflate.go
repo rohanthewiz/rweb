@@ -75,6 +75,13 @@ type WSOptions struct {
 	// (true) or refused with 403 (false), Origin header or not; the default
 	// check and AllowedOrigins are then not consulted.
 	CheckOrigin func(Context) bool
+
+	// Subprotocols the handler speaks (Sec-WebSocket-Protocol, RFC 6455
+	// §1.9). The first one the client offers that is listed here is
+	// selected and echoed in the 101; with no match, or none listed, the
+	// response names no subprotocol. Exact, case-sensitive match. The
+	// selection is WSConn.Subprotocol().
+	Subprotocols []string
 }
 
 // deflateTail completes a message for the inflater: the 00 00 ff ff the

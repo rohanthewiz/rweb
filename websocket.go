@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -132,6 +133,9 @@ type WSConn struct {
 	// resolved): each flush gets now+writeTimeout unless an explicit
 	// writeDeadline is set. 0 means none, as for a bare NewWSConn.
 	writeTimeout time.Duration
+	// subprotocol is the one selected at the handshake ("" for none).
+	subprotocol string
+
 	// pingInterval is how often the keepalive goroutine pings (0: no pings).
 	// readWindow is how long the peer may stay silent before a read fails:
 	// pingInterval + pongTimeout, or 0 for no liveness deadline. Both are set
@@ -329,10 +333,6 @@ func resolveWSDuration(d, def time.Duration) time.Duration {
 	return d
 }
 
-// performHandshake performs the WebSocket handshake on the server side
-// This validates the client's request and sends the appropriate response.
-// The returned deflate state is non-nil when permessage-deflate was
-// negotiated (opts.Compression and a client offer this side can honour).
 // rejectWebSocketRequest answers a request to a WebSocket route
 // (s.WebSocket, s.WebSocketWithOptions) that is not a valid opening
 // handshake. Such a request is the client's mistake, not a server failure,
@@ -426,25 +426,30 @@ func originAllowed(ctx Context, opts WSOptions) bool {
 	return false
 }
 
-func performHandshake(ctx *context, opts WSOptions) (*wsDeflate, error) {
+// performHandshake performs the WebSocket handshake on the server side
+// This validates the client's request and sends the appropriate response.
+// The returned deflate state is non-nil when permessage-deflate was
+// negotiated (opts.Compression and a client offer this side can honour);
+// subprotocol is the one selected from opts.Subprotocols, "" for none.
+func performHandshake(ctx *context, opts WSOptions) (deflate *wsDeflate, subprotocol string, err error) {
 	// Check for required headers. The Upgrade token is case-insensitive
 	// (RFC 6455 §4.2.1).
 	if !strings.EqualFold(ctx.request.Header("Upgrade"), "websocket") {
-		return nil, errors.New("missing or invalid Upgrade header")
+		return nil, "", errors.New("missing or invalid Upgrade header")
 	}
 
 	if !strings.Contains(strings.ToLower(ctx.request.Header("Connection")), "upgrade") {
-		return nil, errors.New("missing or invalid Connection header")
+		return nil, "", errors.New("missing or invalid Connection header")
 	}
 
 	key := ctx.request.Header("Sec-WebSocket-Key")
 	if key == "" {
-		return nil, errors.New("missing Sec-WebSocket-Key header")
+		return nil, "", errors.New("missing Sec-WebSocket-Key header")
 	}
 
 	version := ctx.request.Header("Sec-WebSocket-Version")
 	if version != "13" {
-		return nil, errors.New("unsupported WebSocket version")
+		return nil, "", errors.New("unsupported WebSocket version")
 	}
 
 	// Calculate the accept key
@@ -458,24 +463,49 @@ func performHandshake(ctx *context, opts WSOptions) (*wsDeflate, error) {
 	ctx.response.SetHeader("Connection", "Upgrade")
 	ctx.response.SetHeader("Sec-WebSocket-Accept", acceptKey)
 
-	// Handle optional protocol header
-	if protocol := ctx.request.Header("Sec-WebSocket-Protocol"); protocol != "" {
-		// For now, accept the first protocol offered
-		// In a real implementation, you'd validate against supported protocols
-		protocols := strings.Split(protocol, ",")
-		if len(protocols) > 0 {
-			ctx.response.SetHeader("Sec-WebSocket-Protocol", strings.TrimSpace(protocols[0]))
-		}
+	// Subprotocol: only one the route lists may be named in the 101. The
+	// first offered protocol used to be echoed back unchecked, which told the
+	// client the handler speaks a protocol it may never have heard of. A
+	// client whose offer is declined gets no header, and decides for itself
+	// whether to carry on without a subprotocol (RFC 6455 §4.1 only fails a
+	// response that names one the client did not offer).
+	if subprotocol = selectSubprotocol(ctx.request.headers, opts.Subprotocols); subprotocol != "" {
+		ctx.response.SetHeader("Sec-WebSocket-Protocol", subprotocol)
 	}
 
-	var deflate *wsDeflate
 	if opts.Compression {
 		if offer, ok := parseDeflateOffer(ctx.request.Header("Sec-WebSocket-Extensions")); ok {
 			ctx.response.SetHeader("Sec-WebSocket-Extensions", offer.response())
 			deflate = newServerDeflate(offer, opts.CompressionLevel)
 		}
 	}
-	return deflate, nil
+	return deflate, subprotocol, nil
+}
+
+// selectSubprotocol returns the first subprotocol the client offers that
+// supported lists, or "" when there is none.
+//
+// The offer is every Sec-WebSocket-Protocol header line, each a
+// comma-separated list, in the client's order of preference (RFC 6455
+// §4.1, §11.3.4); the first match in that order wins, so the client's
+// preference decides between two protocols both sides speak. Tokens are
+// compared exactly: subprotocol names are case-sensitive.
+func selectSubprotocol(headers []Header, supported []string) string {
+	if len(supported) == 0 {
+		return ""
+	}
+	for _, h := range headers {
+		if !strings.EqualFold(h.Key, "Sec-WebSocket-Protocol") {
+			continue
+		}
+		for _, offered := range strings.Split(h.Value, ",") {
+			offered = strings.TrimSpace(offered)
+			if offered != "" && slices.Contains(supported, offered) {
+				return offered
+			}
+		}
+	}
+	return ""
 }
 
 // ReadMessage reads a complete message from the WebSocket connection
@@ -1020,6 +1050,12 @@ func (ws *WSConn) SetWriteDeadline(t time.Time) error {
 // LocalAddr returns the local network address
 func (ws *WSConn) LocalAddr() net.Addr {
 	return ws.conn.LocalAddr()
+}
+
+// Subprotocol returns the subprotocol selected at the handshake from
+// WSOptions.Subprotocols, or "" when none was (see performHandshake).
+func (ws *WSConn) Subprotocol() string {
+	return ws.subprotocol
 }
 
 // RemoteAddr returns the remote network address

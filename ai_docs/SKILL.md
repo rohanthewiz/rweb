@@ -736,6 +736,22 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
   and failing writes once `t` is past); the zero time clears it. A write that
   fails after part of a frame went out leaves the stream unusable, and every
   later write returns the same error.
+- **Subprotocols** (`WSOptions.Subprotocols []string`): the server selects the
+  first protocol the client offers (`Sec-WebSocket-Protocol`, in the client's
+  preference order) that the route lists, exact match, and names it in the 101;
+  `ws.Subprotocol()` returns it. With no match, or none listed (`s.WebSocket`,
+  `ctx.UpgradeWebSocket()`), the response names no subprotocol — an offer is
+  never echoed back unchecked.
+
+  ```go
+  s.WebSocketWithOptions("/ws", rweb.WSOptions{Subprotocols: []string{"chat.v2", "chat.v1"}},
+      func(ws *rweb.WSConn) error {
+          switch ws.Subprotocol() { // "chat.v2", "chat.v1" or ""
+          // ...
+          }
+          return nil
+      })
+  ```
 - A ping, pong or close frame longer than 125 bytes, or without FIN, fails the
   connection: `ReadMessage` returns `rweb.ErrWebSocketBadControlFrame`, a close
   frame with code 1002 is sent and the connection is closed (RFC 6455 §5.5).
@@ -787,6 +803,7 @@ ws.SetWriteDeadline(time.Now().Add(10 * time.Second)) // overrides WSOptions.Wri
 // Connection info
 ws.RemoteAddr()  // Client's network address
 ws.LocalAddr()   // Server's network address
+ws.Subprotocol() // Subprotocol selected from WSOptions.Subprotocols ("" for none)
 ```
 
 ### Chat Server with Broadcasting

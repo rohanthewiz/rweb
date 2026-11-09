@@ -751,7 +751,7 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 	}
 
 	// Perform the WebSocket handshake
-	deflate, err := performHandshake(ctx, opts)
+	deflate, subprotocol, err := performHandshake(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -778,6 +778,7 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 		ctx.wsConn.r = io.MultiReader(bytes.NewReader(lead), ctx.conn)
 	}
 	ctx.wsConn.deflate = deflate
+	ctx.wsConn.subprotocol = subprotocol
 	// Route options with their defaults (write timeout, pings); a manual
 	// UpgradeWebSocket gets the defaults through its zero WSOptions. The
 	// keepalive starts last, once ws.r is final, since it wraps it; its

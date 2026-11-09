@@ -263,6 +263,7 @@ defaults are chosen to be safe, and apply to `s.WebSocket` and `ctx.UpgradeWebSo
 | `AllowedOrigins`, `CheckOrigin` | same origin | A browser handshake whose `Origin` host differs from the request's `Host` gets 403 (browsers send cookies cross-site and apply no CORS to WebSockets). No `Origin` header (non-browser clients) is allowed. `AllowedOrigins` adds origins (`"*"` allows all); `CheckOrigin` replaces the check. |
 | `PingInterval` | 30 s (negative disables) | The server pings the peer; every frame received extends the read deadline to interval + `PongTimeout` (10 s), so a vanished peer makes `ReadMessage` fail instead of blocking forever. `ws.SetReadDeadline` still applies; the earlier deadline wins. |
 | `WriteTimeout` | 10 s (negative disables) | Each socket write must finish in time, so a peer that stops reading cannot block a writer forever. `ws.SetWriteDeadline` overrides it while set. |
+| `Subprotocols` | none | The first protocol the client offers that is listed is selected (`ws.Subprotocol()`); with no match, no `Sec-WebSocket-Protocol` is sent. |
 | `Compression` | off | permessage-deflate with clients that offer it. |
 
 Control frames over 125 bytes or without FIN fail the connection with close code 1002.
