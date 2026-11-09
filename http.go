@@ -94,6 +94,60 @@ func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path 
 	return
 }
 
+// isValidHeaderKey reports whether k is a legal header field name:
+//
+//	field-name = token                                     (RFC 9110 §5.1)
+//	token      = 1*tchar
+//	tchar      = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+//	             "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+//
+// Anything else — space, ":", CR, LF, NUL, a non-ASCII byte, an empty name —
+// either breaks the "Name: value" line it is written into or makes a client
+// read it differently from the server. Like isValidHostHeader it is a byte
+// loop rather than a regexp or net/http's validator, so it allocates nothing.
+func isValidHeaderKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) != -1:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// headerValueBreakers are the bytes that must not reach the wire inside a
+// header value: CR and LF end the line (and so let the value start a header
+// of its own), and NUL truncates the line in some C-based parsers.
+const headerValueBreakers = "\r\n\x00"
+
+// sanitizeHeaderValue returns v with each CR, LF and NUL replaced by a space,
+// which is what net/http does to response header values. Replacing rather
+// than rejecting keeps the header (a redirect still redirects, to a URL that
+// no longer smuggles a second header) and keeps the byte count, so offsets a
+// caller computed still hold.
+//
+// The value is almost always clean, so the common path is one IndexAny scan
+// that returns v itself: no allocation. Only a dirty value is copied.
+func sanitizeHeaderValue(v string) string {
+	i := strings.IndexAny(v, headerValueBreakers)
+	if i == -1 {
+		return v
+	}
+	b := []byte(v)
+	for ; i < len(b); i++ {
+		if c := b[i]; c == '\r' || c == '\n' || c == 0 {
+			b[i] = ' '
+		}
+	}
+	return string(b)
+}
+
 // isValidHostHeader reports whether v is an acceptable Host header value:
 //
 //	Host = uri-host [ ":" port ]        (RFC 9110 §7.2, RFC 3986 §3.2.2)

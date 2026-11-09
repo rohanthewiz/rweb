@@ -160,6 +160,14 @@ ctx.SetStatus(404).WriteString("Not found")
 ctx.Redirect(302, "/new-location")
 ```
 
+Response headers are checked as they are set (v0.2.1+), by `SetHeader`, `AddHeader` and
+everything built on them (`Redirect`, `SetCookie`, `SendFileAs`, ...): CR, LF and NUL in a
+value are replaced with a space, so a value taken from the request cannot start a header line
+of its own, and a header whose name is not an RFC 9110 token (a space, `:`, non-ASCII, empty)
+is dropped with a log line. `Header()` returns the value as it will be sent. This does not make
+`ctx.Redirect(302, ctx.Request().QueryParam("to"))` safe as an open redirect; validate the
+target yourself.
+
 ## Middleware
 
 Middleware executes in registration order. Call `ctx.Next()` to continue the chain.

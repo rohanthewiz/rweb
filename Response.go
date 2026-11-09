@@ -156,7 +156,25 @@ func (res *response) Header(key string) (value string) {
 }
 
 // SetHeader sets a header
+//
+// SetHeader and AddHeader are the only ways into res.headers, which
+// writeResponse copies to the wire verbatim as "Key: Value\r\n". So both
+// enforce the header grammar here, on the way in, rather than at write
+// time: Header() then reads back exactly what will be sent, and the write
+// path stays a plain copy.
+//
+//   - A value with CR, LF or NUL has each replaced by a space. Values often
+//     come from the request (ctx.Redirect(302, QueryParam("to"))), and a
+//     decoded "%0d%0a" would otherwise end the line and let the client
+//     append headers of its own, a Set-Cookie for instance.
+//   - A key that is not an RFC 9110 token is dropped, with a log line. A bad
+//     key is a programming error rather than client input, but there is no
+//     safe way to send it, and no error result to report it through.
 func (res *response) SetHeader(key string, value string) {
+	if !acceptHeaderKey(key) {
+		return
+	}
+	value = sanitizeHeaderValue(value)
 	for i, header := range res.headers {
 		if header.Key == key {
 			res.headers[i].Value = value
@@ -167,8 +185,25 @@ func (res *response) SetHeader(key string, value string) {
 }
 
 // AddHeader adds a header (allows multiple values for the same key, like Set-Cookie)
+// The key and value are checked as in SetHeader.
 func (res *response) AddHeader(key string, value string) {
-	res.headers = append(res.headers, Header{Key: key, Value: value})
+	if !acceptHeaderKey(key) {
+		return
+	}
+	res.headers = append(res.headers, Header{Key: key, Value: sanitizeHeaderValue(value)})
+}
+
+// acceptHeaderKey reports whether key may be stored as a response header,
+// logging the ones refused. The log is unconditional because the response
+// has no reference to the server's Debug option, and a dropped header is
+// a bug in the caller that should not pass silently. %q keeps a key with
+// CR or LF in it on one log line.
+func acceptHeaderKey(key string) bool {
+	if isValidHeaderKey(key) {
+		return true
+	}
+	log.Printf("rweb: dropping response header with invalid name %q", key)
+	return false
 }
 
 // SetBody replaces the response body with the new contents.
