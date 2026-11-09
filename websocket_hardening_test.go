@@ -10,9 +10,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -609,6 +611,123 @@ func TestWebSocketAppReadDeadlineCleared(t *testing.T) {
 	case r := <-res:
 		t.Fatalf("read ended after the app cleared its deadline: %v", r.err)
 	default:
+	}
+}
+
+// --- the WebSocket handler's error -------------------------------------------
+
+// syncBuffer is a bytes.Buffer safe for the log package writing from server
+// goroutines while the test reads it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// captureLog sends the standard logger's output to a buffer for the test.
+func captureLog(t *testing.T) *syncBuffer {
+	buf := &syncBuffer{}
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return buf
+}
+
+// After the upgrade the connection speaks WebSocket, so the error handler's
+// HTML page could never be sent; and the error a read loop most often
+// returns is the peer leaving. Neither reaches the error handler, and only
+// an error other than a close or EOF is logged.
+func TestWebSocketHandlerErrorAfterUpgrade(t *testing.T) {
+	cases := []struct {
+		name    string
+		peer    func(t *testing.T, c net.Conn, client *WSConn) // how the peer ends the session
+		handler func(ws *WSConn) error
+		logged  string // "" means nothing may be logged
+	}{
+		{
+			name: "peer sends a close frame",
+			peer: func(t *testing.T, c net.Conn, client *WSConn) {
+				_ = writeRawFrame(c, wsClose, true, true, []byte{0x03, 0xE8})
+				_, _ = client.ReadMessage() // the close reply
+			},
+			handler: readLoop,
+		},
+		{
+			name:    "peer drops the connection",
+			peer:    func(t *testing.T, c net.Conn, _ *WSConn) { _ = c.Close() },
+			handler: readLoop,
+		},
+		{
+			name: "handler's own error",
+			peer: func(t *testing.T, c net.Conn, client *WSConn) {},
+			handler: func(ws *WSConn) error {
+				return errors.New("boom: the app failed")
+			},
+			logged: "boom: the app failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLog(t)
+			s := NewServer()
+			handlerErrs := make(chan error, 1)
+			s.errorHandler = func(_ Context, err error) { handlerErrs <- err }
+			returned := make(chan error, 1)
+			s.WebSocket("/ws", func(ws *WSConn) error {
+				err := tc.handler(ws)
+				returned <- err
+				return err
+			})
+
+			c, br := upgradeOn(t, s, "")
+			client := NewWSConn(c, false)
+			client.r = br
+			tc.peer(t, c, client)
+			recv(t, returned, "the WebSocket handler to return")
+
+			if tc.logged != "" {
+				deadline := time.Now().Add(waitFor)
+				for !strings.Contains(logs.String(), tc.logged) {
+					if time.Now().After(deadline) {
+						t.Fatalf("handler error not logged; log: %q", logs.String())
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			} else {
+				// handleRequest logs right after the handler returns; give it
+				// time to, were it going to.
+				time.Sleep(settle)
+				if out := logs.String(); out != "" {
+					t.Fatalf("a normal end of the session was logged: %q", out)
+				}
+			}
+			select {
+			case err := <-handlerErrs:
+				t.Fatalf("error handler called after the upgrade: %v", err)
+			default:
+			}
+		})
+	}
+}
+
+// readLoop is a WebSocket handler that returns ReadMessage's error, as
+// most real handlers do.
+func readLoop(ws *WSConn) error {
+	for {
+		if _, err := ws.ReadMessage(); err != nil {
+			return err
+		}
 	}
 }
 

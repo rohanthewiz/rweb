@@ -1629,7 +1629,17 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		}()
 		return s.handlers[0](ctx)
 	}()
-	if err != nil {
+	switch {
+	case err != nil && ctx.wsUpgraded:
+		// After a WebSocket upgrade the 101 is out and the connection speaks
+		// frames, so the error handler's page could never be sent (and its
+		// "[ERR]" line would fire for every session that ended with the
+		// read loop's error). Most such errors are just the peer leaving;
+		// log only the ones that say something more (isWebSocketSessionEnd).
+		if !isWebSocketSessionEnd(err) {
+			log.Printf("[ERR] websocket %q - error: %s\n", ctx.path, err)
+		}
+	case err != nil:
 		// An error response replaces a stream the handler attached before
 		// failing (rweb.Stream, SendFile). The error handler writes its
 		// page through the body accessors, which would otherwise read the

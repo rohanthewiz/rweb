@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -309,6 +310,33 @@ func (ws *WSConn) effectiveReadDeadline(app time.Time) time.Time {
 		return app
 	}
 	return d
+}
+
+// isWebSocketSessionEnd reports whether err, returned by a WebSocket
+// handler, only says that the session ended the ordinary way, so it is not
+// worth a log line (handleRequest):
+//
+//	io.EOF, io.ErrUnexpectedEOF   peer closed the TCP connection (mid-frame, for
+//	                              the latter)
+//	net.ErrClosed, io.ErrClosedPipe
+//	                              the conn was closed here, typically by
+//	                              handleClose after the peer's close frame;
+//	                              the read after it fails this way
+//	ErrWebSocketAlreadyClosed     a write after the close handshake
+//	ECONNRESET, EPIPE             peer went away without a close frame (tab
+//	                              killed, process exited): the same event as
+//	                              EOF seen from the other side of a write
+//
+// Everything else — a protocol error, a read timeout from the ping window
+// (a vanished peer), the app's own errors — is still logged.
+func isWebSocketSessionEnd(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, ErrWebSocketAlreadyClosed) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
 }
 
 // finish ends the connection's life as far as WSConn is concerned once its

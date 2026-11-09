@@ -634,6 +634,14 @@ not logged as an error: a plain GET or a HEAD gets `426 Upgrade Required` with
 `Sec-WebSocket-Version: 13`, and an incomplete handshake gets 400. A
 cross-origin handshake gets 403 (see Safety Defaults).
 
+An error returned by the handler after the upgrade does not go to the error
+handler (its HTML page could not be sent on a WebSocket). It is logged as
+`[ERR] websocket "<path>" - error: ...`, unless it only reports the session
+ending — `io.EOF`, a closed connection (the read after the peer's close
+frame), `ErrWebSocketAlreadyClosed`, a connection reset — so a read loop can
+simply `return err`. The connection closes when the handler returns, and
+`ws.Done()` closes with it.
+
 ```go
 s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
     defer ws.Close(1000, "Closing")

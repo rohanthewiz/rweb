@@ -267,6 +267,9 @@ defaults are chosen to be safe, and apply to `s.WebSocket` and `ctx.UpgradeWebSo
 | `Compression` | off | permessage-deflate with clients that offer it. |
 
 Control frames over 125 bytes or without FIN fail the connection with close code 1002.
+An error the handler returns after the upgrade skips the error handler (no page can be sent
+on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
+connection, reset).
 
 ## Route Groups
 
