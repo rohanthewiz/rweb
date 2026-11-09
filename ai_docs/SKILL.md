@@ -158,6 +158,9 @@ ctx.SetStatus(404).WriteString("Not found")
 
 // Redirect
 ctx.Redirect(302, "/new-location")
+
+// 204 No Content
+ctx.NoContent()
 ```
 
 Response headers are checked as they are set (v0.2.1+), by `SetHeader`, `AddHeader` and
@@ -167,6 +170,11 @@ of its own, and a header whose name is not an RFC 9110 token (a space, `:`, non-
 is dropped with a log line. `Header()` returns the value as it will be sent. This does not make
 `ctx.Redirect(302, ctx.Request().QueryParam("to"))` safe as an open redirect; validate the
 target yourself.
+
+A 1xx, 204 or 304 response is sent as its status line and headers only: no
+`Content-Length`, no `Transfer-Encoding`, and no body. Anything the handler
+wrote, or a pending `rweb.Stream`, is dropped (the stream is closed unread), and
+an SSE stream on such a status is not started.
 
 ## Middleware
 

@@ -1665,13 +1665,21 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		ctx.response.materializeBody()
 	}
 
+	// A 1xx, 204 or 304 has no body, and its header block is the whole
+	// response: a client reads the next response straight after it (RFC
+	// 9112 §6.3). So it gets no body framing either: RFC 9110 §8.6 forbids
+	// Content-Length on a 1xx or 204, and on a 304 allows only the length
+	// the representation would have, which is not known here. Whatever the
+	// handler left to send is dropped below.
+	bodyless := statusHasNoBody(ctx.status)
+
 	// Body framing. SSE has neither header: the stream ends when the
 	// connection does. Otherwise a body of unknown length (a pending stream
 	// with no size) is chunked, and every other body states its length:
 	// the in-memory body plus any sized stream still to be sent after it
 	// (see response.bodyStream).
 	chunked := ctx.response.bodyChunked()
-	if ctx.sseEventsChan == nil {
+	if ctx.sseEventsChan == nil && !bodyless {
 		if chunked {
 			tmp.WriteString(consts.HeaderTransferEncoding)
 			tmp.WriteString(consts.ColonSpace)
@@ -1706,7 +1714,10 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// SSEHub registration made by the handler is undone at once. The
 	// connection loop closes the conn after any response with an events
 	// channel, which is harmless here.
-	if ctx.sseEventsChan != nil && ctx.request.method == consts.MethodHead {
+	//
+	// An event stream on a bodyless status (a handler that called SetSSE
+	// and then set 204, say) ends the same way: the stream would be a body.
+	if ctx.sseEventsChan != nil && (ctx.request.method == consts.MethodHead || bodyless) {
 		if ctx.sseCleanup != nil {
 			ctx.sseCleanup()
 		}
@@ -1716,8 +1727,12 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// Body
 	if ctx.sseEventsChan == nil {
 		// HEAD responses carry the same headers a GET would (including
-		// Content-Length above) but MUST NOT include a body (RFC 7231 §4.3.2)
-		if ctx.request.method != consts.MethodHead {
+		// Content-Length above) but MUST NOT include a body (RFC 7231 §4.3.2).
+		// Nor does a bodyless status, whatever the handler wrote: sending it
+		// would put stray bytes where the next response's status line goes.
+		// A pending stream is never read; it is only released below, which
+		// is how its producer (an io.Pipe writer, say) learns to stop.
+		if ctx.request.method != consts.MethodHead && !bodyless {
 			if chunked {
 				s.writeChunkedBody(ctx, respWriter)
 			} else {
@@ -1725,7 +1740,8 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 				s.writeBodyStream(ctx, respWriter)
 			}
 		}
-		// A HEAD never reads the stream at all; this just releases it.
+		// A HEAD (or a bodyless status) never reads the stream at all; this
+		// just releases it.
 		ctx.response.closeBodyStream()
 	} else {
 		// fmt.Println("RWEB: SSE events channel is set -- sending events")
@@ -1734,6 +1750,17 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 			fmt.Println("Error sending SSE events: ", err)
 		}
 	}
+}
+
+// statusHasNoBody reports whether a response with this status never has a
+// body: informational (1xx), 204 No Content and 304 Not Modified (RFC 9112
+// §6.3). writeResponse sends such a response as its header block alone,
+// with no Content-Length or Transfer-Encoding.
+//
+// A 101 that completes a WebSocket upgrade never reaches this:
+// UpgradeWebSocket writes its own response and writeResponse returns early.
+func statusHasNoBody(status uint16) bool {
+	return status < 200 || status == 204 || status == 304
 }
 
 // writeBodyStream streams a pending body stream of known size to the
