@@ -116,6 +116,16 @@ type request struct {
 	// a GetConn caller). The disconnect watch is then stopped and never
 	// restarted, since it would steal their bytes.
 	noWatch bool
+
+	// http10 is set for an "HTTP/1.0" request line, and connClose when the
+	// connection ends after this response: the request said
+	// "Connection: close", or is HTTP/1.0 without "keep-alive", or (set by
+	// writeResponse) the handler's response says close, or the body can
+	// only be delimited by closing. handleConnection assigns both for every
+	// request before the handler runs, so they need no reset in Clean; a
+	// synthetic Server.Request leaves them false, which writes nothing.
+	http10    bool
+	connClose bool
 }
 
 // Context returns the request's context.Context, created on first use.

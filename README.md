@@ -248,6 +248,11 @@ line folding) or malformed chunked framing gets `400`, and a transfer coding oth
 once its head has passed every check, and an oversized one gets `413` without its body ever
 being sent. Other expectations get `417`.
 
+Keep-alive follows RFC 9112: an HTTP/1.1 connection stays open unless the request (or the
+handler's response) says `Connection: close`, and an HTTP/1.0 connection closes after each
+response unless the client asks for `Connection: keep-alive`. An HTTP/1.0 client is never sent
+chunked encoding: a body of unknown length goes to it unframed and the connection closes after.
+
 ## Request Context and Cancellation
 
 `ctx.Request().Context()` returns a `context.Context` for the request, like net/http's

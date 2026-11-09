@@ -1504,6 +1504,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 		// defined, and the only one rweb can meet.
 		var expectContinue, expectUnmet bool
 
+		// Connection options, gathered over every Connection line.
+		var askedClose, askedKeepAlive bool
+
 		// Read headers until we meet an empty line
 		for {
 			message, err = lr.readLine() // read a line, charged to the head's budget
@@ -1605,8 +1608,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 				} else {
 					expectUnmet = true
 				}
+			} else if strings.EqualFold(key, consts.HeaderConnection) {
+				askedClose = askedClose || hasToken(value, consts.ConnectionClose)
+				askedKeepAlive = askedKeepAlive || hasToken(value, consts.HeaderKeepAlive)
 			}
 		}
+
+		// Persistence (RFC 9112 §9.3): HTTP/1.1 keeps the connection unless
+		// the client says close; HTTP/1.0 closes it unless the client asks
+		// for keep-alive. Close wins if a client says both. writeResponse
+		// adds the matching Connection header, and the loop below ends after
+		// a response that closes.
+		ctx.request.http10 = isHTTP10
+		ctx.request.connClose = askedClose || (isHTTP10 && !askedKeepAlive)
 
 		// Transfer-Encoding decides the framing on its own (RFC 9112 §6.1),
 		// and only exactly "chunked" is decoded. With Content-Length as
@@ -1748,6 +1762,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 		// explicit, since a byte the disconnect watch read ahead would let the
 		// next read start succeeding before it hit that deadline.
 		if ctx.sseEventsChan != nil {
+			return
+		}
+
+		// The response said Connection: close (see writeResponse for when):
+		// the client will read no further response on this connection, and
+		// one whose body was delimited by the close must actually close.
+		if ctx.request.connClose {
 			return
 		}
 
@@ -1992,7 +2013,19 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// the in-memory body plus any sized stream still to be sent after it
 	// (see response.bodyStream).
 	chunked := ctx.response.bodyChunked()
-	if ctx.sseEventsChan == nil && !bodyless {
+
+	// HTTP/1.0 has no chunked encoding (RFC 9112 §7.1: a server MUST NOT
+	// send it to a 1.0 client). A body of unknown length goes to a 1.0
+	// client unframed, with neither framing header, and the close of the
+	// connection marks its end, the only delimiter 1.0 has. So the
+	// connection closes after it, keep-alive or not.
+	unframed := chunked && ctx.request.http10
+	if unframed {
+		chunked = false
+		ctx.request.connClose = true
+	}
+
+	if ctx.sseEventsChan == nil && !bodyless && !unframed {
 		if chunked {
 			tmp.WriteString(consts.HeaderTransferEncoding)
 			tmp.WriteString(consts.ColonSpace)
@@ -2005,12 +2038,43 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		tmp.WriteString(consts.CRLF)
 	}
 
-	// Other Headers
+	// Other Headers. A Connection header the handler set is sent as is,
+	// and its "close" is honoured: a server that sends close MUST close the
+	// connection after the response (RFC 9112 §9.6), which the request loop
+	// used to skip, leaving the client and server each waiting on the other.
+	handlerConnHeader := false
 	for _, header := range ctx.response.headers {
+		if strings.EqualFold(header.Key, consts.HeaderConnection) {
+			handlerConnHeader = true
+			if hasToken(header.Value, consts.ConnectionClose) {
+				ctx.request.connClose = true
+			}
+		}
 		tmp.WriteString(header.Key)
 		tmp.WriteString(consts.ColonSpace)
 		tmp.WriteString(header.Value)
 		tmp.WriteString(consts.CRLF)
+	}
+
+	// Otherwise say what happens to the connection when it is not the
+	// default the client assumes: "close" when it ends after this response
+	// (the client asked, it is HTTP/1.0 without keep-alive, or the body is
+	// delimited by the close), and "keep-alive" to a 1.0 client that asked
+	// for it, which without the header assumes the server closes. An event
+	// stream always ends with the connection, so it is never told
+	// keep-alive here. HTTP/1.1 keep-alive, the common case, adds nothing.
+	if !handlerConnHeader {
+		if ctx.request.connClose {
+			tmp.WriteString(consts.HeaderConnection)
+			tmp.WriteString(consts.ColonSpace)
+			tmp.WriteString(consts.ConnectionClose)
+			tmp.WriteString(consts.CRLF)
+		} else if ctx.request.http10 && ctx.sseEventsChan == nil {
+			tmp.WriteString(consts.HeaderConnection)
+			tmp.WriteString(consts.ColonSpace)
+			tmp.WriteString(consts.HeaderKeepAlive)
+			tmp.WriteString(consts.CRLF)
+		}
 	}
 	tmp.WriteString(consts.CRLF)
 
@@ -2054,6 +2118,8 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		if ctx.request.method != consts.MethodHead && !bodyless {
 			if chunked {
 				s.writeChunkedBody(ctx, respWriter)
+			} else if unframed {
+				s.writeUnframedBody(ctx, respWriter)
 			} else {
 				if _, err := respWriter.Write(ctx.response.body); err != nil {
 					closeConn(ctx) // as for the headers above
@@ -2070,6 +2136,29 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		if err != nil {
 			fmt.Println("Error sending SSE events: ", err)
 		}
+	}
+}
+
+// writeUnframedBody sends the in-memory body and then the pending stream of
+// unknown length as they are, for an HTTP/1.0 client that cannot read
+// chunked encoding; the connection's close ends the body (writeResponse has
+// set connClose). Under a write timeout respWriter is the deadlineWriter, so
+// each piece io.Copy writes gets its own deadline. A failure closes the
+// connection at once; the stream is released either way.
+func (s *Server) writeUnframedBody(ctx *context, respWriter io.Writer) {
+	r := ctx.response.bodyStream
+	ctx.response.bodyStream, ctx.response.bodyStreamSize = nil, 0
+	defer closeStream(r)
+
+	if _, err := respWriter.Write(ctx.response.body); err != nil {
+		closeConn(ctx)
+		return
+	}
+	if _, err := io.Copy(respWriter, r); err != nil {
+		if s.options.Debug {
+			fmt.Printf("rweb: unframed body stream %s: %v\n", streamName(r), err)
+		}
+		closeConn(ctx)
 	}
 }
 

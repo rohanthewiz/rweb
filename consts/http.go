@@ -48,6 +48,10 @@ const (
 	// ExpectContinue is the one Expect value defined (RFC 9110 §10.1.1),
 	// matched case-insensitively.
 	ExpectContinue = "100-continue"
+
+	// ConnectionClose is the Connection option that ends a connection after
+	// the current response (RFC 9112 §9.6).
+	ConnectionClose = "close"
 )
 
 var ( // HTTP messages

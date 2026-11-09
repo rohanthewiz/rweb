@@ -126,6 +126,18 @@ discarded, counted against `MaxHeaderBytes`).
 has its body sent. Any other `Expect` value gets `417` and a close. HTTP/1.0
 requests get no `100`.
 
+### Keep-Alive and `Connection: close` (v0.2.1+)
+
+- HTTP/1.1 connections persist unless the request says `Connection: close`; the
+  response then carries `Connection: close` and the server closes after it.
+- HTTP/1.0 connections close after each response (with `Connection: close`)
+  unless the request says `Connection: keep-alive`, which the response confirms
+  with `Connection: keep-alive`.
+- A handler that sets `Connection: close` on its response gets the connection
+  closed after it.
+- A body of unknown length (`rweb.Stream(ctx, r, -1)`) goes to an HTTP/1.0 client
+  without chunked encoding: unframed, ended by closing the connection.
+
 ## Routing
 
 ### HTTP Methods

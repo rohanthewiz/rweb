@@ -94,6 +94,23 @@ func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path 
 	return
 }
 
+// hasToken reports whether the comma-separated header value v lists token,
+// compared case-insensitively ("keep-alive, Upgrade" lists "upgrade"). It
+// is for list-valued headers such as Connection (RFC 9110 §5.6.1), whose
+// tokens may come in any case and with optional whitespace around commas.
+// A substring test would also find "close" in "x-close-later"; this walks the
+// list without allocating.
+func hasToken(v, token string) bool {
+	for v != "" {
+		var item string
+		item, v, _ = strings.Cut(v, ",")
+		if strings.EqualFold(strings.TrimSpace(item), token) {
+			return true
+		}
+	}
+	return false
+}
+
 // isValidHeaderKey reports whether k is a legal header field name:
 //
 //	field-name = token                                     (RFC 9110 §5.1)
