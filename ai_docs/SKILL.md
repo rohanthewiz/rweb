@@ -691,6 +691,21 @@ s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, func(ws *rweb.W
 These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
 `ctx.UpgradeWebSocket()` alike; `WSOptions` fields adjust them per route.
 
+- **Server pings** (`WSOptions.PingInterval`, default 30 s, negative disables;
+  `WSOptions.PongTimeout`, default 10 s): the server pings the peer on the
+  interval, and every frame the peer sends (pongs included) extends the read
+  deadline to interval + pong timeout. A peer that vanishes without closing
+  makes `ReadMessage` fail with a timeout (`os.ErrDeadlineExceeded`) after at
+  most 40 s of silence, instead of blocking forever. Clients answer pings
+  automatically, so idle-but-alive connections are kept. Only a handler that
+  is reading sees pongs; a write-only handler relies on the write timeout.
+  A negative `PongTimeout` keeps the pings (for proxies that drop idle
+  connections) without the read deadline. No hand-written ping goroutine is
+  needed any more. The ping goroutine stops when the handler returns.
+- **Read deadlines with pings**: `ws.SetReadDeadline(t)` still works; a read
+  fails at whichever comes first, `t` or the ping window. So an app deadline
+  can shorten reads but does not switch off dead-peer detection (use
+  `PingInterval: -1` for that). The zero time clears the app deadline.
 - **Write timeout** (`WSOptions.WriteTimeout`, default 10 s, negative disables):
   each socket write (a message, a `WriteMessages` batch, a ping, a close frame)
   must finish within it, so a peer that stops reading fails the writer instead
@@ -727,7 +742,8 @@ ws.OnClose(func(code int, text string) {  // Register close handler
     fmt.Printf("Closed: %d %s\n", code, text)
 })
 
-// Ping/Pong keepalive — prevents proxies from dropping idle connections
+// Ping/Pong keepalive — the server already pings every WSOptions.PingInterval
+// (30 s by default); WritePing sends an extra one
 ws.WritePing([]byte("ping"))
 ws.SetPongHandler(func(data []byte) error {
     return nil
@@ -736,13 +752,14 @@ ws.SetPingHandler(func(data []byte) error {
     return nil // Default handler auto-replies with pong
 })
 
-// Shutdown signal — closed when the connection is closed from either side.
-// Use this to stop goroutines tied to the connection (e.g., ping tickers).
+// Shutdown signal — closed when the connection is closed from either side,
+// or when the WebSocket handler returns.
+// Use this to stop goroutines tied to the connection.
 <-ws.Done()
 
 // Configuration
 ws.SetMaxMessageSize(10 * 1024 * 1024)    // Default: 10MB
-ws.SetReadDeadline(time.Now().Add(60 * time.Second))
+ws.SetReadDeadline(time.Now().Add(60 * time.Second)) // earlier of this and the ping window wins
 ws.SetWriteDeadline(time.Now().Add(10 * time.Second)) // overrides WSOptions.WriteTimeout; zero clears
 
 // Connection info
@@ -796,20 +813,9 @@ s.WebSocket("/ws/chat", func(ws *rweb.WSConn) error {
     hub.register <- ws
     defer func() { hub.unregister <- ws }()
 
-    // Periodic ping to keep the connection alive.
-    // Done() ensures the goroutine exits cleanly when the connection closes.
-    go func() {
-        ticker := time.NewTicker(20 * time.Second)
-        defer ticker.Stop()
-        for {
-            select {
-            case <-ws.Done():
-                return
-            case <-ticker.C:
-                ws.WritePing([]byte("ping"))
-            }
-        }
-    }()
+    // No ping goroutine needed: the server pings every 30 s by default and
+    // drops a peer that stops answering (ReadMessage below then fails).
+    // For other per-connection goroutines, select on ws.Done() to stop them.
 
     for {
         msg, err := ws.ReadMessage()

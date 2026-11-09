@@ -766,9 +766,13 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 		ctx.wsConn.r = io.MultiReader(bytes.NewReader(lead), ctx.conn)
 	}
 	ctx.wsConn.deflate = deflate
-	// Route options with their defaults (write timeout); a manual
-	// UpgradeWebSocket gets the defaults through its zero WSOptions.
+	// Route options with their defaults (write timeout, pings); a manual
+	// UpgradeWebSocket gets the defaults through its zero WSOptions. The
+	// keepalive starts last, once ws.r is final, since it wraps it; its
+	// goroutine is stopped by finish when the handler returns
+	// (handleRequest).
 	ctx.wsConn.applyOptions(opts)
+	ctx.wsConn.startKeepalive()
 	ctx.wsUpgraded = true
 
 	return ctx.wsConn, nil

@@ -181,7 +181,10 @@ func main() {
 		fmt.Printf("Chat WebSocket connected from %s\n", ws.RemoteAddr())
 
 		// Ping/pong keepalive so idle connections aren't dropped by proxies.
-		// Done() ensures the ticker goroutine exits cleanly when the connection closes.
+		// rweb already pings every 30 s by default (WSOptions.PingInterval) and
+		// drops a peer that stops answering; this extra ticker remains as an
+		// illustration of tying a goroutine to the connection with Done(),
+		// which ensures it exits cleanly when the connection closes.
 		ws.SetPongHandler(func(data []byte) error {
 			fmt.Printf("Received pong from %s\n", ws.RemoteAddr())
 			return nil

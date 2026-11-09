@@ -126,6 +126,12 @@ type WSConn struct {
 	// resolved): each flush gets now+writeTimeout unless an explicit
 	// writeDeadline is set. 0 means none, as for a bare NewWSConn.
 	writeTimeout time.Duration
+	// pingInterval is how often the keepalive goroutine pings (0: no pings).
+	// readWindow is how long the peer may stay silent before a read fails:
+	// pingInterval + pongTimeout, or 0 for no liveness deadline. Both are set
+	// once by applyOptions before the handler runs, and only read afterwards.
+	pingInterval time.Duration
+	readWindow   time.Duration
 	// writeDeadlineSet records that a flush left a deadline on the conn, so
 	// a later flush with neither a timeout nor a deadline clears it once
 	// instead of on every write. Guarded by writeMutex.
@@ -191,6 +197,118 @@ func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 // server's WebSocket routes.
 func (ws *WSConn) applyOptions(opts WSOptions) {
 	ws.writeTimeout = resolveWSDuration(opts.WriteTimeout, defaultWriteTimeout)
+
+	ws.pingInterval = resolveWSDuration(opts.PingInterval, defaultPingInterval)
+	if ws.pingInterval > 0 {
+		if pong := resolveWSDuration(opts.PongTimeout, defaultPongTimeout); pong > 0 {
+			ws.readWindow = ws.pingInterval + pong
+		}
+	}
+}
+
+// startKeepalive arms the liveness read deadline and starts the ping
+// goroutine, as applyOptions configured them. How the two fit together:
+//
+//	server:  ping ───────── ping ───────── ping ───────── ping
+//	                │              │              │
+//	peer:           pong           pong           ✗ (gone: no pong, no data)
+//	                │              │
+//	read deadline:  └► now+I+P     └► now+I+P ──────────────────► expires
+//	                                                              ReadMessage
+//	                                                              fails (timeout)
+//
+//	I = pingInterval, P = pongTimeout, I+P = readWindow
+//
+// Every read that brings bytes in — a pong, a data frame, anything — moves
+// the read deadline to now+I+P (livenessReader). A live peer answers each
+// ping within P, so the deadline is always pushed out before it is reached;
+// a vanished peer sends nothing, and the read blocked in ReadMessage fails
+// at most I+P after the last thing it heard. Extending on bytes rather than
+// on whole frames also keeps a large message arriving slowly from timing
+// out half way through.
+//
+// The ping goroutine exits on Done(), which closes when Close or a peer
+// close frame ends the connection, or when the handler returns (finish,
+// from handleRequest), so it cannot outlive the connection; it also exits
+// on its first failed write, since a connection that cannot take a ping is
+// already broken and the read deadline will end the handler.
+func (ws *WSConn) startKeepalive() {
+	if ws.readWindow > 0 {
+		ws.r = livenessReader{ws: ws, r: ws.r}
+		ws.extendReadDeadline()
+	}
+	if ws.pingInterval > 0 {
+		go ws.pingLoop(ws.pingInterval)
+	}
+}
+
+// pingLoop sends an empty ping every interval until the connection ends.
+func (ws *WSConn) pingLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ws.done:
+			return
+		case <-ticker.C:
+			if err := ws.WritePing(nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// livenessReader extends the connection's read deadline after every read
+// that returned data (see startKeepalive).
+type livenessReader struct {
+	ws *WSConn
+	r  io.Reader
+}
+
+func (l livenessReader) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	if n > 0 {
+		l.ws.extendReadDeadline()
+	}
+	return n, err
+}
+
+// extendReadDeadline sets the read deadline to now+readWindow, or to the
+// app's own deadline (SetReadDeadline) if that is earlier: an app deadline
+// can shorten a read, but never switches off dead-peer detection.
+//
+// Not once the connection is closed: Close then owns the read deadline for
+// its bounded wait on the peer's close frame, and that wait reads through
+// this same reader. Close stores closed before taking deadlineMu to set its
+// deadline, so under deadlineMu either Close's deadline comes last or this
+// sees closed and leaves it alone.
+func (ws *WSConn) extendReadDeadline() {
+	ws.deadlineMu.Lock()
+	defer ws.deadlineMu.Unlock()
+	if ws.closed.Load() {
+		return
+	}
+	_ = ws.conn.SetReadDeadline(ws.effectiveReadDeadline(ws.readDeadline))
+}
+
+// effectiveReadDeadline is the earlier of the app's deadline (zero: none)
+// and now+readWindow. Callers hold deadlineMu and have readWindow > 0.
+func (ws *WSConn) effectiveReadDeadline(app time.Time) time.Time {
+	d := time.Now().Add(ws.readWindow)
+	if !app.IsZero() && app.Before(d) {
+		return app
+	}
+	return d
+}
+
+// finish ends the connection's life as far as WSConn is concerned once its
+// handler has returned (handleRequest calls it; the HTTP loop then closes
+// the conn). Done() closes, which stops the ping goroutine, and writes from
+// other goroutines (a hub broadcasting) fail fast with
+// ErrWebSocketAlreadyClosed instead of on a closed socket.
+func (ws *WSConn) finish() {
+	ws.closed.Store(true)
+	ws.signalDone()
 }
 
 // resolveWSDuration maps a WSOptions duration to its effective value:
@@ -672,8 +790,12 @@ func (ws *WSConn) Close(code int, reason string) error {
 
 	// Wait for the peer's close frame response using a read deadline
 	// instead of a blind sleep. Returns immediately when the frame arrives,
-	// or after closeHandshakeTimeout if the peer is unresponsive.
+	// or after closeHandshakeTimeout if the peer is unresponsive. Set under
+	// deadlineMu, after closed was stored, so the liveness reader cannot
+	// push it back out (see extendReadDeadline).
+	ws.deadlineMu.Lock()
 	ws.conn.SetReadDeadline(time.Now().Add(closeHandshakeTimeout))
+	ws.deadlineMu.Unlock()
 	ws.readFrame() // best-effort read; ignore errors (timeout or otherwise)
 
 	return ws.conn.Close()
@@ -785,9 +907,28 @@ func (ws *WSConn) SetMaxMessageSize(size int64) {
 	ws.maxMessageSize = size
 }
 
-// SetReadDeadline sets the read deadline
+// SetReadDeadline sets the read deadline; the zero time clears it.
+//
+// With server pings on (the default for WebSocket routes), the connection
+// also has a liveness deadline that every received frame pushes out (see
+// startKeepalive), and a read fails at whichever of the two comes first:
+//
+//	app deadline earlier than the liveness window -> the read ends at it,
+//	                                                 as on a net.Conn
+//	app deadline later (or zero)                  -> a peer that stops
+//	                                                 answering pings is still
+//	                                                 dropped on time
+//
+// So an app deadline can shorten reads but not switch off dead-peer
+// detection; WSOptions.PingInterval < 0 does that. Without pings this is a
+// plain net.Conn read deadline.
 func (ws *WSConn) SetReadDeadline(t time.Time) error {
+	ws.deadlineMu.Lock()
+	defer ws.deadlineMu.Unlock()
 	ws.readDeadline = t
+	if ws.readWindow > 0 && !ws.closed.Load() {
+		return ws.conn.SetReadDeadline(ws.effectiveReadDeadline(t))
+	}
 	return ws.conn.SetReadDeadline(t)
 }
 

@@ -389,3 +389,217 @@ func TestWebSocketPartialWriteIsSticky(t *testing.T) {
 		t.Fatalf("%d writes reached the socket, want 1", pc.writes)
 	}
 }
+
+// --- server pings and the read deadline --------------------------------------
+
+// fastPings keeps the ping tests quick: a peer has 100 ms of silence before
+// it is considered gone.
+var fastPings = WSOptions{PingInterval: 50 * time.Millisecond, PongTimeout: 50 * time.Millisecond}
+
+// readResult is what a test handler's ReadMessage loop ended with.
+type readResult struct {
+	err     error
+	elapsed time.Duration
+	ws      *WSConn
+}
+
+// readUntilError registers a WebSocket route whose handler reads (echoing
+// text) until ReadMessage fails, then reports how and when.
+func readUntilError(s *Server, opts WSOptions, before func(ws *WSConn)) <-chan readResult {
+	res := make(chan readResult, 1)
+	s.WebSocketWithOptions("/ws", opts, func(ws *WSConn) error {
+		start := time.Now()
+		if before != nil {
+			before(ws)
+		}
+		for {
+			msg, err := ws.ReadMessage()
+			if err != nil {
+				res <- readResult{err, time.Since(start), ws}
+				return nil
+			}
+			if err := ws.WriteMessage(msg.Type, msg.Data); err != nil {
+				res <- readResult{err, time.Since(start), ws}
+				return nil
+			}
+		}
+	})
+	return res
+}
+
+// A peer that vanishes without closing (cable pulled, laptop asleep) sends
+// nothing and answers no pings. ReadMessage must not block forever: once
+// the ping interval plus the pong timeout pass in silence, it fails with a
+// timeout, the handler returns, and Done() closes, which is what stops the
+// ping goroutine.
+func TestWebSocketDeadPeerIsDropped(t *testing.T) {
+	s := NewServer()
+	res := readUntilError(s, fastPings, nil)
+	upgradeOn(t, s, "") // then silence: no frames, no pongs
+
+	r := recv(t, res, "ReadMessage to fail for a silent peer")
+	if !errors.Is(r.err, os.ErrDeadlineExceeded) {
+		t.Fatalf("ReadMessage error = %v, want a deadline error", r.err)
+	}
+	if r.elapsed > time.Second {
+		t.Fatalf("dead peer detected after %v, want about 100ms", r.elapsed)
+	}
+	select {
+	case <-r.ws.Done():
+	case <-time.After(waitFor):
+		t.Fatal("Done() not closed after the WebSocket handler returned")
+	}
+}
+
+// A peer that is idle but alive answers the server's pings (every client
+// does, automatically); each pong extends the read deadline, so the idle
+// connection is kept, for many ping intervals, and still works afterwards.
+func TestWebSocketIdlePeerAnsweringPingsIsKept(t *testing.T) {
+	s := NewServer()
+	res := readUntilError(s, fastPings, nil)
+	c, br := upgradeOn(t, s, "")
+	client := NewWSConn(c, false)
+	client.r = br
+
+	pings := make(chan struct{}, 100)
+	client.SetPingHandler(func(data []byte) error {
+		pings <- struct{}{}
+		return client.writePong(data)
+	})
+	echoes := make(chan string, 1)
+	go func() {
+		for {
+			msg, err := client.ReadMessage() // answers pings while waiting
+			if err != nil {
+				return
+			}
+			echoes <- string(msg.Data)
+		}
+	}()
+
+	time.Sleep(400 * time.Millisecond) // four times the silence allowance
+	select {
+	case r := <-res:
+		t.Fatalf("idle peer answering pings was dropped: %v", r.err)
+	default:
+	}
+	if n := len(pings); n < 3 {
+		t.Fatalf("%d pings in 400ms at a 50ms interval", n)
+	}
+	if err := client.WriteMessage(TextMessage, []byte("still here")); err != nil {
+		t.Fatal(err)
+	}
+	if got := recv(t, echoes, "echo"); got != "still here" {
+		t.Fatalf("echo %q", got)
+	}
+}
+
+// The ping options resolve to the documented defaults, and a negative
+// PingInterval turns pings and the read deadline off entirely.
+func TestWebSocketPingDefaults(t *testing.T) {
+	cases := []struct {
+		name               string
+		opts               *WSOptions // nil: s.WebSocket
+		interval, deadline time.Duration
+	}{
+		{"WebSocket", nil, defaultPingInterval, defaultPingInterval + defaultPongTimeout},
+		{"zero options", &WSOptions{}, defaultPingInterval, defaultPingInterval + defaultPongTimeout},
+		{"explicit", &WSOptions{PingInterval: time.Second, PongTimeout: 2 * time.Second}, time.Second, 3 * time.Second},
+		{"pings without a read deadline", &WSOptions{PongTimeout: -1}, defaultPingInterval, 0},
+		{"negative disables", &WSOptions{PingInterval: -1}, 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer()
+			got := make(chan [2]time.Duration, 1)
+			h := func(ws *WSConn) error {
+				got <- [2]time.Duration{ws.pingInterval, ws.readWindow}
+				return nil
+			}
+			if tc.opts == nil {
+				s.WebSocket("/ws", h)
+			} else {
+				s.WebSocketWithOptions("/ws", *tc.opts, h)
+			}
+			upgradeOn(t, s, "")
+			v := recv(t, got, "handler")
+			if v[0] != tc.interval || v[1] != tc.deadline {
+				t.Fatalf("ping interval %v, read window %v; want %v, %v", v[0], v[1], tc.interval, tc.deadline)
+			}
+		})
+	}
+}
+
+// With pings disabled no ping is sent and a silent peer is not dropped.
+func TestWebSocketPingsDisabled(t *testing.T) {
+	s := NewServer()
+	res := readUntilError(s, WSOptions{PingInterval: -1}, nil)
+	c, br := upgradeOn(t, s, "")
+
+	_ = c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if b, err := br.ReadByte(); err == nil {
+		t.Fatalf("got a frame (first byte %#x) with pings disabled", b)
+	}
+	select {
+	case r := <-res:
+		t.Fatalf("silent peer dropped with pings disabled: %v", r.err)
+	default:
+	}
+}
+
+// An app's own read deadline still works with pings on: whichever of the
+// two is earlier ends the read. An early app deadline fires on time...
+func TestWebSocketAppReadDeadlineEarlierWins(t *testing.T) {
+	s := NewServer()
+	opts := WSOptions{PingInterval: time.Second, PongTimeout: time.Second}
+	res := readUntilError(s, opts, func(ws *WSConn) {
+		_ = ws.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	})
+	upgradeOn(t, s, "")
+
+	r := recv(t, res, "ReadMessage to hit the app's deadline")
+	if !errors.Is(r.err, os.ErrDeadlineExceeded) || r.elapsed > time.Second {
+		t.Fatalf("read ended after %v with %v, want a deadline error at about 100ms", r.elapsed, r.err)
+	}
+}
+
+// ...and a late one does not switch off dead-peer detection.
+func TestWebSocketAppReadDeadlineLaterKeepsLiveness(t *testing.T) {
+	s := NewServer()
+	res := readUntilError(s, fastPings, func(ws *WSConn) {
+		_ = ws.SetReadDeadline(time.Now().Add(time.Hour))
+	})
+	upgradeOn(t, s, "")
+
+	r := recv(t, res, "ReadMessage to fail for a silent peer")
+	if !errors.Is(r.err, os.ErrDeadlineExceeded) || r.elapsed > time.Second {
+		t.Fatalf("read ended after %v with %v, want a deadline error at about 100ms", r.elapsed, r.err)
+	}
+}
+
+// Clearing the app deadline (zero time) hands the read back to the ping
+// window, which a peer answering pings keeps extending.
+func TestWebSocketAppReadDeadlineCleared(t *testing.T) {
+	s := NewServer()
+	res := readUntilError(s, fastPings, func(ws *WSConn) {
+		_ = ws.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+		_ = ws.SetReadDeadline(time.Time{})
+	})
+	c, br := upgradeOn(t, s, "")
+	client := NewWSConn(c, false)
+	client.r = br
+	go func() {
+		for {
+			if _, err := client.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case r := <-res:
+		t.Fatalf("read ended after the app cleared its deadline: %v", r.err)
+	default:
+	}
+}

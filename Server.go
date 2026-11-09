@@ -1628,6 +1628,14 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		s.errorHandler(ctx, err)
 	}
 
+	// A WebSocket's life is its handler's: the connection closes once the
+	// handler has returned. Mark it finished here, whichever way it was
+	// upgraded (s.WebSocket or a manual UpgradeWebSocket), so its Done()
+	// closes and the ping goroutine started at the upgrade exits.
+	if ctx.wsUpgraded && ctx.wsConn != nil {
+		ctx.wsConn.finish()
+	}
+
 	// The handlers are done with the connection's read side. Stop the
 	// disconnect watch now rather than in the deferred finishContext:
 	// sendSSE starts its own reader on the conn in writeResponse, and two

@@ -51,6 +51,19 @@ type WSOptions struct {
 	// blocking the writer forever. 0 selects 10 s; negative disables it.
 	// An explicit WSConn.SetWriteDeadline takes precedence while set.
 	WriteTimeout time.Duration
+
+	// PingInterval is how often the server pings the peer. Every frame the
+	// peer sends (a pong included) extends the read deadline to
+	// PingInterval + PongTimeout, so a peer that vanishes without closing
+	// makes ReadMessage fail with a timeout instead of blocking forever.
+	// 0 selects 30 s; negative disables both the pings and the deadline.
+	// Dead-peer detection needs the handler to be reading: pongs are
+	// processed inside ReadMessage.
+	PingInterval time.Duration
+	// PongTimeout is how long past a ping interval the peer may stay
+	// silent. 0 selects 10 s; negative keeps the pings (for proxies that
+	// drop idle connections) but sets no read deadline.
+	PongTimeout time.Duration
 }
 
 // deflateTail completes a message for the inflater: the 00 00 ff ff the
