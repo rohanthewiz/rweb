@@ -409,3 +409,44 @@ func TestServerGroupDoesNotAliasCallerSlice(t *testing.T) {
 	response = s.Request("GET", "/two/x", nil, nil)
 	assert.Equal(t, "mw;U2;", response.Header("X-Trace"))
 }
+
+// TestGroupMiddlewareStopsChain verifies that group middleware which returns
+// nil without calling Next() ends the request there, as s.Use middleware
+// does. A denying auth middleware must not let the route handler run.
+func TestGroupMiddlewareStopsChain(t *testing.T) {
+	s := rweb.NewServer()
+
+	handlerRan := false
+	secured := s.Group("/secure", func(ctx rweb.Context) error {
+		ctx.SetStatus(http.StatusUnauthorized)
+		return ctx.WriteString("denied;")
+	})
+	secured.Get("/data", func(ctx rweb.Context) error {
+		handlerRan = true
+		return ctx.WriteString("SECRET")
+	})
+
+	response := s.Request("GET", "/secure/data", nil, nil)
+	assert.Equal(t, http.StatusUnauthorized, response.Status())
+	assert.Equal(t, "denied;", string(response.Body()))
+	assert.False(t, handlerRan)
+
+	// A later middleware in the same group must not run either
+	laterRan := false
+	g := s.Group("/two", func(ctx rweb.Context) error {
+		return nil // stop without writing
+	})
+	g.Use(func(ctx rweb.Context) error {
+		laterRan = true
+		return ctx.Next()
+	})
+	g.Get("/x", func(ctx rweb.Context) error {
+		handlerRan = true
+		return ctx.WriteString("x")
+	})
+
+	response = s.Request("GET", "/two/x", nil, nil)
+	assert.False(t, laterRan)
+	assert.False(t, handlerRan)
+	assert.Equal(t, "", string(response.Body()))
+}

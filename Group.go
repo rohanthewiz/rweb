@@ -141,32 +141,23 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 		nextHandler := finalHandler
 
 		finalHandler = func(ctx Context) error {
-			// Track whether the middleware called Next() to continue the chain.
-			// This allows middleware to optionally stop the chain (e.g., for auth failures)
-			nextCalled := false
-
-			// Create a context wrapper that intercepts Next() calls.
-			// This allows us to track when middleware explicitly passes control
-			// to the next handler in the chain.
+			// Create a context wrapper that intercepts Next() calls, so that
+			// Next() inside group middleware advances this group chain rather
+			// than the server-level chain the route itself sits at the end of.
+			//
+			// The chain continues only through Next(). Middleware that returns
+			// (nil or an error) without calling it ends the request there, the
+			// same contract as s.Use middleware. An earlier version continued
+			// automatically on a nil return, which let a group auth middleware
+			// that wrote a 401 and returned nil still run the route handler.
 			wrapper := &contextWrapper{
 				Context: ctx,
 				next: func() error {
-					nextCalled = true
 					return nextHandler(ctx)
 				},
 			}
 
-			// Execute the middleware with our wrapper context
-			err := middleware(wrapper)
-
-			// If middleware didn't call Next() and didn't return an error,
-			// automatically continue to the next handler.
-			// This allows middleware to work without explicitly calling Next().
-			if err == nil && !nextCalled {
-				err = nextHandler(ctx)
-			}
-
-			return err
+			return middleware(wrapper)
 		}
 	}
 
@@ -174,18 +165,18 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 }
 
 // contextWrapper wraps a Context to intercept Next() calls.
-// This allows group middleware to properly track and control the execution chain,
-// ensuring that middleware can stop the chain or pass control as needed.
+// This allows group middleware to properly control the execution chain:
+// calling Next() passes control on, returning without it stops the chain.
 type contextWrapper struct {
 	// Embedded Context provides all standard context methods
 	Context
-	// next is our custom Next() implementation that tracks calls
+	// next runs the rest of the group chain (later middleware, then the route handler)
 	next func() error
 }
 
 // Next overrides the Context's Next method to use our custom implementation.
-// This allows the group to track when middleware explicitly passes control
-// to the next handler in the chain.
+// It is the only way group middleware passes control to the next handler
+// in the chain.
 func (w *contextWrapper) Next() error {
 	return w.next()
 }

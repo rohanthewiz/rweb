@@ -263,6 +263,8 @@ v2.Use(rateLimiterMiddleware)
 v2.Get("/users", v2UsersHandler)
 ```
 
+Group middleware works like `s.Use` middleware: it passes control on only by calling `ctx.Next()`. A group middleware that returns without calling `Next()` (for example after writing a 401) ends the request there; later group middleware and the route handler do not run.
+
 Groups support all HTTP methods (`Get`, `Post`, `Put`, `Patch`, `Delete`, `Head`, `Options`, `Connect`, `Trace`) as well as `StaticFiles` and `Proxy`.
 
 ## Cookies

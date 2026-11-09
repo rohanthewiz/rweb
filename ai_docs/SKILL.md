@@ -244,6 +244,20 @@ admin := s.Group("/admin", authMiddleware, adminMiddleware)
 admin.Get("/dashboard", dashboardHandler)
 ```
 
+Group middleware follows the same contract as `s.Use` middleware: the chain continues
+only when it calls `ctx.Next()`. Returning without calling `Next()` (nil or an error)
+ends the request there, so later group middleware and the route handler do not run:
+
+```go
+func authMiddleware(ctx rweb.Context) error {
+    if ctx.Request().Header("Authorization") != "Bearer valid-token" {
+        return ctx.SetStatus(401).WriteString("Unauthorized") // stops here
+    }
+    ctx.Set("userId", "123")
+    return ctx.Next() // continue to the next middleware / handler
+}
+```
+
 ## Cookies
 
 ### Server-wide Cookie Config
