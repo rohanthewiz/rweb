@@ -38,8 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-039** · raised `2026-1109-once-over-review` · value high
-  No graceful shutdown: no `Shutdown`/`Serve(listener)`, `Run` never releases SIGINT/SIGTERM (a process with `Run` in a goroutine survived SIGTERM), accept errors retried with no backoff, SSE streams ignore shutdown. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-042** · raised `2026-1109-once-over-review` · value medium
   Headers and body leave in two writes (`Server.go:1675`, `1702`); a prototype measured 3–4 % on plain TCP. Adds the phase's benchmark file. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-043** · raised `2026-1109-once-over-review` · value medium
@@ -102,6 +100,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-039** · raised `2026-1109-once-over-review` · closed 2026-11-09, `9b57685`
+  Added `Serve(l)`, `Shutdown(ctx)`, `ErrServerClosed`, `ServerOptions.ShutdownTimeout` (default 10 s) and `WithShutdownTimeout`. `Run` is built on them and calls `signal.Stop`, so a later SIGTERM is no longer swallowed. Shutdown closes listeners, cancels the base context, wakes idle keep-alive conns with a past read deadline, sends WebSockets a 1001 close frame, ends SSE streams, waits for the connection registry to empty, and force-closes on ctx done. This adds the registry N-020 avoided: a mutex per conn open/close and two atomics per request (`shutdown.go`). Accept errors back off 5 ms to 1 s. `RunWithHttpsRedirect` opens both listeners first and shuts both down together. Behaviour to know: `Run` returns an error wrapping `context.DeadlineExceeded` when the shutdown timeout runs out (it used to return nil always), and a SIGTERM with no `Run` listening now kills the process. Tests: `graceful_shutdown_test.go`; `shutdown_test.go` moved to `Shutdown`.
 - **N-041** · raised `2026-1109-once-over-review` · closed 2026-11-09, `863d3b4`
   `Clean` drops `request.body`, `response.body` or `respBuf` when its capacity exceeds 256 KB (`maxRetainedBuf`). Test: `buffer_retention_test.go`.
 - **N-040** · raised `2026-1109-once-over-review` · closed 2026-11-09, `009122c`..`15d0cd0`
