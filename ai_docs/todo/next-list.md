@@ -34,24 +34,10 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-058
+**Next ID:** N-059
 
 ## Open
 
-- **N-028** · raised `2026-1109-once-over-review` · value high
-  `://` in a query string misroutes the request: `GET /redirect?url=http://evil.com/admin` is served by `/admin` with `Host()` = `evil.com` (`http.go:24`). Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-029** · raised `2026-1109-once-over-review` · value high
-  Group middleware that returns nil without `Next()` still runs the handler (`Group.go:158`); `s.Use` middleware stops. Reproduced. Needs decision D1. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-030** · raised `2026-1109-once-over-review` · value high
-  Sibling sub-groups share a backing array and overwrite each other's middleware (`Group.go:29`). Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-031** · raised `2026-1109-once-over-review` · value high
-  Response header values accept CR/LF, so `ctx.Redirect` with user input can inject headers (`Response.go:159`). Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-032** · raised `2026-1109-once-over-review` · value medium
-  `SSEHubOptions.OnDisconnect` runs under the hub write lock and deadlocks if it calls the hub (`sse_hub.go:164`). Reproduced. Includes the `Close()` double-close race. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-033** · raised `2026-1109-once-over-review` · value medium
-  SSE events are malformed for non-string `Data` (`%!s(int=42)`) and multi-line data (`Server.go:1956`). Reproduced. Adds a typed close sentinel beside the `"close"` string. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-034** · raised `2026-1109-once-over-review` · value low
-  204 and 304 responses carry `Content-Length: 0`. Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-035** · raised `2026-1109-once-over-review` · value high
   No header size limit (a 64 MB header line was accepted) and no read, write or idle timeouts (`Server.go:1231`). Reopens declined N-012. Needs decision D2. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-036** · raised `2026-1109-once-over-review` · value medium
@@ -94,6 +80,8 @@ code at `3169f85`.
   SSE options: `Access-Control-Allow-Origin: *` is unconditional (`Response.go:277`); no `id:`/`retry:` fields. Needs decision D8. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-055** · raised `2026-1109-once-over-review` · value low
   `ClientIP` trusts `X-Forwarded-For` from any peer; add trusted proxies. Needs decision D9. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-058** · raised `2026-1109-once-over-review` · value high
+  `Group.StaticFiles`, `StaticFilesAbs` and `Proxy` register straight on the server, so the group's middleware never runs for them (`Group.go:89-108`). SKILL.md's `admin := s.Group("/admin", authMiddleware); admin.StaticFilesAbs(...)` example reads as if those files are behind auth; they are not. Found while auditing for N-029; read, not reproduced.
 
 ## Validate
 
@@ -128,6 +116,20 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-034** · raised `2026-1109-once-over-review` · closed 2026-11-09, `ee2b87c`
+  `writeResponse` sends a 1xx, 204 or 304 as the header block alone: no Content-Length or Transfer-Encoding, no body, pending stream closed unread. An SSE stream on such a status is not started. Synthetic `s.Request` is unchanged. Tests: `bodyless_status_test.go`.
+- **N-033** · raised `2026-1109-once-over-review` · closed 2026-11-09, `db5bce9`
+  Every event goes through `writeSSEEvent`: text per `sseDataText` (string/[]byte as is, error/Stringer by method, basic kinds incl. named types via strconv, else JSON), one `data:` line per payload line, CR/LF stripped from the event name. `rweb.SSEClose` added; bare `"close"` still ends a stream. A payload JSON cannot encode is logged and skipped. The CLAUDE.md "SSE tests need fixing" note was stale (all pass under -race, none skipped) and is removed. Tests: `TestSSEEventFormatting`, `TestSSECloseSentinel`.
+- **N-032** · raised `2026-1109-once-over-review` · closed 2026-11-09, `4b7d319`
+  `OnDisconnect` runs after the hub lock is released, once per client actually removed, on both the unregister and eviction paths; `Close` uses `sync.Once`. Tests: `TestSSEHubOnDisconnectMayCallHub`, `TestSSEHubCloseConcurrent`.
+- **N-031** · raised `2026-1109-once-over-review` · closed 2026-11-09, `2a35db0`
+  `SetHeader`/`AddHeader` replace CR, LF and NUL in values with a space and drop a header whose name is not an RFC 9110 token. The drop is logged unconditionally (the response cannot see the Debug option); revisit with N-053. Other control bytes still pass. Tests: `response_header_test.go`, `header_injection_test.go`.
+- **N-030** · raised `2026-1109-once-over-review` · closed 2026-11-09, `eeb9004`
+  `Group.Group` builds the child slice with `slices.Concat`; `Server.Group` had the same hazard with the caller's variadic slice and now clones it. Tests: `TestSiblingSubGroupsKeepOwnMiddleware`, `TestServerGroupDoesNotAliasCallerSlice`.
+- **N-029** · raised `2026-1109-once-over-review` · closed 2026-11-09, `af2afcf`
+  Decision D1: stop. The auto-continue branch in `Group.addRoute` is gone; group middleware continues only through `Next()`, as `s.Use` does. No example relied on it (their deny paths were the ones leaking). Test: `TestGroupMiddlewareStopsChain`. SKILL.md and README say so.
+- **N-028** · raised `2026-1109-once-over-review` · closed 2026-11-09, `0812f95`
+  `parseURL` takes a scheme and host only from an absolute-form target and only before the first `?`; an origin-form target skips the scan. Also fixed on the way: a schemeless target such as `evil.com/admin` is no longer split into host and path, and `http://example.com` (no path) now parses. Tests in `Request_scheme_host_test.go`.
 - **N-027** · raised `2026-1011-2314-stream-response-bodies` (from the cats-todo backlog) · closed 2026-10-11, 2026-1011-2314-stream-response-bodies
   A downstream app could not stream a database-dump download: every response
   was held in memory, so it kept dumps over 512 MB on the server and logged
