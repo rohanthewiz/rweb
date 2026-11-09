@@ -34,11 +34,66 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-028
+**Next ID:** N-058
 
 ## Open
 
-_(none)_
+- **N-028** · raised `2026-1109-once-over-review` · value high
+  `://` in a query string misroutes the request: `GET /redirect?url=http://evil.com/admin` is served by `/admin` with `Host()` = `evil.com` (`http.go:24`). Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-029** · raised `2026-1109-once-over-review` · value high
+  Group middleware that returns nil without `Next()` still runs the handler (`Group.go:158`); `s.Use` middleware stops. Reproduced. Needs decision D1. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-030** · raised `2026-1109-once-over-review` · value high
+  Sibling sub-groups share a backing array and overwrite each other's middleware (`Group.go:29`). Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-031** · raised `2026-1109-once-over-review` · value high
+  Response header values accept CR/LF, so `ctx.Redirect` with user input can inject headers (`Response.go:159`). Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-032** · raised `2026-1109-once-over-review` · value medium
+  `SSEHubOptions.OnDisconnect` runs under the hub write lock and deadlocks if it calls the hub (`sse_hub.go:164`). Reproduced. Includes the `Close()` double-close race. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-033** · raised `2026-1109-once-over-review` · value medium
+  SSE events are malformed for non-string `Data` (`%!s(int=42)`) and multi-line data (`Server.go:1956`). Reproduced. Adds a typed close sentinel beside the `"close"` string. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-034** · raised `2026-1109-once-over-review` · value low
+  204 and 304 responses carry `Content-Length: 0`. Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-035** · raised `2026-1109-once-over-review` · value high
+  No header size limit (a 64 MB header line was accepted) and no read, write or idle timeouts (`Server.go:1231`). Reopens declined N-012. Needs decision D2. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-036** · raised `2026-1109-once-over-review` · value medium
+  Request framing accepts ambiguous messages: Content-Length wins over chunked, negative and conflicting Content-Length accepted (`Server.go:1305`). Reproduced. Needs decision D3. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-037** · raised `2026-1109-once-over-review` · value medium
+  `Expect: 100-continue` gets no interim response, so curl stalls about a second on large uploads. Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-038** · raised `2026-1109-once-over-review` · value low
+  `Connection: close` and HTTP/1.0 are ignored; the request-line version is not parsed. Reopens declined N-013. Needs decision D4. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-039** · raised `2026-1109-once-over-review` · value high
+  No graceful shutdown: no `Shutdown`/`Serve(listener)`, `Run` never releases SIGINT/SIGTERM (a process with `Run` in a goroutine survived SIGTERM), accept errors retried with no backoff, SSE streams ignore shutdown. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-040** · raised `2026-1109-once-over-review` · value high
+  WebSocket hardening: no Origin check, no ping or read deadline, write deadline not applied once expired, `closed` raced, control frames unvalidated, subprotocol echoed blindly, `[ERR]` on normal close. Needs decision D5. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-041** · raised `2026-1109-once-over-review` · value medium
+  Pooled request, response and header buffers keep their largest size, so one 100 MB upload pins 100 MB per connection (`Context.go:230`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-042** · raised `2026-1109-once-over-review` · value medium
+  Headers and body leave in two writes (`Server.go:1675`, `1702`); a prototype measured 3–4 % on plain TCP. Adds the phase's benchmark file. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-043** · raised `2026-1109-once-over-review` · value medium
+  WebSocket `readFrame` does three or four unbuffered reads and allocations per frame (`websocket.go:383`). Benchmark first. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-044** · raised `2026-1109-once-over-review` · value low
+  One allocation per request line and header line (7 of 8 allocs/op). After N-035; drop if under 5 %. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-045** · raised `2026-1109-once-over-review` · value low
+  Static handler splits the prefix and calls `filepath.Abs` twice per request (`Server.go:888`, `940`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-046** · raised `2026-1109-once-over-review` · value medium
+  Look the route up before reading the body, so an unrouted request does not buffer up to 100 MB first (`Server.go:1352`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-047** · raised `2026-1109-once-over-review` · value medium
+  `Proxy` uses `http.DefaultClient` (no timeout, follows redirects), forwards hop-by-hop headers and buffers the response (`Server.go:738`). Reopens declined N-011. Needs decision D6. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-048** · raised `2026-1109-once-over-review` · value medium
+  No setter for the error handler and no not-found / method-not-allowed hooks; `ListRoutes` omits param routes. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-049** · raised `2026-1109-once-over-review` · value medium
+  Path params are not percent-decoded (`/greet/John%20Doe` → `John%20Doe`). Reproduced. Needs decision D7. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-050** · raised `2026-1109-once-over-review` · value low
+  Response header names are matched case-sensitively, so two Content-Type lines can be sent (`Response.go:151`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-051** · raised `2026-1109-once-over-review` · value low
+  `WriteHTML`/`WriteText` send no charset although documented to. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-052** · raised `2026-1109-once-over-review` · value medium
+  Static files and `SendFile`: no Range, ETag, Cache-Control or index options; unknown types forced to download; filename encoding. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-053** · raised `2026-1109-once-over-review` · value medium
+  Logging goes straight to stdout through about thirty `fmt.Print*` calls, several unconditional; add a pluggable logger. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-054** · raised `2026-1109-once-over-review` · value low
+  SSE options: `Access-Control-Allow-Origin: *` is unconditional (`Response.go:277`); no `id:`/`retry:` fields. Needs decision D8. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-055** · raised `2026-1109-once-over-review` · value low
+  `ClientIP` trusts `X-Forwarded-For` from any peer; add trusted proxies. Needs decision D9. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 
 ## Validate
 
@@ -53,8 +108,10 @@ _(none)_
 Wanted, but deliberately not next. Parked, not declined. Same item form as
 Open.
 
-_(empty — no session doc marked an item as deferred-but-wanted; sort Open
-items here as you see fit)_
+- **N-056** · raised `2026-1109-once-over-review` · value low
+  Helpers and middleware: `rweb.BindJSON`, and `cors`, `reqlog`, `gzip` subpackages. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-057** · raised `2026-1109-once-over-review` · value medium
+  Lazy request body (`Request().BodyReader()`), so uploads are not held in memory and a per-route cap becomes possible. Design sketch under N-046 in the plan. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 
 ## Non-goals
 
