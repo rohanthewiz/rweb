@@ -1201,8 +1201,8 @@ func (s *Server) Use(handlers ...Handler) {
 // Groups can be nested: v1 := api.Group("/v1") creates "/api/v1" prefix.
 func (s *Server) Group(prefix string, handlers ...Handler) *Group {
 	return &Group{
-		prefix:   prefix,
-		server:   s,
+		prefix: prefix,
+		server: s,
 		// Clone rather than keep the variadic slice: a caller passing mws...
 		// hands over its own array, and with spare capacity a later g.Use
 		// would append into it, so two groups built from the same slice
