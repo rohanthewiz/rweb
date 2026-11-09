@@ -2,6 +2,7 @@ package rweb
 
 import (
 	"path"
+	"slices"
 )
 
 // Group represents a route group with a common prefix and middleware.
@@ -25,8 +26,14 @@ func (g *Group) Group(prefix string, handlers ...Handler) *Group {
 		// Combine parent and child prefixes using path.Join for proper URL construction
 		prefix: path.Join(g.prefix, prefix),
 		server: g.server,
-		// Inherit parent middleware and append any new middleware
-		handlers: append(g.handlers, handlers...),
+		// Inherit parent middleware and append any new middleware.
+		// slices.Concat always allocates a fresh backing array. A plain
+		// append(g.handlers, handlers...) would reuse the parent's array
+		// whenever it has spare capacity (e.g. after a couple of Use calls),
+		// so sibling sub-groups would write into the same slots and the
+		// first child would silently run the second child's middleware.
+		// An own array also keeps a later child.Use from reaching the parent.
+		handlers: slices.Concat(g.handlers, handlers),
 	}
 }
 

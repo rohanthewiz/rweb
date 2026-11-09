@@ -331,3 +331,81 @@ func TestGroupWithParameters(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Status())
 	assert.Equal(t, "user 123 post 456", string(response.Body()))
 }
+
+// TestSiblingSubGroupsKeepOwnMiddleware verifies that two sub-groups created
+// from the same parent each keep their own middleware. The parent is given
+// spare slice capacity (mw + two Use calls: len 3, cap 4) so that a child
+// built with append(parent, ...) would share the parent's backing array and
+// the second child's middleware would overwrite the first child's.
+func TestSiblingSubGroupsKeepOwnMiddleware(t *testing.T) {
+	s := rweb.NewServer()
+
+	// mark returns a middleware that appends its name to X-Trace
+	mark := func(name string) rweb.Handler {
+		return func(ctx rweb.Context) error {
+			ctx.Response().SetHeader("X-Trace", ctx.Response().Header("X-Trace")+name+";")
+			return ctx.Next()
+		}
+	}
+
+	g := s.Group("/api", mark("mw"))
+	g.Use(mark("u1"))
+	g.Use(mark("u2"))
+
+	a := g.Group("/a", mark("A"))
+	b := g.Group("/b", mark("B"))
+
+	a.Get("/x", func(ctx rweb.Context) error { return ctx.WriteText("a") })
+	b.Get("/x", func(ctx rweb.Context) error { return ctx.WriteText("b") })
+
+	response := s.Request("GET", "/api/a/x", nil, nil)
+	assert.Equal(t, http.StatusOK, response.Status())
+	assert.Equal(t, "a", string(response.Body()))
+	assert.Equal(t, "mw;u1;u2;A;", response.Header("X-Trace"))
+
+	response = s.Request("GET", "/api/b/x", nil, nil)
+	assert.Equal(t, http.StatusOK, response.Status())
+	assert.Equal(t, "b", string(response.Body()))
+	assert.Equal(t, "mw;u1;u2;B;", response.Header("X-Trace"))
+
+	// Use on a child must not leak into the parent or a sibling either
+	a.Use(mark("A2"))
+	g.Get("/y", func(ctx rweb.Context) error { return ctx.WriteText("g") })
+	b.Get("/y", func(ctx rweb.Context) error { return ctx.WriteText("b") })
+
+	response = s.Request("GET", "/api/y", nil, nil)
+	assert.Equal(t, "mw;u1;u2;", response.Header("X-Trace"))
+	response = s.Request("GET", "/api/b/y", nil, nil)
+	assert.Equal(t, "mw;u1;u2;B;", response.Header("X-Trace"))
+}
+
+// TestServerGroupDoesNotAliasCallerSlice verifies that s.Group copies the
+// middleware slice it is given. Two groups built from the same caller slice
+// with spare capacity would otherwise share it, and Use on one would
+// overwrite the other's appended middleware.
+func TestServerGroupDoesNotAliasCallerSlice(t *testing.T) {
+	s := rweb.NewServer()
+
+	mark := func(name string) rweb.Handler {
+		return func(ctx rweb.Context) error {
+			ctx.Response().SetHeader("X-Trace", ctx.Response().Header("X-Trace")+name+";")
+			return ctx.Next()
+		}
+	}
+
+	mws := make([]rweb.Handler, 1, 4)
+	mws[0] = mark("mw")
+
+	g1 := s.Group("/one", mws...)
+	g2 := s.Group("/two", mws...)
+	g1.Use(mark("U1"))
+	g2.Use(mark("U2"))
+
+	g1.Get("/x", func(ctx rweb.Context) error { return ctx.WriteText("1") })
+	g2.Get("/x", func(ctx rweb.Context) error { return ctx.WriteText("2") })
+
+	response := s.Request("GET", "/one/x", nil, nil)
+	assert.Equal(t, "mw;U1;", response.Header("X-Trace"))
+	response = s.Request("GET", "/two/x", nil, nil)
+	assert.Equal(t, "mw;U2;", response.Header("X-Trace"))
+}

@@ -1185,7 +1185,11 @@ func (s *Server) Group(prefix string, handlers ...Handler) *Group {
 	return &Group{
 		prefix:   prefix,
 		server:   s,
-		handlers: handlers,
+		// Clone rather than keep the variadic slice: a caller passing mws...
+		// hands over its own array, and with spare capacity a later g.Use
+		// would append into it, so two groups built from the same slice
+		// would overwrite each other's middleware (see Group.Group).
+		handlers: slices.Clone(handlers),
 	}
 }
 
