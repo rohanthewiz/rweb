@@ -824,6 +824,12 @@ there is one, otherwise the `Host` header, otherwise `"localhost"`. Before v0.1.
 the `Host` header and returned `"localhost"` for every ordinary request — do not rely on it
 for virtual hosting or a DNS-rebinding check on older versions; read `req.Header("Host")`.
 
+A scheme and host are taken only from an absolute-form target (`http://host/path`), and only
+from the part before `?`. Before v0.2.1 a `://` anywhere in the target counted, so
+`GET /redirect?url=http://evil.com/admin` was routed to `/admin` with `Host()` `"evil.com"`.
+A target that does not start with `/` and has no scheme (`OPTIONS *`, CONNECT's `host:port`)
+is kept whole as `req.Path()`.
+
 From v0.1.31 a request with more than one `Host` header, or a malformed one (whitespace,
 `/`, `@`, a non-numeric port, ...), is answered `400` before any handler runs, so the value
 is safe to echo. A missing `Host` is still tolerated.

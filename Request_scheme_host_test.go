@@ -143,3 +143,109 @@ func TestHostHeaderValidation(t *testing.T) {
 
 	_ = s.Run()
 }
+
+// targetRouteServer registers "/", "/redirect" and "/admin", each answering
+// "<route> <scheme> <host> <path> <query>" so a test can see which route the
+// target reached and what the parse put in each field. A Use middleware
+// records the path for targets no route matches (OPTIONS *).
+func targetRouteServer(opts ...rweb.ServerOptions) (*rweb.Server, *string) {
+	s := rweb.NewServer(opts...)
+	seenPath := new(string)
+	s.Use(func(ctx rweb.Context) error {
+		*seenPath = ctx.Request().Path()
+		return ctx.Next()
+	})
+	for _, route := range []string{"/", "/redirect", "/admin"} {
+		s.Get(route, func(ctx rweb.Context) error {
+			r := ctx.Request()
+			return ctx.WriteString(fmt.Sprintf("%s %s %s %s %s", route, r.Scheme(), r.Host(), r.Path(), r.Query()))
+		})
+	}
+	return s, seenPath
+}
+
+// A "://" in the query string is data, not a scheme: it must not move the
+// request to another route or set Host(). parseURL once searched the whole
+// target for "://", so "/redirect?url=http://evil.com/admin" was served by
+// /admin with Host() "evil.com", while a proxy in front applying path rules
+// saw /redirect.
+func TestQuerySchemeDoesNotRouteSynthetic(t *testing.T) {
+	s, _ := targetRouteServer()
+
+	cases := []struct{ target, want string }{
+		// origin-form: no scheme or host detection at all
+		{"/redirect?url=http://evil.com/admin", "/redirect http localhost /redirect url=http://evil.com/admin"},
+		{"/redirect?next=https://a/b", "/redirect http localhost /redirect next=https://a/b"},
+		{"/?u=x://y/admin", "/ http localhost / u=x://y/admin"},
+		// absolute-form: scheme and host come only from before the query
+		{"http://example.com/redirect?url=http://evil.com/admin", "/redirect http example.com /redirect url=http://evil.com/admin"},
+		{"https://example.com/admin", "/admin https example.com /admin "},
+		// absolute-form with an empty path: the authority ends at "?", not at
+		// the first "/" the query happens to contain
+		{"http://example.com?url=http://evil.com/admin", "/ http example.com / url=http://evil.com/admin"},
+		{"http://example.com", "/ http example.com / "},
+	}
+	for _, c := range cases {
+		t.Run(c.target, func(t *testing.T) {
+			r := s.Request(consts.MethodGet, c.target, nil, nil)
+			assert.Equal(t, r.Status(), 200)
+			assert.Equal(t, string(r.Body()), c.want)
+		})
+	}
+}
+
+// The asterisk-form target of "OPTIONS *" (RFC 9112 §3.2.4) is kept as the
+// path; it is not mistaken for a host or rewritten to "/".
+func TestOptionsAsteriskTargetSynthetic(t *testing.T) {
+	s, seenPath := targetRouteServer()
+	_ = s.Request(consts.MethodOptions, "*", nil, nil)
+	assert.Equal(t, *seenPath, "*")
+}
+
+// The same targets over a real connection, where the Host header supplies
+// the host for origin-form requests and is ignored for absolute-form ones.
+func TestQuerySchemeDoesNotRouteOverWire(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	s, seenPath := targetRouteServer(rweb.ServerOptions{ReadyChan: readyChan, Address: "localhost:"})
+
+	cases := []struct{ target, want string }{
+		{"/redirect?url=http://evil.com/admin", "/redirect http good.com /redirect url=http://evil.com/admin"},
+		{"/redirect?next=https://a/b", "/redirect http good.com /redirect next=https://a/b"},
+		{"http://example.com/redirect?url=http://evil.com/admin", "/redirect http example.com /redirect url=http://evil.com/admin"},
+		{"http://example.com?url=http://evil.com/admin", "/ http example.com / url=http://evil.com/admin"},
+	}
+
+	go func() {
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-readyChan
+
+		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
+		assert.Nil(t, err)
+		defer conn.Close()
+		rdr := bufio.NewReader(conn)
+
+		for _, c := range cases {
+			_, err = io.WriteString(conn, "GET "+c.target+" HTTP/1.1\r\nHost: good.com\r\n\r\n")
+			assert.Nil(t, err)
+			resp, err := http.ReadResponse(rdr, nil)
+			assert.Nil(t, err)
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if string(body) != c.want {
+				t.Errorf("%s: body %q, want %q", c.target, body, c.want)
+			}
+		}
+
+		// OPTIONS *: no route matches, but the request is parsed with "*"
+		// as its path and answered on the same connection.
+		_, err = io.WriteString(conn, "OPTIONS * HTTP/1.1\r\nHost: good.com\r\n\r\n")
+		assert.Nil(t, err)
+		resp, err := http.ReadResponse(rdr, nil)
+		assert.Nil(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		assert.Equal(t, *seenPath, "*")
+	}()
+
+	_ = s.Run()
+}

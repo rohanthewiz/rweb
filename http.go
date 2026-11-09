@@ -17,20 +17,54 @@ func isValidRequestMethod(method string) bool {
 	}
 }
 
-// parseURL parses a URL and returns the scheme, host, path and query.
-// The URL is expected to be in the format "scheme://host/path?query"
+// parseURL parses a request target and returns the scheme, host, path and query.
 // Though we could have used the standard URL package we wanted to maintain fine control.
+//
+// The target arrives in one of the forms of RFC 9112 §3.2:
+//
+//	origin-form     /path?query                   nearly every request
+//	absolute-form   scheme://host/path?query      proxies, some clients
+//	                scheme://host?query           (empty path: "/")
+//	authority-form  host:port                     CONNECT; kept as the path
+//	asterisk-form   *                             OPTIONS *; kept as the path
+//
+// Only an absolute-form target yields a scheme and host, and they are looked
+// for only before the first "?". The query is data: a target such as
+// "/redirect?url=http://evil.com/admin" used to be split at the "://" inside
+// the query, which routed it to /admin with host "evil.com" — a different
+// route from the one any proxy in front, applying path rules, had seen.
 func parseURL(url string, urlOpts URLOptions) (scheme string, host string, path string, query string) {
-	schemeEndPos := strings.Index(url, consts.SchemeDelimiter)
-	if schemeEndPos != -1 {
-		scheme = url[:schemeEndPos]
-		url = url[schemeEndPos+len(consts.SchemeDelimiter):]
-	}
+	// A target starting with "/" is origin-form and cannot carry a scheme or
+	// host, so the scan for "://" is skipped altogether. This is the hot
+	// path, and also the one the misrouting above came through.
+	if !strings.HasPrefix(url, "/") {
+		beforeQuery := url
+		if q := strings.IndexByte(url, consts.RuneQuestion); q != -1 {
+			beforeQuery = url[:q]
+		}
 
-	pathStartPos := strings.IndexByte(url, consts.RuneFwdSlash)
-	if pathStartPos != -1 {
-		host = url[:pathStartPos]
-		url = url[pathStartPos:]
+		if schemeEndPos := strings.Index(beforeQuery, consts.SchemeDelimiter); schemeEndPos != -1 {
+			scheme = url[:schemeEndPos]
+			url = url[schemeEndPos+len(consts.SchemeDelimiter):]
+
+			// The authority runs to the first "/" or "?", whichever comes
+			// first. Stopping only at "/" would read
+			// "http://a.com?u=http://b/c" as host "a.com?u=http:".
+			// With neither, the whole rest is the host and the path is
+			// empty (fixed up to "/" below).
+			if authEnd := strings.IndexAny(url, "/?"); authEnd != -1 {
+				host = url[:authEnd]
+				url = url[authEnd:]
+			} else {
+				host = url
+				url = ""
+			}
+		}
+		// No scheme: authority-form ("host:port") or asterisk-form ("*"), or a
+		// malformed target. None of these names a host for routing purposes,
+		// so the target is left whole as the path. In particular a target
+		// such as "evil.com/admin" is not split into host and path: a host
+		// is taken only from an absolute-form target.
 	}
 
 	queryPos := strings.IndexByte(url, consts.RuneQuestion)
