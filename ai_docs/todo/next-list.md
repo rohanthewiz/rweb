@@ -38,20 +38,8 @@ code at `3169f85`.
 
 ## Open
 
-- **N-035** · raised `2026-1109-once-over-review` · value high
-  No header size limit (a 64 MB header line was accepted) and no read, write or idle timeouts (`Server.go:1231`). Reopens declined N-012. Needs decision D2. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-036** · raised `2026-1109-once-over-review` · value medium
-  Request framing accepts ambiguous messages: Content-Length wins over chunked, negative and conflicting Content-Length accepted (`Server.go:1305`). Reproduced. Needs decision D3. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-037** · raised `2026-1109-once-over-review` · value medium
-  `Expect: 100-continue` gets no interim response, so curl stalls about a second on large uploads. Reproduced. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-038** · raised `2026-1109-once-over-review` · value low
-  `Connection: close` and HTTP/1.0 are ignored; the request-line version is not parsed. Reopens declined N-013. Needs decision D4. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-039** · raised `2026-1109-once-over-review` · value high
   No graceful shutdown: no `Shutdown`/`Serve(listener)`, `Run` never releases SIGINT/SIGTERM (a process with `Run` in a goroutine survived SIGTERM), accept errors retried with no backoff, SSE streams ignore shutdown. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-040** · raised `2026-1109-once-over-review` · value high
-  WebSocket hardening: no Origin check, no ping or read deadline, write deadline not applied once expired, `closed` raced, control frames unvalidated, subprotocol echoed blindly, `[ERR]` on normal close. Needs decision D5. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-041** · raised `2026-1109-once-over-review` · value medium
-  Pooled request, response and header buffers keep their largest size, so one 100 MB upload pins 100 MB per connection (`Context.go:230`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-042** · raised `2026-1109-once-over-review` · value medium
   Headers and body leave in two writes (`Server.go:1675`, `1702`); a prototype measured 3–4 % on plain TCP. Adds the phase's benchmark file. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-043** · raised `2026-1109-once-over-review` · value medium
@@ -114,6 +102,18 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-041** · raised `2026-1109-once-over-review` · closed 2026-11-09, `863d3b4`
+  `Clean` drops `request.body`, `response.body` or `respBuf` when its capacity exceeds 256 KB (`maxRetainedBuf`). Test: `buffer_retention_test.go`.
+- **N-040** · raised `2026-1109-once-over-review` · closed 2026-11-09, `009122c`..`15d0cd0`
+  Decision D5: on by default. Cross-origin handshakes get 403 (same host or no Origin allowed; `AllowedOrigins` adds, `CheckOrigin` decides alone), manual `UpgradeWebSocket` included. Server pings every 30 s with a 40 s read window (`PingInterval`, `PongTimeout`), 10 s write timeout (`WriteTimeout`), `closed` is atomic, oversized or fragmented control frames close with 1002, `WSOptions.Subprotocols` selects (no blind echo; `ws.Subprotocol()`), handler errors after the upgrade skip the error handler and normal disconnects are not logged, `Close` releases its lock before waiting for the peer. Note for deployments: the origin check compares against `Host()`, so a proxy that rewrites Host needs `AllowedOrigins`. Left for N-043: `Close` from another goroutine during `ReadMessage` puts two readers on the conn. Tests: `websocket_hardening_test.go`, `websocket_reject_test.go`.
+- **N-038** · raised `2026-1109-once-over-review` · closed 2026-11-09, `2e0407d`
+  Decision D4: yes. The request-line version is parsed; HTTP/1.1 closes on `Connection: close`, HTTP/1.0 closes unless `Connection: keep-alive`; the response carries the matching header, and a handler's own `Connection: close` now closes. A missing or unknown version is still served as 1.1. Tests: `connection_close_test.go`.
+- **N-037** · raised `2026-1109-once-over-review` · closed 2026-11-09, `6b6513b`
+  `Expect: 100-continue` on an HTTP/1.1 request with a body is answered `100 Continue` just before the body is read, after the framing and size checks, so a refused request never has its body sent. Any other expectation gets 417. Tests: `expect_continue_test.go`.
+- **N-036** · raised `2026-1109-once-over-review` · closed 2026-11-09, `dcef51d`
+  Decision D3: 400. Refused with 400: Content-Length together with Transfer-Encoding, non-digit or conflicting Content-Length, a header line with no colon or a non-token name, a folded line, a bare-LF end of head, a second Transfer-Encoding line, `chunked` not last. Other codings ending in `chunked` get 501. The chunked reader accepts extensions and trailers within limits and checks each CRLF. `TestBadRequestHeader` rewritten to expect 400. Code in `request_framing.go`; tests `request_framing_test.go`.
+- **N-035** · raised `2026-1109-once-over-review` · closed 2026-11-09, `28f214c`
+  Decision D2: on by default. `MaxHeaderBytes` 1 MB (431 over it), `ReadHeaderTimeout` 30 s (408 mid-head), `IdleTimeout` 120 s (silent close); `ReadTimeout` and `WriteTimeout` off by default; SSE has its own per-flush `SSECfg.WriteTimeout`, default 30 s. Zero selects the default, negative disables. `WriteTimeout` bounds each write, not the response: bodies and sized streams go out in 1 MB slices with the deadline renewed. A failed header/body write now closes the conn. Also fixed: `sendSSE` kept writing to a dead conn after a write error on an event over 4 KB. Open edge: no lingering close after 431/413, so on Linux a client still sending may see a reset before the response. Code in `conn_limits.go`; tests `conn_limits_test.go`; benchmark `keepalive_bench_test.go` (4 allocs/op before and after).
 - **N-058** · raised `2026-1109-once-over-review` · closed 2026-11-09
   `Group.StaticFiles`, `StaticFilesAbs` and `Proxy` registered straight on the server, so group middleware never ran for them: files or an upstream under an authenticated group were served to anyone. Done: `Group.wrap` (split out of `addRoute`) is passed to the server's private `staticFiles` / `staticFilesAbs` / `proxy`, which apply it to the handler before registering. Test: `TestGroupMiddlewareCoversStaticAndProxy` (200 on the old code where 401 is expected). SKILL.md notes it.
 - **N-034** · raised `2026-1109-once-over-review` · closed 2026-11-09, `ee2b87c`
