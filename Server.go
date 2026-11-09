@@ -1485,6 +1485,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 		var isChunked bool
 		var sawHost bool // a second Host header is a protocol error, see below
 
+		// Framing headers, judged once the head is complete (see
+		// request_framing.go for the rules and why they are strict).
+		var sawContentLength bool
+		var transferEncoding string
+		var sawTransferEncoding bool
+
 		// Read headers until we meet an empty line
 		for {
 			message, err = lr.readLine() // read a line, charged to the head's budget
@@ -1497,10 +1503,25 @@ func (s *Server) handleConnection(conn net.Conn) {
 				break
 			}
 
-			colon := strings.IndexByte(message, consts.RuneColon)
+			// A line starting with whitespace continues the previous one
+			// (obsolete line folding, RFC 9112 §5.2). A server may unfold it
+			// or refuse the message; a proxy that unfolds and one that does
+			// not would see different headers, so it is refused.
+			if message[0] == ' ' || message[0] == '\t' {
+				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				return
+			}
 
-			if colon <= 0 {
-				continue // header should include a colon
+			// A line with no colon, or whose name is not a token, is not a
+			// header field. Skipping such lines, as rweb once did, means
+			// reading the head differently from any parser that does not, and
+			// "Content-Length : 5" in particular is a known way to show a
+			// proxy and a server two different lengths (RFC 9112 §5.1: a
+			// server MUST answer whitespace before the colon with 400).
+			colon := strings.IndexByte(message, consts.RuneColon)
+			if colon < 0 || !isValidHeaderKey(message[:colon]) {
+				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				return
 			}
 
 			key := message[:colon]
@@ -1518,11 +1539,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 			// Check for Content-Length and Transfer-Encoding headers
 			if strings.EqualFold(key, consts.HeaderContentLength) {
-				contentLen, err = strconv.ParseInt(value, 10, 64)
-				if err != nil {
+				// Digits only, and a repeat must agree with the first: with
+				// two different lengths, which one a hop believes decides
+				// where it thinks the next request starts.
+				n, ok := parseContentLength(value)
+				if !ok || (sawContentLength && n != contentLen) {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
 					return
 				}
+				contentLen, sawContentLength = n, true
 			} else if strings.EqualFold(key, consts.HeaderContentType) {
 				ctx.request.ContentType = s2b(value)
 			} else if strings.EqualFold(key, consts.HeaderHost) {
@@ -1551,10 +1576,33 @@ func (s *Server) handleConnection(conn net.Conn) {
 					return
 				}
 				sawHost = true
-			} else if strings.EqualFold(key, consts.HeaderTransferEncoding) &&
-				strings.Contains(strings.ToLower(value), "chunked") {
-				isChunked = true
+			} else if strings.EqualFold(key, consts.HeaderTransferEncoding) {
+				// A second line would extend the coding list ("chunked" twice
+				// is chunked applied twice, which no sender may do); there is
+				// no reading of it worth the ambiguity.
+				if sawTransferEncoding {
+					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					return
+				}
+				transferEncoding, sawTransferEncoding = value, true
 			}
+		}
+
+		// Transfer-Encoding decides the framing on its own (RFC 9112 §6.1),
+		// and only exactly "chunked" is decoded. With Content-Length as
+		// well, one hop may frame by each header; the message is refused
+		// rather than resolved in favour of either (it used to be framed by
+		// Content-Length).
+		if sawTransferEncoding {
+			if sawContentLength {
+				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				return
+			}
+			if reply := transferEncodingReply(transferEncoding); reply != "" {
+				_, _ = io.WriteString(conn, reply)
+				return
+			}
+			isChunked = true
 		}
 
 		// Resolve the request-body cap; 0 means "use default", negative disables.
@@ -1604,64 +1652,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 
 		} else if isChunked {
-			// Chunked encoding
-			for {
-				// Read chunk size. The line goes through the bounded reader
-				// with a budget of its own: the body's size cap counts chunk
-				// data, not this framing, so without one an endless size line
-				// would be buffered whole, as header lines used to be.
-				lr.reset(chunkLineMax)
-				chunkSize, err := lr.readLine()
-				if err != nil {
-					if errors.Is(err, errHeaderTooLarge) {
-						_, _ = io.WriteString(conn, consts.HTTPBadRequest)
-					} else {
-						headFailed(err)
-					}
-					return
-				}
-
-				// Parse chunk size (hex)
-				size, err := strconv.ParseInt(strings.TrimSpace(chunkSize), 16, 64)
-				if err != nil || size < 0 {
-					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
-					return
-				}
-
-				// Zero size chunk means end of body
-				if size == 0 {
-					// Read final CRLF
-					lr.reset(chunkLineMax)
-					_, err = lr.readLine()
-					if err != nil {
-						headFailed(err)
-						return
-					}
-					break
-				}
-
-				// Enforce the cap on the accumulated chunked body as well
-				if maxBody > 0 && int64(len(ctx.request.body))+size > maxBody {
-					_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
-					return
-				}
-
-				// Read chunk data directly into the pooled body buffer
-				start := len(ctx.request.body)
-				ctx.request.body = slices.Grow(ctx.request.body, int(size))[:start+int(size)]
-				_, err = io.ReadFull(ctx.reader, ctx.request.body[start:])
-				if err != nil {
-					headFailed(err)
-					return
-				}
-
-				// Read chunk LF
-				lr.reset(chunkLineMax)
-				_, err = lr.readLine()
-				if err != nil {
-					headFailed(err)
-					return
-				}
+			// Chunked encoding: size lines, data, CRLFs and trailers are all
+			// checked as they are read (see readChunkedBody), and the body
+			// cap applies to the accumulated data.
+			err = readChunkedBody(ctx.reader, &lr, &ctx.request.body, maxBody, lim.maxHeaderBytes)
+			switch {
+			case err == nil:
+			case errors.Is(err, errBadChunk):
+				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				return
+			case errors.Is(err, errChunkTooLarge):
+				_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
+				return
+			default: // over the trailer budget, a deadline, or the client left
+				headFailed(err)
+				return
 			}
 		}
 

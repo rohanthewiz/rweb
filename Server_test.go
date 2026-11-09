@@ -259,6 +259,11 @@ func TestBadRequest(t *testing.T) {
 	_ = s.Run()
 }
 
+// TestBadRequestHeader: a header line with no colon is not a header field.
+// It used to be skipped and the request served; it is now answered 400 and
+// the connection closed (N-036), since a parser that skips such a line and
+// one that does not read the head differently, which is the ground request
+// smuggling is built on.
 func TestBadRequestHeader(t *testing.T) {
 	readyChan := make(chan struct{}, 1)
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
@@ -279,10 +284,9 @@ func TestBadRequestHeader(t *testing.T) {
 		_, err = io.WriteString(conn, "GET / HTTP/1.1\r\nBadHeader\r\nGood: Header\r\n\r\n")
 		assert.Nil(t, err)
 
-		buffer := make([]byte, len(HTTP11OK))
-		_, err = conn.Read(buffer)
+		response, err := io.ReadAll(conn) // returns once the server closes
 		assert.Nil(t, err)
-		assert.Equal(t, string(buffer), HTTP11OK)
+		assert.Equal(t, consts.HTTPBadRequest, string(response))
 	}()
 
 	_ = s.Run()

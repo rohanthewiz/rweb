@@ -238,6 +238,12 @@ s := rweb.NewServerWithOptions(
 )
 ```
 
+Request framing is strict, so a proxy in front and rweb cannot disagree about where a request
+ends: both `Content-Length` and `Transfer-Encoding`, a non-numeric or conflicting
+`Content-Length`, a malformed header line (no colon, whitespace before the colon, obsolete
+line folding) or malformed chunked framing gets `400`, and a transfer coding other than
+`chunked` gets `501`; the connection is closed after either.
+
 ## Request Context and Cancellation
 
 `ctx.Request().Context()` returns a `context.Context` for the request, like net/http's

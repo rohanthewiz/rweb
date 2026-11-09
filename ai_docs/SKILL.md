@@ -104,6 +104,22 @@ never meet a request's deadline. Because `WriteTimeout` bounds a *stalled*
 write, a long download that keeps moving is not cut off; static files keep
 using sendfile.
 
+### Strict Request Framing (v0.2.1+)
+
+Requests whose length two parsers could read differently (the basis of request
+smuggling behind a proxy) are refused and the connection closed:
+
+- `400`: both `Content-Length` and `Transfer-Encoding`; a `Content-Length` that is
+  not all digits (`-5`, `+5`, `5, 5`) or repeated with a different value; a
+  header name that is not a token (`Name : v`, `X(y): v`); a line starting with
+  space/tab (obsolete folding); a header line with no colon; `Transfer-Encoding`
+  whose last coding is not `chunked`; a second `Transfer-Encoding` line; chunk
+  data not followed by CRLF; a malformed chunk size.
+- `501`: `Transfer-Encoding` naming a coding besides `chunked` (`gzip, chunked`).
+
+Chunked bodies accept chunk extensions (ignored) and trailers (read and
+discarded, counted against `MaxHeaderBytes`).
+
 ## Routing
 
 ### HTTP Methods

@@ -48,6 +48,7 @@ curl http://localhost:8080/some-json
 - **conn_reader.go**: The reader under each connection's bufio.Reader; runs the disconnect watch behind `ctx.Request().Context()` (a 1-byte background read, as in net/http). Anything that takes over a conn's reads (WebSocket upgrade, `GetConn`, `sendSSE`) must stop the watch first
 
 - **conn_limits.go**: Connection limits (`MaxHeaderBytes`, `ReadHeaderTimeout`, `IdleTimeout`, `ReadTimeout`, `WriteTimeout`, `SSECfg.WriteTimeout`; zero = default, negative = off), the bounded `lineReader` for request heads, and the diagram of which deadline is armed in each phase of a request. Read deadlines are cleared before the handler and write deadlines after each response; keep it that way, or the disconnect watch, WebSocket and `GetConn` meet a stale deadline
+- **request_framing.go**: Strict request framing (anti request-smuggling): `Content-Length` parsing, `Transfer-Encoding` rules, and `readChunkedBody` (extensions, trailers, CRLF after data, overflow and framing-overhead bounds). Ambiguous messages get `400`/`501` and a close; do not loosen these without considering a proxy that reads the bytes differently
 
 ### Key Patterns
 
