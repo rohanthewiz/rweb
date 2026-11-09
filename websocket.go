@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -93,9 +94,14 @@ type WSConn struct {
 	// first bytes arrived with its upgrade request and HTTP had already read
 	// them — those bytes followed by conn (see upgradeWebSocket). Deadlines
 	// and writes still go to conn directly.
-	r              io.Reader
-	isServer       bool
-	closed         bool
+	r        io.Reader
+	isServer bool
+	// closed is set once a close frame has been sent (Close, or the reply in
+	// handleClose); every write checks it first. Atomic because it is written
+	// under closeMutex and read under writeMutex — two different locks — and
+	// it is stored while writeMutex is still held for the close frame, so no
+	// data frame can be written after the close frame.
+	closed         atomic.Bool
 	closeMutex     sync.Mutex
 	writeMutex     sync.Mutex
 	maxMessageSize int64
@@ -346,7 +352,7 @@ func (ws *WSConn) WriteMessage(messageType MessageType, data []byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()
 
-	if ws.closed {
+	if ws.closed.Load() {
 		return ErrWebSocketAlreadyClosed
 	}
 
@@ -361,7 +367,7 @@ func (ws *WSConn) WriteMessages(messageType MessageType, data ...[]byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()
 
-	if ws.closed {
+	if ws.closed.Load() {
 		return ErrWebSocketAlreadyClosed
 	}
 	ws.wbuf = ws.wbuf[:0]
@@ -534,9 +540,8 @@ func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, erro
 // Close closes the WebSocket connection with the given code and reason
 func (ws *WSConn) Close(code int, reason string) error {
 	ws.closeMutex.Lock()
-	defer ws.closeMutex.Unlock()
-
-	if ws.closed {
+	if ws.closed.Load() {
+		ws.closeMutex.Unlock()
 		return nil
 	}
 
@@ -546,19 +551,26 @@ func (ws *WSConn) Close(code int, reason string) error {
 	copy(data[2:], reason)
 
 	// Under writeMutex like every other write: frames from two goroutines
-	// must not interleave on the socket, and they share wbuf.
+	// must not interleave on the socket, and they share wbuf. closed is set
+	// before writeMutex is released, so a WriteMessage waiting on the lock
+	// sees it and returns ErrWebSocketAlreadyClosed instead of sending a
+	// data frame after the close frame (RFC 6455 §5.5.1). It is set whether
+	// or not the write succeeded: either way this side is done writing.
 	ws.writeMutex.Lock()
 	err := ws.writeFrame(wsClose, data)
+	ws.closed.Store(true)
 	ws.writeMutex.Unlock()
+	ws.signalDone()
+
+	// closeMutex only serialises the decision to close. It is released
+	// before the wait below, so a second Close, or a peer close frame seen
+	// by handleClose meanwhile, returns at once (closed is already set)
+	// instead of queueing behind up to closeHandshakeTimeout.
+	ws.closeMutex.Unlock()
+
 	if err != nil {
-		// Even if writing the close frame fails, mark as closed
-		ws.closed = true
-		ws.doneOnce.Do(func() { close(ws.done) })
 		return ws.conn.Close()
 	}
-
-	ws.closed = true
-	ws.doneOnce.Do(func() { close(ws.done) })
 
 	// Wait for the peer's close frame response using a read deadline
 	// instead of a blind sleep. Returns immediately when the frame arrives,
@@ -569,12 +581,18 @@ func (ws *WSConn) Close(code int, reason string) error {
 	return ws.conn.Close()
 }
 
+// signalDone closes the Done channel, once, whichever path ends the
+// connection first.
+func (ws *WSConn) signalDone() {
+	ws.doneOnce.Do(func() { close(ws.done) })
+}
+
 // handleClose handles an incoming close frame
 func (ws *WSConn) handleClose(code int, text string) {
 	ws.closeMutex.Lock()
 	defer ws.closeMutex.Unlock()
 
-	if ws.closed {
+	if ws.closed.Load() {
 		return
 	}
 
@@ -583,14 +601,15 @@ func (ws *WSConn) handleClose(code int, text string) {
 		handler(code, text)
 	}
 
-	// Send close response
-	ws.closed = true
-	ws.doneOnce.Do(func() { close(ws.done) })
+	// Send close response. As in Close, closed is set under writeMutex
+	// together with the close frame, so nothing is written after it.
 	data := make([]byte, 2)
 	binary.BigEndian.PutUint16(data, uint16(code))
 	ws.writeMutex.Lock()
 	ws.writeFrame(wsClose, data)
+	ws.closed.Store(true)
 	ws.writeMutex.Unlock()
+	ws.signalDone()
 	ws.conn.Close()
 }
 
@@ -599,7 +618,7 @@ func (ws *WSConn) writePong(data []byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()
 
-	if ws.closed {
+	if ws.closed.Load() {
 		return ErrWebSocketAlreadyClosed
 	}
 
@@ -611,7 +630,7 @@ func (ws *WSConn) WritePing(data []byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()
 
-	if ws.closed {
+	if ws.closed.Load() {
 		return ErrWebSocketAlreadyClosed
 	}
 
