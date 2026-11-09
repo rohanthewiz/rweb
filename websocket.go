@@ -112,8 +112,29 @@ type WSConn struct {
 	closeHandlers  []func(code int, text string)
 	pingHandler    func([]byte) error
 	pongHandler    func([]byte) error
-	readDeadline   time.Time
-	writeDeadline  time.Time
+
+	// Deadlines an app set explicitly (SetReadDeadline, SetWriteDeadline);
+	// the zero time means none. Guarded by deadlineMu rather than by the
+	// read or write path's own lock, because, as on a net.Conn, a deadline
+	// may be set from any goroutine while a read or write is blocked, and
+	// must reach that blocked call.
+	deadlineMu    sync.Mutex
+	readDeadline  time.Time
+	writeDeadline time.Time
+
+	// writeTimeout is the per-flush write deadline (WSOptions.WriteTimeout,
+	// resolved): each flush gets now+writeTimeout unless an explicit
+	// writeDeadline is set. 0 means none, as for a bare NewWSConn.
+	writeTimeout time.Duration
+	// writeDeadlineSet records that a flush left a deadline on the conn, so
+	// a later flush with neither a timeout nor a deadline clears it once
+	// instead of on every write. Guarded by writeMutex.
+	writeDeadlineSet bool
+	// writeErr is sticky: once a write failed after putting part of a frame
+	// on the wire, the byte stream no longer lines up with the peer's frame
+	// parser, and every later write returns this error rather than sending
+	// frames the peer would misread. Guarded by writeMutex.
+	writeErr error
 
 	// done is closed when the connection shuts down, enabling goroutines
 	// (e.g., ping tickers) to detect closure and exit cleanly.
@@ -161,6 +182,27 @@ func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 	}
 
 	return ws
+}
+
+// applyOptions configures a connection the server just upgraded from its
+// route's WSOptions, resolving each zero value to its default. A bare
+// NewWSConn gets none of this — no write timeout — so wrapping a conn by
+// hand behaves as it always has; the defaults are a property of the
+// server's WebSocket routes.
+func (ws *WSConn) applyOptions(opts WSOptions) {
+	ws.writeTimeout = resolveWSDuration(opts.WriteTimeout, defaultWriteTimeout)
+}
+
+// resolveWSDuration maps a WSOptions duration to its effective value:
+// 0 selects def, a negative value disables (0), anything else is kept.
+func resolveWSDuration(d, def time.Duration) time.Duration {
+	switch {
+	case d == 0:
+		return def
+	case d < 0:
+		return 0
+	}
+	return d
 }
 
 // performHandshake performs the WebSocket handshake on the server side
@@ -482,18 +524,59 @@ func (ws *WSConn) writeFrame(opcode int, data []byte) error {
 }
 
 // flushFrames sends what appendFrame assembled in wbuf, under the write
-// deadline, and lets go of an oversized buffer.
+// deadline, and lets go of an oversized buffer. Callers hold writeMutex.
 func (ws *WSConn) flushFrames() error {
-	if ws.writeDeadline.After(time.Now()) {
-		ws.conn.SetWriteDeadline(ws.writeDeadline)
+	defer func() {
+		if cap(ws.wbuf) > maxRetainedWriteBuf {
+			ws.wbuf = nil
+		} else {
+			ws.wbuf = ws.wbuf[:0]
+		}
+	}()
+	if ws.writeErr != nil {
+		return ws.writeErr
 	}
-	_, err := ws.conn.Write(ws.wbuf)
-	if cap(ws.wbuf) > maxRetainedWriteBuf {
-		ws.wbuf = nil
-	} else {
-		ws.wbuf = ws.wbuf[:0]
+
+	ws.applyWriteDeadline()
+	n, err := ws.conn.Write(ws.wbuf)
+	if err != nil && n > 0 {
+		// Part of a frame went out. A write that failed before sending
+		// anything (n == 0, e.g. a deadline already past) leaves the stream
+		// intact, so, as on a net.Conn, the app may set a new deadline and
+		// write again; after a partial frame it may not.
+		ws.writeErr = err
 	}
 	return err
+}
+
+// applyWriteDeadline puts this flush's write deadline on the conn:
+//
+//	explicit SetWriteDeadline(t), t non-zero  -> t, as given, even if past
+//	                                             (the write then fails at
+//	                                             once, as on a net.Conn)
+//	else writeTimeout > 0                     -> now + writeTimeout
+//	else                                      -> none (cleared if a previous
+//	                                             flush set one)
+//
+// The explicit deadline used to be applied only while still in the future,
+// so an expired one silently stopped applying and writes ran unbounded.
+// Callers hold writeMutex.
+func (ws *WSConn) applyWriteDeadline() {
+	ws.deadlineMu.Lock()
+	explicit := ws.writeDeadline
+	ws.deadlineMu.Unlock()
+
+	switch {
+	case !explicit.IsZero():
+		_ = ws.conn.SetWriteDeadline(explicit)
+		ws.writeDeadlineSet = true
+	case ws.writeTimeout > 0:
+		_ = ws.conn.SetWriteDeadline(time.Now().Add(ws.writeTimeout))
+		ws.writeDeadlineSet = true
+	case ws.writeDeadlineSet:
+		_ = ws.conn.SetWriteDeadline(time.Time{})
+		ws.writeDeadlineSet = false
+	}
 }
 
 // appendFrame appends one frame carrying data to buf: header, extended
@@ -708,10 +791,25 @@ func (ws *WSConn) SetReadDeadline(t time.Time) error {
 	return ws.conn.SetReadDeadline(t)
 }
 
-// SetWriteDeadline sets the write deadline
+// SetWriteDeadline sets the write deadline, with net.Conn semantics: every
+// write fails once t has passed (including a write already blocked when it
+// is set, and a write started after t), until a new deadline is set. The
+// zero time clears it, and the connection's per-write timeout
+// (WSOptions.WriteTimeout) applies again.
+//
+// It is applied to the conn here as well as on each flush: here so that it
+// reaches a write blocked right now (which holds writeMutex, so this must
+// not take it), on each flush so the per-write timeout never replaces it.
 func (ws *WSConn) SetWriteDeadline(t time.Time) error {
+	ws.deadlineMu.Lock()
 	ws.writeDeadline = t
-	return nil // Applied on next write
+	ws.deadlineMu.Unlock()
+	if t.IsZero() && ws.writeTimeout > 0 {
+		// Clearing the explicit deadline hands a blocked write back to the
+		// per-write timeout rather than leaving it unbounded.
+		return ws.conn.SetWriteDeadline(time.Now().Add(ws.writeTimeout))
+	}
+	return ws.conn.SetWriteDeadline(t)
 }
 
 // LocalAddr returns the local network address

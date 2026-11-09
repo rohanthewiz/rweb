@@ -241,6 +241,30 @@ the connection belongs to the caller, so the context is only cancelled when the 
 returns (a WebSocket peer leaving shows up as a `ReadMessage` error). A pipelined request
 (the client already sent its next one) is not watched either.
 
+## WebSockets
+
+```go
+s.WebSocket("/ws", func(ws *rweb.WSConn) error {
+	for {
+		msg, err := ws.ReadMessage()
+		if err != nil {
+			return nil // peer gone
+		}
+		_ = ws.WriteMessage(msg.Type, msg.Data)
+	}
+})
+```
+
+`s.WebSocketWithOptions(path, rweb.WSOptions{...}, handler)` takes per-route options. The
+defaults are chosen to be safe, and apply to `s.WebSocket` and `ctx.UpgradeWebSocket()` too:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `WriteTimeout` | 10 s (negative disables) | Each socket write must finish in time, so a peer that stops reading cannot block a writer forever. `ws.SetWriteDeadline` overrides it while set. |
+| `Compression` | off | permessage-deflate with clients that offer it. |
+
+Control frames over 125 bytes or without FIN fail the connection with close code 1002.
+
 ## Route Groups
 
 Route groups allow you to organize routes with common prefixes and apply middleware to specific sets of routes:

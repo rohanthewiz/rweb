@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 )
 
 // permessage-deflate (RFC 7692): compressed WebSocket messages.
@@ -43,6 +44,13 @@ type WSOptions struct {
 	// CompressionLevel is the compress/flate level for outgoing messages; 0
 	// selects defaultCompressionLevel (2).
 	CompressionLevel int
+
+	// WriteTimeout bounds each write to the socket (one message, one
+	// WriteMessages batch, a ping or a close frame): a peer that stops
+	// reading fails the write once its buffers are full, instead of
+	// blocking the writer forever. 0 selects 10 s; negative disables it.
+	// An explicit WSConn.SetWriteDeadline takes precedence while set.
+	WriteTimeout time.Duration
 }
 
 // deflateTail completes a message for the inflater: the 00 00 ff ff the

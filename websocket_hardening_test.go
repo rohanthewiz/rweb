@@ -6,9 +6,13 @@ package rweb
 // with newTestPair and speak raw frames with writeRawFrame.
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net"
+	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -208,5 +212,180 @@ func TestWebSocketMaxSizePingIsAnswered(t *testing.T) {
 	}
 	if got := <-pong; !bytes.Equal(got, payload) {
 		t.Fatalf("pong payload %d bytes, want the 125-byte ping payload", len(got))
+	}
+}
+
+// --- write deadlines ---------------------------------------------------------
+
+// drain reads and discards everything the peer side receives, until it is
+// closed.
+func drain(c net.Conn) {
+	buf := make([]byte, 4096)
+	for {
+		if _, err := c.Read(buf); err != nil {
+			return
+		}
+	}
+}
+
+// upgradeOn dials s, completes the opening handshake on /ws (with extra
+// request headers, if any) and returns the conn and a reader positioned
+// after the 101.
+func upgradeOn(t *testing.T, s *Server, extraHeaders string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	tr := transports[0]
+	c := dialTest(t, serveTest(t, s, tr), tr)
+	t.Cleanup(func() { _ = c.Close() })
+	writeAll(t, c, "GET /ws HTTP/1.1\r\nHost: test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"+extraHeaders+"\r\n")
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: status %d, want 101", resp.StatusCode)
+	}
+	return c, br
+}
+
+// A peer that stops reading must not block a writer forever: with
+// WSOptions.WriteTimeout, the write that finds the socket buffers full fails
+// with a timeout once the timeout passes.
+func TestWebSocketWriteTimeoutOption(t *testing.T) {
+	s := NewServer()
+	errc := make(chan error, 1)
+	s.WebSocketWithOptions("/ws", WSOptions{WriteTimeout: 50 * time.Millisecond}, func(ws *WSConn) error {
+		msg := make([]byte, 64<<10)
+		for {
+			if err := ws.WriteMessage(BinaryMessage, msg); err != nil {
+				errc <- err
+				return nil
+			}
+		}
+	})
+	upgradeOn(t, s, "") // and never read
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("write error = %v, want a deadline error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("writes to a peer that does not read never timed out")
+	}
+}
+
+// The route options resolve to the documented defaults: a 10 s write timeout
+// unless WriteTimeout says otherwise, none when it is negative.
+func TestWebSocketWriteTimeoutDefaults(t *testing.T) {
+	cases := []struct {
+		name string
+		opts *WSOptions // nil: s.WebSocket
+		want time.Duration
+	}{
+		{"WebSocket", nil, defaultWriteTimeout},
+		{"zero options", &WSOptions{}, defaultWriteTimeout},
+		{"explicit", &WSOptions{WriteTimeout: time.Second}, time.Second},
+		{"negative disables", &WSOptions{WriteTimeout: -1}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer()
+			got := make(chan time.Duration, 1)
+			h := func(ws *WSConn) error {
+				got <- ws.writeTimeout
+				return nil
+			}
+			if tc.opts == nil {
+				s.WebSocket("/ws", h)
+			} else {
+				s.WebSocketWithOptions("/ws", *tc.opts, h)
+			}
+			upgradeOn(t, s, "")
+			if d := recv(t, got, "handler"); d != tc.want {
+				t.Fatalf("write timeout %v, want %v", d, tc.want)
+			}
+		})
+	}
+}
+
+// SetWriteDeadline behaves as on a net.Conn: a deadline already in the past
+// fails the next write (it used to be skipped silently), and the zero time
+// clears it.
+func TestWebSocketSetWriteDeadlineExpired(t *testing.T) {
+	server, client := newTestPair()
+	defer server.conn.Close()
+	defer client.conn.Close()
+	go drain(client.conn)
+
+	if err := server.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.WriteMessage(TextMessage, []byte("late")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("write past the deadline: err = %v, want a deadline error", err)
+	}
+	if err := server.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.WriteMessage(TextMessage, []byte("on time")); err != nil {
+		t.Fatalf("write after clearing the deadline: %v", err)
+	}
+}
+
+// As on a net.Conn, a deadline set while a write is blocked applies to that
+// write.
+func TestWebSocketSetWriteDeadlineUnblocksWrite(t *testing.T) {
+	server, client := newTestPair()
+	defer server.conn.Close()
+	defer client.conn.Close()
+
+	errc := make(chan error, 1)
+	go func() { errc <- server.WriteMessage(TextMessage, []byte("nobody reads this")) }()
+	time.Sleep(20 * time.Millisecond) // the write is now blocked on the pipe
+	_ = server.SetWriteDeadline(time.Now().Add(20 * time.Millisecond))
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("blocked write: err = %v, want a deadline error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetWriteDeadline did not reach a write already blocked")
+	}
+}
+
+// partialConn accepts half of the first write and then fails it, as a
+// socket does when a write deadline expires mid-frame.
+type partialConn struct {
+	net.Conn
+	writes int
+}
+
+func (p *partialConn) Write(b []byte) (int, error) {
+	p.writes++
+	if p.writes == 1 {
+		return len(b) / 2, os.ErrDeadlineExceeded
+	}
+	return len(b), nil
+}
+
+// After a write that put part of a frame on the wire, the stream is out of
+// step with the peer's parser: every later write fails with the same error
+// rather than sending frames the peer would misread.
+func TestWebSocketPartialWriteIsSticky(t *testing.T) {
+	server, client := newTestPair()
+	defer client.conn.Close()
+	pc := &partialConn{Conn: server.conn}
+	server.conn = pc
+
+	if err := server.WriteMessage(TextMessage, []byte("half of me")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("first write: err = %v, want the deadline error", err)
+	}
+	if err := server.WriteMessage(TextMessage, []byte("next")); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("write after a partial frame: err = %v, want the same error", err)
+	}
+	if pc.writes != 1 {
+		t.Fatalf("%d writes reached the socket, want 1", pc.writes)
 	}
 }

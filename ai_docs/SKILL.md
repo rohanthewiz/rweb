@@ -686,8 +686,19 @@ s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, func(ws *rweb.W
 - The message size limit applies to the decompressed size.
 - Off by default: `s.WebSocket()` and `ctx.UpgradeWebSocket()` never negotiate it.
 
-### Protocol Enforcement
+### Safety Defaults
 
+These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
+`ctx.UpgradeWebSocket()` alike; `WSOptions` fields adjust them per route.
+
+- **Write timeout** (`WSOptions.WriteTimeout`, default 10 s, negative disables):
+  each socket write (a message, a `WriteMessages` batch, a ping, a close frame)
+  must finish within it, so a peer that stops reading fails the writer instead
+  of blocking it forever. `ws.SetWriteDeadline(t)` works as on a `net.Conn`: it
+  overrides the per-write timeout while set (reaching a write already blocked,
+  and failing writes once `t` is past); the zero time clears it. A write that
+  fails after part of a frame went out leaves the stream unusable, and every
+  later write returns the same error.
 - A ping, pong or close frame longer than 125 bytes, or without FIN, fails the
   connection: `ReadMessage` returns `rweb.ErrWebSocketBadControlFrame`, a close
   frame with code 1002 is sent and the connection is closed (RFC 6455 §5.5).
@@ -732,7 +743,7 @@ ws.SetPingHandler(func(data []byte) error {
 // Configuration
 ws.SetMaxMessageSize(10 * 1024 * 1024)    // Default: 10MB
 ws.SetReadDeadline(time.Now().Add(60 * time.Second))
-ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+ws.SetWriteDeadline(time.Now().Add(10 * time.Second)) // overrides WSOptions.WriteTimeout; zero clears
 
 // Connection info
 ws.RemoteAddr()  // Client's network address
