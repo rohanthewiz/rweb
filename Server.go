@@ -6,6 +6,7 @@ import (
 	stdctx "context"
 	"crypto/cipher"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -254,6 +256,22 @@ type SSEvent struct {
 // When sendSSE encounters this value, it writes an SSE comment (`:keepalive\n\n`)
 // which keeps the connection alive without triggering EventSource's onmessage.
 type sseKeepalive struct{}
+
+// SSEClose, sent on an SSE events channel, ends that client's stream: the
+// sender flushes what it has written and returns, the connection is closed,
+// and nothing is sent for the sentinel itself. Prefer it to closing the
+// channel when the channel is shared or will be reused.
+//
+// The bare string "close" still ends a stream too, for compatibility. That
+// older sentinel means a payload whose text is "close" cannot be sent as a
+// bare string; wrap it in an SSEvent (SSEvent{Type: "message", Data: "close"}),
+// which is always sent as an event. SSEClose has its own unexported type, so
+// no payload can be mistaken for it.
+var SSEClose = sseCloseSignal{}
+
+// sseCloseSignal is the type of SSEClose. An empty struct is comparable, so
+// sendSSE can test for it with ==.
+type sseCloseSignal struct{}
 
 type TLSCfg struct {
 	TLSAddr  string // [Port] to listen on for TLS
@@ -1941,15 +1959,24 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 					// fmt.Println("RWEB Received empty string event, skipping...")
 					continue
 				}
-				if strEvt == "close" {
-					fmt.Printf("RWEB Received close event, shutting down SSE %q events from channel: %v...\n",
-						ctx.sseEventName, ctx.sseEventsChan)
-					rw.Flush()
-					return
-				}
 			}
 
-			// Format and send the event
+			// End-of-stream sentinels: the typed rweb.SSEClose, and the bare
+			// string "close" kept for compatibility. Comparing an interface
+			// with a value of a comparable type cannot panic, whatever the
+			// event holds: differing dynamic types compare unequal before
+			// any value comparison is tried. An SSEvent whose Data is "close"
+			// is not a sentinel and is sent like any other event.
+			if event == SSEClose || event == "close" {
+				fmt.Printf("RWEB Received close event, shutting down SSE %q events from channel: %v...\n",
+					ctx.sseEventName, ctx.sseEventsChan)
+				rw.Flush()
+				return
+			}
+
+			// Format and send the event. Every event but the keepalive goes
+			// through writeSSEEvent, so a payload is rendered the same way
+			// whether it arrives in an SSEvent or bare on the channel.
 			switch v := event.(type) {
 			case sseKeepalive:
 				// SSE comment — keeps the connection alive through proxies/LBs
@@ -1957,11 +1984,9 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 				_, err = fmt.Fprint(rw, ":keepalive\n\n")
 				_ = v // use v to satisfy the compiler
 			case SSEvent: // get the eventName from the data (rweb.SSEvent) received
-				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", v.Type, v.Data)
-			case string:
-				_, err = fmt.Fprintf(rw, "event: %s\ndata: %s\n\n", ctx.sseEventName, v)
-			default:
-				_, err = fmt.Fprintf(rw, "event: %s\ndata: %+v\n\n", ctx.sseEventName, v)
+				err = writeSSEEvent(rw, v.Type, v.Data)
+			default: // a bare payload (string, []byte, number, struct...) under the stream's event name
+				err = writeSSEEvent(rw, ctx.sseEventName, v)
 			}
 
 			if err != nil {
@@ -1978,11 +2003,128 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 			}
 
 			if s.options.Verbose {
-				fmt.Printf("RWEB Sent (from channel: %v) event: %s\n", ctx.sseEventsChan, event)
+				fmt.Printf("RWEB Sent (from channel: %v) event: %v\n", ctx.sseEventsChan, event)
 			}
 		}
 	}
 
+}
+
+// writeSSEEvent writes one server-sent event to w:
+//
+//	event: <name>\n
+//	data: <line 1 of the payload's text>\n
+//	data: <line 2>\n
+//	...
+//	\n                       <- the blank line dispatches the event
+//
+// The event stream format (WHATWG HTML §9.2) is line-based. A browser ends a
+// field at CR, LF or CRLF, and drops a line that has no "field:" prefix, so a
+// payload written as a single data: line keeps only the text up to its first
+// line break. Each line of the payload therefore gets its own data: field;
+// the client joins consecutive data fields with "\n", which gives back the
+// payload (with any CR or CRLF normalised to LF). A trailing line break
+// becomes a last, empty data: line, so it survives too.
+//
+// Line breaks are removed from the event name rather than split on: a name
+// cannot span lines, and a break in it would let the rest of the name start
+// a field of its own (a forged data: or id: line).
+//
+// The payload's text is computed before anything is written, so a payload
+// that cannot be rendered (see sseDataText) leaves w untouched and the event
+// is skipped. Write errors are sticky in a bufio.Writer, so checking the last
+// write covers all of them.
+func writeSSEEvent(w *bufio.Writer, name string, data any) error {
+	text, err := sseDataText(data)
+	if err != nil {
+		return err
+	}
+
+	// Event names are almost always clean, so test before rebuilding.
+	if strings.ContainsAny(name, "\r\n") {
+		name = strings.Map(func(r rune) rune {
+			if r == '\r' || r == '\n' {
+				return -1 // drop
+			}
+			return r
+		}, name)
+	}
+
+	_, _ = w.WriteString("event: ")
+	_, _ = w.WriteString(name)
+	_ = w.WriteByte('\n')
+
+	// One data: line per line of text, splitting on CRLF, CR or LF without
+	// building a slice of lines. An empty payload still gets one (empty)
+	// data: line, as before.
+	for {
+		_, _ = w.WriteString("data: ")
+		i := strings.IndexAny(text, "\r\n")
+		if i < 0 {
+			_, _ = w.WriteString(text)
+			_ = w.WriteByte('\n')
+			break
+		}
+		_, _ = w.WriteString(text[:i])
+		_ = w.WriteByte('\n')
+		if text[i] == '\r' && i+1 < len(text) && text[i+1] == '\n' {
+			i++ // CRLF is one line break, not two
+		}
+		text = text[i+1:]
+	}
+
+	_, err = w.WriteString("\n")
+	return err
+}
+
+// sseDataText renders an event payload as text for writeSSEEvent.
+//
+// Rules, in order:
+//   - string and []byte: as they are;
+//   - error and fmt.Stringer: through Error() / String() (so a time.Duration
+//     reads "1.5s", not 1500000000);
+//   - bool, integers and floats, including named types of those kinds (an
+//     app's `type Level string`): via strconv, the way fmt's %v prints them;
+//   - anything else (structs, maps, slices, nil): JSON, which is what an
+//     EventSource client most likely parses. A value JSON cannot encode (a
+//     channel, a func) is an error and the event is not sent.
+//
+// The basic kinds go through reflect rather than a type-switch case per type
+// so that named types are covered by the same path; reflect.ValueOf on a
+// value already boxed in an interface does not allocate.
+func sseDataText(data any) (string, error) {
+	switch v := data.(type) {
+	case string:
+		return v, nil
+	case []byte:
+		return string(v), nil
+	case error:
+		return v.Error(), nil
+	case fmt.Stringer:
+		return v.String(), nil
+	}
+
+	rv := reflect.ValueOf(data)
+	switch rv.Kind() {
+	case reflect.String:
+		return rv.String(), nil
+	case reflect.Bool:
+		return strconv.FormatBool(rv.Bool()), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(rv.Int(), 10), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return strconv.FormatUint(rv.Uint(), 10), nil
+	case reflect.Float32:
+		return strconv.FormatFloat(rv.Float(), 'g', -1, 32), nil
+	case reflect.Float64:
+		return strconv.FormatFloat(rv.Float(), 'g', -1, 64), nil
+	}
+
+	b, err := json.Marshal(data)
+	if err != nil {
+		return "", fmt.Errorf("SSE payload of type %T has no text form: %w", data, err)
+	}
+	return string(b), nil
 }
 
 // newContext allocates a new context with the default state.

@@ -188,6 +188,9 @@ func main() {
 	eventsChan <- "event 3"
 	eventsChan <- "event 4"
 	eventsChan <- "event 5"
+	// Non-string payloads are sent as text: numbers/bools via strconv, error and
+	// fmt.Stringer via their method, anything else as JSON. A multi-line payload
+	// becomes one "data:" line per line. Send rweb.SSEClose to end the stream.
 
 	s.Get("/events", s.SSEHandler(eventsChan))
 

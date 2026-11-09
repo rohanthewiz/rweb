@@ -2,7 +2,9 @@ package rweb_test
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"runtime"
@@ -392,4 +394,125 @@ func TestSSEHeadersCarryNoContentEncoding(t *testing.T) {
 	// not understand on the response untouched, so an empty value here means
 	// the wire really carried none.
 	assert.Equal(t, resp.Header.Get(consts.HeaderContentEncoding), "")
+}
+
+// sseLevel is a named string type with no String method, as an app might
+// declare for an enum; it must go out as its text, not as a JSON string.
+type sseLevel string
+
+// sseOutcome is a plain struct; anything without a text form goes out as JSON.
+type sseOutcome struct {
+	ID   int
+	Name string
+}
+
+// readSSEBody sends GET path on a raw connection and returns the response
+// body: everything after the header block, up to the server closing the
+// conn, which it does once an event stream ends.
+func readSSEBody(t *testing.T, s *rweb.Server, path string) string {
+	t.Helper()
+	conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
+	assert.Nil(t, err)
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	_, _ = io.WriteString(conn, "GET "+path+" HTTP/1.1\r\nHost: a\r\n\r\n")
+	raw, err := io.ReadAll(conn)
+	assert.Nil(t, err)
+	_, body, found := strings.Cut(string(raw), "\r\n\r\n")
+	assert.Equal(t, true, found)
+	return body
+}
+
+// TestSSEEventFormatting pins the bytes of each kind of event on the wire.
+//
+// sendSSE used to format every payload with %s (%+v for bare non-strings), so
+// an int went out as "%!s(int=42)" and a map as "map[a:%!s(int=1)]", and it
+// wrote the payload as a single data: line, so a browser kept only the text
+// up to the first newline (a following line without a field name is dropped).
+// Now each payload has a text form (strings and []byte as they are, error and
+// fmt.Stringer through their method, numbers and bools via strconv, the rest
+// as JSON), each line of it is its own data: field, and line breaks are
+// removed from the event name, where they would start a forged field.
+//
+// The events are queued before the client connects and the stream ends with
+// the "close" string sentinel, so the whole body can be read to EOF and
+// compared byte for byte.
+func TestSSEEventFormatting(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	events := make(chan any, 32)
+	for _, e := range []any{
+		rweb.SSEvent{Type: "n", Data: 42},
+		map[string]int{"a": 1},
+		"line1\nline2",
+		[]byte("raw bytes"),
+		rweb.SSEvent{Type: "m", Data: "a\r\nb\rc\n"},
+		rweb.SSEvent{Type: "evil\r\nname", Data: "x"},
+		rweb.SSEvent{Type: "e", Data: errors.New("boom")},
+		rweb.SSEvent{Type: "d", Data: 1500 * time.Millisecond},
+		rweb.SSEvent{Type: "b", Data: true},
+		rweb.SSEvent{Type: "f", Data: 2.5},
+		rweb.SSEvent{Type: "s", Data: sseOutcome{ID: 7, Name: "x"}},
+		rweb.SSEvent{Type: "l", Data: sseLevel("warn")},
+		rweb.SSEvent{Type: "c", Data: "close"}, // an event whose text is "close" does not end the stream
+		7,
+		"close",
+		"never sent",
+	} {
+		events <- e
+	}
+
+	s := rweb.NewServer(rweb.ServerOptions{ReadyChan: readyChan, Address: "localhost:"})
+	s.Get("/events", s.SSEHandler(events, "fmt"))
+
+	go func() {
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-readyChan
+
+		body := readSSEBody(t, s, "/events")
+		want := "event: n\ndata: 42\n\n" +
+			"event: fmt\ndata: {\"a\":1}\n\n" +
+			"event: fmt\ndata: line1\ndata: line2\n\n" +
+			"event: fmt\ndata: raw bytes\n\n" +
+			// The trailing newline is kept: an empty last data line makes the
+			// browser's data end in "\n", as the payload did.
+			"event: m\ndata: a\ndata: b\ndata: c\ndata: \n\n" +
+			"event: evilname\ndata: x\n\n" +
+			"event: e\ndata: boom\n\n" +
+			"event: d\ndata: 1.5s\n\n" +
+			"event: b\ndata: true\n\n" +
+			"event: f\ndata: 2.5\n\n" +
+			"event: s\ndata: {\"ID\":7,\"Name\":\"x\"}\n\n" +
+			"event: l\ndata: warn\n\n" +
+			"event: c\ndata: close\n\n" +
+			"event: fmt\ndata: 7\n\n"
+		assert.Equal(t, want, body)
+		assert.Equal(t, 1, len(events)) // the stream ended at "close"
+	}()
+
+	_ = s.Run()
+}
+
+// TestSSECloseSentinel: rweb.SSEClose on the channel ends the stream without
+// sending anything for itself, like the "close" string, but cannot be confused
+// with an event whose text happens to be "close".
+func TestSSECloseSentinel(t *testing.T) {
+	readyChan := make(chan struct{}, 1)
+	events := make(chan any, 4)
+	events <- "close" + "d" // text that merely starts like the string sentinel
+	events <- rweb.SSEClose
+	events <- "never sent"
+
+	s := rweb.NewServer(rweb.ServerOptions{ReadyChan: readyChan, Address: "localhost:"})
+	s.Get("/events", s.SSEHandler(events, "x"))
+
+	go func() {
+		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		<-readyChan
+
+		assert.Equal(t, "event: x\ndata: closed\n\n", readSSEBody(t, s, "/events"))
+		assert.Equal(t, 1, len(events))
+	}()
+
+	_ = s.Run()
 }

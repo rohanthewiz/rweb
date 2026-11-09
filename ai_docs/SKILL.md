@@ -445,8 +445,31 @@ s.Get("/events2", s.SSEHandler(eventsChan))
 
 // Send events from anywhere
 eventsChan <- "event data"
-eventsChan <- map[string]string{"type": "update", "data": "value"}
+eventsChan <- map[string]string{"type": "update", "data": "value"} // sent as JSON
+eventsChan <- rweb.SSEvent{Type: "count", Data: 42}               // named event
+
+// End this stream (flushes, then closes the connection)
+eventsChan <- rweb.SSEClose
 ```
+
+How a payload goes on the wire (bare on the channel or as `SSEvent.Data`):
+
+| Payload | `data:` text |
+|---------|--------------|
+| `string`, `[]byte` | as is |
+| `error`, `fmt.Stringer` | `Error()` / `String()` (a `time.Duration` reads `1.5s`) |
+| bool, ints, uints, floats (incl. named types such as `type Level string`) | `strconv` form, e.g. `42`, `2.5`, `true` |
+| anything else (structs, maps, slices, nil) | JSON, e.g. `{"a":1}` |
+
+A payload with line breaks (`\n`, `\r\n` or `\r`) is sent as one `data:` line
+per line, so the browser's `event.data` gets the whole text back, joined with
+`\n`. Line breaks in an event name are removed. A payload JSON cannot encode
+(a channel, a func) is logged and skipped.
+
+To end a stream send `rweb.SSEClose`. The bare string `"close"` also ends it
+(kept for compatibility); to send the text "close" as data, wrap it:
+`rweb.SSEvent{Type: "message", Data: "close"}`. Closing the channel ends every
+stream reading from it.
 
 ### SSE Hub (Multi-Client Broadcast)
 

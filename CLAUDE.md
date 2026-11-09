@@ -56,7 +56,7 @@ curl http://localhost:8080/some-json
 5. **Context Data Storage**: Store request-scoped data via `ctx.Set()`, `ctx.Get()`, `ctx.Has()`, `ctx.Delete()`
 
 ### Important Features
-- **Server-Sent Events (SSE)**: Built-in support via `SSEHandler()`
+- **Server-Sent Events (SSE)**: Built-in support via `SSEHandler()`. Every event is written by `writeSSEEvent` (Server.go): payload text per `sseDataText` (string/[]byte as is, error/Stringer via method, basic kinds via strconv, else JSON), one `data:` line per payload line, CR/LF stripped from the event name. `rweb.SSEClose` (or the legacy bare string `"close"`) ends a stream
 - **Request context**: `ctx.Request().Context()` is cancelled when the client disconnects mid-handler, when `Run` shuts down (it derives from `Server.baseCtx`; keep-alive conns then close after their current response), and always when the request ends (after the stream, for SSE)
 - **Static File Serving**: `StaticFiles(urlPrefix, localPath, stripPrefixSegments)` — streamed from disk via a pending body stream (`response.bodyStream`); touching the body (`Body`, `Write`, `SetBody`) loads it into memory first
 - **Streamed bodies**: `rweb.Stream(ctx, r, size)` sends any `io.Reader` after the handler returns (size → Content-Length; negative → chunked); `rweb.SendFile`/`SendFileAs` stream a file from disk with file headers and 304 support. A handler error drops a pending stream; a failed/short stream closes the conn so the client sees a truncated body
@@ -120,4 +120,3 @@ s.Get("/profile", func(ctx rweb.Context) error {
 - Minimal dependencies (only test assertion library)
 - Server addresses should use ":8080" format (not "localhost:8080") for Docker compatibility
 - The radix tree router provides O(log n) route matching performance
-- TODO: SSE tests need fixing

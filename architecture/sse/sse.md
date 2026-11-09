@@ -70,16 +70,38 @@ type SSEvent struct {
 // Sentinel type for heartbeat keepalives — formatted as:
 //   :keepalive\n\n
 type sseKeepalive struct{}
+
+// Exported end-of-stream sentinel; nothing is written for it
+var SSEClose = sseCloseSignal{}
 ```
 
 The `sendSSE` event loop dispatches on the concrete type received from the channel:
 
 | Type | Wire Format | Notes |
 |------|-------------|-------|
+| `sseCloseSignal` (`rweb.SSEClose`) or the string `"close"` | nothing | Ends the stream; the string form is kept for compatibility |
+| `""` (empty string) | nothing | Skipped |
 | `sseKeepalive` | `:keepalive\n\n` | SSE comment; keeps connection alive through proxies without triggering `onmessage` |
-| `SSEvent` | `event: {Type}\ndata: {Data}\n\n` | Typed event with explicit name |
-| `string` | `event: {default}\ndata: {string}\n\n` | Uses the event name from `SetSSE()` |
-| Other | `event: {default}\ndata: {formatted}\n\n` | Uses `%+v` formatting |
+| `SSEvent` | `event: {Type}\ndata: {line}\n...\n\n` | Typed event with explicit name, via `writeSSEEvent` |
+| Other (string, []byte, number, struct...) | `event: {default}\ndata: {line}\n...\n\n` | Uses the event name from `SetSSE()`, via `writeSSEEvent` |
+
+`writeSSEEvent(w, name, data)` is the one formatter for every event:
+
+- **Payload text** (`sseDataText`): `string`/`[]byte` as is; `error` and
+  `fmt.Stringer` through their method; bool, int, uint and float kinds
+  (named types included, found via `reflect.Kind`) through `strconv`;
+  everything else as JSON. A JSON failure skips the event (logged).
+- **One `data:` line per line.** The text is split on `\r\n`, `\r` or `\n`
+  and each piece gets its own `data: ` field. Browsers end a field at any of
+  those breaks and drop a line with no field name, so a single `data:` line
+  lost everything after the first break; the client joins data fields with
+  `\n`, which restores the payload.
+- **Event name:** `\r` and `\n` are removed, so a name cannot start a field
+  of its own.
+
+Before this, payloads were formatted with `%s` / `%+v`, so `42` went out as
+`%!s(int=42)` and a struct as Go syntax. The hub's `Broadcast` sends a JSON
+string (which has no raw line breaks), so its wire format is unchanged.
 
 ### 4. The `sendSSE` Streaming Loop (`Server.go`)
 
@@ -129,8 +151,8 @@ for {
 
     case event, ok := <-ctx.sseEventsChan:
         if !ok { return }          // channel closed
-        if event == "close" { return }  // explicit close signal
-        // format and write event based on type
+        if event == SSEClose || event == "close" { return }  // explicit close signal
+        // format and write event based on type (writeSSEEvent)
         // flush buffer for immediate delivery
     }
 }
@@ -294,6 +316,8 @@ func (hub *SSEHub) Handler(server *Server, eventName ...string) Handler
 |------|-----------------|
 | `TestSSEHandler` | Full integration: connect, receive 3 events, channel close |
 | `TestSSEClientDisconnect` | `sendSSE` returns in sub-second time after client TCP close |
+| `TestSSEEventFormatting` | Exact wire bytes for int, map, multi-line string, `[]byte`, error, Stringer, bool, float, struct, named string type, CR/LF in the event name |
+| `TestSSECloseSentinel` | `rweb.SSEClose` ends the stream and sends nothing for itself |
 
 ## Usage Examples
 
@@ -332,7 +356,7 @@ hub.Broadcast(rweb.SSEvent{Type: "update", Data: payload})
 
 | File | Role |
 |------|------|
-| `Server.go` | `SSEvent`, `sseKeepalive` types; `SetupSSE()`, `SSEHandler()`, `sendSSE()` |
+| `Server.go` | `SSEvent`, `sseKeepalive`, `SSEClose`; `SetupSSE()`, `SSEHandler()`, `sendSSE()`, `writeSSEEvent()`, `sseDataText()` |
 | `Context.go` | `SetSSE()` on Context interface; SSE fields on `context` struct; `Clean()` |
 | `Response.go` | `SetSSEHeaders()` |
 | `sse_hub.go` | `SSEHub`, `SSEHubOptions`, `hubClient`; broadcast, heartbeat, eviction |
