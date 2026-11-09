@@ -220,16 +220,43 @@ type context struct {
 	synthetic bool
 }
 
+// maxRetainedBuf caps the capacity a pooled context keeps in each of its
+// request body, response body and header scratch buffers between requests.
+//
+// Truncating a buffer keeps its backing array, which is the point for the
+// common case: the next request on the connection fills the same memory
+// without allocating. But the array is as large as the largest request it
+// ever served, so a single 100 MB upload would pin 100 MB for the rest of a
+// keep-alive connection, and then in the context pool for as long as the
+// pool keeps that context. 256 KB covers typical form posts, JSON bodies and
+// HTML pages with room to spare; anything larger is let go and the next
+// request starts from newContext's initial sizes (same pattern as
+// maxRetainedWriteBuf for WebSocket frames).
+const maxRetainedBuf = 256 << 10
+
 // Clean resets the context for reuse in the next request.
 // This is called between requests to avoid allocating new context objects.
 // It clears all request/response data while preserving the underlying
-// slice capacities for performance.
+// slice capacities for performance, up to maxRetainedBuf per buffer.
 func (ctx *context) Clean() {
 	// Reset slices to zero length but keep capacity for reuse
 	ctx.request.headers = ctx.request.headers[:0]
 	ctx.request.body = ctx.request.body[:0]
 	ctx.response.headers = ctx.response.headers[:0]
 	ctx.response.body = ctx.response.body[:0]
+
+	// ...unless a buffer grew past the retention cap: then drop it and start
+	// over at newContext's sizes. The replacement allocations happen only
+	// after an oversized request, so the steady state stays allocation-free.
+	if cap(ctx.request.body) > maxRetainedBuf {
+		ctx.request.body = make([]byte, 0)
+	}
+	if cap(ctx.response.body) > maxRetainedBuf {
+		ctx.response.body = make([]byte, 0, 1024)
+	}
+	if ctx.respBuf.Cap() > maxRetainedBuf {
+		ctx.respBuf = bytes.Buffer{}
+	}
 	// A body stream still pending here was never sent (an error path, or a
 	// synthetic request whose caller never read Body); release it.
 	ctx.response.closeBodyStream()
