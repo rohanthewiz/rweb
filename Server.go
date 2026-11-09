@@ -83,6 +83,40 @@ type ServerOptions struct {
 	// check and the open are one step: a link swapped in mid-request cannot
 	// redirect it (see openContained).
 	StaticContainSymlinks bool
+
+	// Connection limits. For each one, zero selects the default and a
+	// negative value disables it. See conn_limits.go for how the deadlines
+	// follow a connection from one request to the next.
+
+	// MaxHeaderBytes caps the request line plus all header lines of one
+	// request, in bytes. A request over it gets 431 Request Header Fields
+	// Too Large and the connection is closed. Default 1 MB.
+	MaxHeaderBytes int
+
+	// ReadHeaderTimeout bounds reading a request's head: from its first byte
+	// to the end of its headers. On a new connection it also bounds the wait
+	// for that first byte, which covers the TLS handshake. A head that does
+	// not arrive in time gets 408 Request Timeout. Default 30 s.
+	ReadHeaderTimeout time.Duration
+
+	// IdleTimeout bounds the wait for the next request on a keep-alive
+	// connection. When it runs out the connection is closed without a
+	// response. Default 120 s.
+	IdleTimeout time.Duration
+
+	// ReadTimeout bounds reading a request's body, from the end of the head.
+	// A body that does not arrive in time gets 408. Off by default: large
+	// uploads on slow links are legitimate, and MaxRequestBodySize already
+	// bounds the size.
+	ReadTimeout time.Duration
+
+	// WriteTimeout bounds any single stalled write of a response: each piece
+	// of at most 1 MB (headers, body, a chunk, a slice of a streamed file)
+	// must be taken by the client within it. It is not a cap on the whole
+	// response, so a long download that keeps moving is unaffected. A write
+	// that times out ends the response and closes the connection. Off by
+	// default; SSE streams have their own, see SSECfg.WriteTimeout.
+	WriteTimeout time.Duration
 }
 
 // defaultMaxRequestBodySize is the request-body cap used when
@@ -92,6 +126,14 @@ const defaultMaxRequestBodySize int64 = 100 << 20 // 100 MB
 
 type SSECfg struct {
 	SendConnectedEvent bool // Whether to send "Connected" event to clients
+
+	// WriteTimeout bounds each flush of an event stream. It is what lets go
+	// of a client that stays connected but has stopped reading: without it
+	// that stream's goroutine (and its SSEHub registration) would live as
+	// long as the TCP connection. It applies whether or not
+	// ServerOptions.WriteTimeout is set, since an event stream has no end of
+	// its own to bound it. Zero selects the default (30 s); negative disables.
+	WriteTimeout time.Duration
 }
 
 type URLOptions struct {
@@ -224,6 +266,57 @@ func WithStaticContainSymlinks() ServerOption {
 	}
 }
 
+// WithMaxHeaderBytes caps the request line plus headers of one request, in
+// bytes; a request over it gets 431. 0 selects the default (1 MB); a
+// negative value disables the cap.
+func WithMaxHeaderBytes(n int) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.MaxHeaderBytes = n
+	}
+}
+
+// WithReadHeaderTimeout bounds reading a request's head (and, on a new
+// connection, the TLS handshake and the wait for the first byte). 0 selects
+// the default (30 s); a negative value disables it.
+func WithReadHeaderTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.ReadHeaderTimeout = d
+	}
+}
+
+// WithIdleTimeout bounds the wait for the next request on a keep-alive
+// connection. 0 selects the default (120 s); a negative value disables it.
+func WithIdleTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.IdleTimeout = d
+	}
+}
+
+// WithReadTimeout bounds reading a request's body. Off by default (0 or
+// negative).
+func WithReadTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.ReadTimeout = d
+	}
+}
+
+// WithWriteTimeout bounds any single stalled write of a response (not the
+// whole response). Off by default (0 or negative).
+func WithWriteTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.WriteTimeout = d
+	}
+}
+
+// WithSSEWriteTimeout bounds each flush of an event stream, freeing a client
+// that stopped reading. 0 selects the default (30 s); a negative value
+// disables it.
+func WithSSEWriteTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.SSECfg.WriteTimeout = d
+	}
+}
+
 // WithOptions creates a ServerOption from a ServerOptions struct.
 // This is provided for backwards compatibility with the old configuration style.
 // Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
@@ -242,6 +335,11 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.MultipartMaxMemory = serverOpts.MultipartMaxMemory
 		opts.MaxRequestBodySize = serverOpts.MaxRequestBodySize
 		opts.StaticContainSymlinks = serverOpts.StaticContainSymlinks
+		opts.MaxHeaderBytes = serverOpts.MaxHeaderBytes
+		opts.ReadHeaderTimeout = serverOpts.ReadHeaderTimeout
+		opts.IdleTimeout = serverOpts.IdleTimeout
+		opts.ReadTimeout = serverOpts.ReadTimeout
+		opts.WriteTimeout = serverOpts.WriteTimeout
 	}
 }
 
@@ -300,6 +398,10 @@ type Server struct {
 	options      ServerOptions
 	listenAddr   string // the actual listen address used by net.Listen
 
+	// limits is options' connection limits with defaults applied, resolved
+	// once in NewServer so the per-request path reads plain values.
+	limits connLimits
+
 	// cookieAEAD seals and opens cookie values when
 	// options.Cookie.EncryptionKey is set; nil means encryption is off.
 	// cookieAEADErr holds a bad-key error so cookie operations can fail
@@ -353,6 +455,7 @@ func NewServer(options ...ServerOptions) *Server {
 		radixRouter: radRtr,
 		hashRouter:  hashRtr,
 		options:     opts,
+		limits:      resolveConnLimits(opts),
 		errorHandler: func(ctx Context, err error) {
 			errCode := GenRandString(8, true)
 			log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
@@ -1288,13 +1391,62 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 	}()
 
+	// Request heads are read line by line within the MaxHeaderBytes budget
+	// (lineReader), and every read phase runs under its own deadline (rd).
+	// The life of those deadlines across requests is drawn in conn_limits.go.
+	lim := &s.limits
+	lr := lineReader{r: ctx.reader}
+	rd := readDeadline{conn: conn}
+	firstRequest := true
+
+	// headFailed answers a request whose head (or body) could not be read;
+	// the caller then returns, closing the connection. Only a deadline or the
+	// budget gets an answer; any other error (EOF, a reset) means the client
+	// is gone.
+	headFailed := func(err error) {
+		switch {
+		case errors.Is(err, errHeaderTooLarge):
+			_, _ = io.WriteString(conn, consts.HTTPHeaderTooLarge)
+		case isTimeout(err):
+			_, _ = io.WriteString(conn, consts.HTTPRequestTimeout)
+		case s.options.Debug && !errors.Is(err, io.EOF):
+			fmt.Println("Error reading request:", err)
+		}
+	}
+
 	for {
-		// Read a line from the connection
-		message, err := ctx.reader.ReadString(consts.RuneNewLine)
-		if err != nil {
-			if s.options.Debug && err.Error() != consts.EOF {
+		// Wait for the next request. A new connection waits under
+		// ReadHeaderTimeout: its TLS handshake (run inside this first read)
+		// and its first request are one step for a client, and a client that
+		// connects and sends nothing is the slowloris case. A keep-alive
+		// connection waits under IdleTimeout. Peek leaves the byte in the
+		// buffer for the request line below; it costs nothing when a
+		// pipelined request is already buffered.
+		wait := lim.idle
+		if firstRequest && lim.readHeader > 0 {
+			wait = lim.readHeader
+		}
+		firstRequest = false
+		rd.set(wait)
+		if _, err := ctx.reader.Peek(1); err != nil {
+			// Nothing of a request has arrived, so there is nothing to answer:
+			// the client closed, went idle too long, or never finished its
+			// handshake.
+			if s.options.Debug && !errors.Is(err, io.EOF) && !isTimeout(err) {
 				fmt.Println("Error reading connection:", err)
 			}
+			return
+		}
+
+		// A request has started: the head must arrive within
+		// ReadHeaderTimeout of its first byte, in at most MaxHeaderBytes.
+		rd.set(lim.readHeader)
+		lr.reset(lim.maxHeaderBytes)
+
+		// Read the request line
+		message, err := lr.readLine()
+		if err != nil {
+			headFailed(err)
 			return
 		}
 
@@ -1335,8 +1487,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		// Read headers until we meet an empty line
 		for {
-			message, err = ctx.reader.ReadString(consts.RuneNewLine) // read a line
+			message, err = lr.readLine() // read a line, charged to the head's budget
 			if err != nil {
+				headFailed(err)
 				return
 			}
 
@@ -1410,6 +1563,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 			maxBody = defaultMaxRequestBodySize
 		}
 
+		// The head is in. The body, if any, is read under ReadTimeout (or no
+		// deadline, the default): the head's deadline must not carry over, or
+		// an upload would have to finish within ReadHeaderTimeout of its
+		// first byte.
+		if contentLen > 0 || isChunked {
+			rd.set(lim.read)
+		}
+
 		// Read the request body if present
 		if contentLen > 0 {
 			// Reject oversized bodies before allocating anything — the
@@ -1424,6 +1585,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				// so the connection stays aligned for the next request.
 				_, err = io.CopyN(io.Discard, ctx.reader, contentLen)
 				if err != nil {
+					headFailed(err)
 					return
 				}
 			} else {
@@ -1436,6 +1598,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 					if s.options.Verbose {
 						fmt.Println("Error reading request body:", err)
 					}
+					headFailed(err)
 					return
 				}
 			}
@@ -1443,9 +1606,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 		} else if isChunked {
 			// Chunked encoding
 			for {
-				// Read chunk size
-				chunkSize, err := ctx.reader.ReadString(consts.RuneNewLine)
+				// Read chunk size. The line goes through the bounded reader
+				// with a budget of its own: the body's size cap counts chunk
+				// data, not this framing, so without one an endless size line
+				// would be buffered whole, as header lines used to be.
+				lr.reset(chunkLineMax)
+				chunkSize, err := lr.readLine()
 				if err != nil {
+					if errors.Is(err, errHeaderTooLarge) {
+						_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					} else {
+						headFailed(err)
+					}
 					return
 				}
 
@@ -1459,8 +1631,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 				// Zero size chunk means end of body
 				if size == 0 {
 					// Read final CRLF
-					_, err = ctx.reader.ReadString(consts.RuneNewLine)
+					lr.reset(chunkLineMax)
+					_, err = lr.readLine()
 					if err != nil {
+						headFailed(err)
 						return
 					}
 					break
@@ -1477,16 +1651,24 @@ func (s *Server) handleConnection(conn net.Conn) {
 				ctx.request.body = slices.Grow(ctx.request.body, int(size))[:start+int(size)]
 				_, err = io.ReadFull(ctx.reader, ctx.request.body[start:])
 				if err != nil {
+					headFailed(err)
 					return
 				}
 
 				// Read chunk LF
-				_, err = ctx.reader.ReadString(consts.RuneNewLine)
+				lr.reset(chunkLineMax)
+				_, err = lr.readLine()
 				if err != nil {
+					headFailed(err)
 					return
 				}
 			}
 		}
+
+		// From here the conn's reads belong to the handler and whatever it
+		// starts: the disconnect watch, a WebSocket, GetConn. None of them is
+		// reading a request, so no request deadline may reach them.
+		rd.set(0)
 
 		if s.options.Debug && len(ctx.request.body) > 0 {
 			fmt.Printf("** ctx.request.body: %q\n", string(ctx.request.body))
@@ -1701,6 +1883,24 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		return
 	}
 
+	// Write deadlines. With a timeout in force, everything below writes
+	// through a deadlineWriter, which renews the conn's write deadline before
+	// each write of at most writeSlice bytes, so the timeout bounds a stalled
+	// write rather than the whole response. An event stream uses its own
+	// timeout, on by default, since nothing else would ever end the stream
+	// of a client that stopped reading. The deadline is cleared on the way
+	// out: the next request on this connection may be a WebSocket upgrade,
+	// whose writes go to the conn directly and must not meet a stale one.
+	// A synthetic request (no conn) writes to io.Discard and skips all this.
+	wt := s.limits.write
+	if ctx.sseEventsChan != nil {
+		wt = s.limits.sseWrite
+	}
+	if wt > 0 && ctx.conn != nil {
+		respWriter = &deadlineWriter{conn: ctx.conn, w: respWriter, d: wt}
+		defer func() { _ = ctx.conn.SetWriteDeadline(time.Time{}) }()
+	}
+
 	// Reuse the pooled context's scratch buffer rather than allocating a
 	// fresh one per request
 	tmp := &ctx.respBuf
@@ -1763,6 +1963,12 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
 		fmt.Println("Error writing headers: ", err)
+		// A failed write (the client went away, or stalled past the write
+		// timeout) leaves part of a response on the wire, so this connection
+		// can carry nothing more. Closing it makes every later write fail
+		// fast, releasing streams below, and ends the request loop; left
+		// open, a stalled client would hold it until IdleTimeout.
+		closeConn(ctx)
 	}
 
 	// HEAD to an event stream (reachable since HEAD falls back to GET, or via
@@ -1794,7 +2000,9 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 			if chunked {
 				s.writeChunkedBody(ctx, respWriter)
 			} else {
-				_, _ = respWriter.Write(ctx.response.body)
+				if _, err := respWriter.Write(ctx.response.body); err != nil {
+					closeConn(ctx) // as for the headers above
+				}
 				s.writeBodyStream(ctx, respWriter)
 			}
 		}
@@ -1807,6 +2015,14 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		if err != nil {
 			fmt.Println("Error sending SSE events: ", err)
 		}
+	}
+}
+
+// closeConn closes the request's connection after a failed write. A
+// synthetic request has none.
+func closeConn(ctx *context) {
+	if ctx.conn != nil {
+		_ = ctx.conn.Close()
 	}
 }
 
@@ -1846,7 +2062,25 @@ func (s *Server) writeBodyStream(ctx *context, respWriter io.Writer) {
 	ctx.response.bodyStream, ctx.response.bodyStreamSize = nil, 0
 	defer closeStream(r)
 
-	n, err := io.CopyN(respWriter, r, size)
+	// Under a write timeout, respWriter is writeResponse's deadlineWriter.
+	// Copying through it would still bound every write, but it hides the
+	// *net.TCPConn from io.CopyN and so loses sendfile. Instead the stream
+	// goes to the conn itself in slices of writeSlice bytes, with the
+	// deadline renewed before each: every slice is still an *io.LimitedReader
+	// over the *os.File, which TCPConn.ReadFrom turns into sendfile (Go's
+	// sendfile tracks the file offset across calls).
+	var n int64
+	var err error
+	if dw, ok := respWriter.(*deadlineWriter); ok {
+		for n < size && err == nil {
+			_ = dw.conn.SetWriteDeadline(time.Now().Add(dw.d))
+			var k int64
+			k, err = io.CopyN(dw.w, r, min(size-n, writeSlice))
+			n += k
+		}
+	} else {
+		n, err = io.CopyN(respWriter, r, size)
+	}
 	if n < size {
 		if s.options.Debug {
 			fmt.Printf("rweb: body stream %s cut short at %d of %d bytes: %v\n", streamName(r), n, size, err)
@@ -2075,8 +2309,19 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 			}
 
 			if err != nil {
+				// Two kinds of error land here. A payload that cannot be
+				// rendered (sseDataText) wrote nothing, and only that event is
+				// skipped. A write that failed, which happens inside
+				// writeSSEEvent once an event outgrows bufio's buffer, leaves
+				// bufio's sticky error, which Flush reports: the client is gone
+				// or, under the SSE write timeout, has stopped reading, and the
+				// stream must end. Continuing would retry every later event
+				// against a dead conn for as long as the producer runs.
+				if fErr := rw.Flush(); fErr != nil {
+					fmt.Printf("Error writing SSE event from channel %v: %v\n", ctx.sseEventsChan, fErr)
+					return fErr
+				}
 				fmt.Printf("Error writing SSE event from channel %v: %v\n", ctx.sseEventsChan, err)
-				rw.Reset(respWriter) // Reset the buffer for the next event
 				continue
 			}
 

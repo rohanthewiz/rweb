@@ -47,6 +47,8 @@ curl http://localhost:8080/some-json
 - **middleware.go**: Middleware chain implementation
 - **conn_reader.go**: The reader under each connection's bufio.Reader; runs the disconnect watch behind `ctx.Request().Context()` (a 1-byte background read, as in net/http). Anything that takes over a conn's reads (WebSocket upgrade, `GetConn`, `sendSSE`) must stop the watch first
 
+- **conn_limits.go**: Connection limits (`MaxHeaderBytes`, `ReadHeaderTimeout`, `IdleTimeout`, `ReadTimeout`, `WriteTimeout`, `SSECfg.WriteTimeout`; zero = default, negative = off), the bounded `lineReader` for request heads, and the diagram of which deadline is armed in each phase of a request. Read deadlines are cleared before the handler and write deadlines after each response; keep it that way, or the disconnect watch, WebSocket and `GetConn` meet a stale deadline
+
 ### Key Patterns
 
 1. **Handler Signature**: All handlers follow `func(ctx rweb.Context) error`
@@ -62,6 +64,7 @@ curl http://localhost:8080/some-json
 - **Streamed bodies**: `rweb.Stream(ctx, r, size)` sends any `io.Reader` after the handler returns (size → Content-Length; negative → chunked); `rweb.SendFile`/`SendFileAs` stream a file from disk with file headers and 304 support. A handler error drops a pending stream; a failed/short stream closes the conn so the client sees a truncated body
 - **Bodyless statuses**: `writeResponse` sends a 1xx, 204 or 304 (`statusHasNoBody`) as the header block alone — no Content-Length/Transfer-Encoding, no body, pending stream closed unread, SSE not started. The WebSocket 101 is written by `UpgradeWebSocket` and never gets here
 - **WebSockets**: `s.WebSocket`, `s.WebSocketWithOptions(path, WSOptions, h)` or a manual `ctx.UpgradeWebSocket()`; all go through `context.upgradeWebSocket`, which applies `WSOptions` with their defaults (`WSConn.applyOptions`) and starts the keepalive (`startKeepalive`: ping goroutine + a `livenessReader` that pushes the read deadline out on every received byte). A WebSocket's life is its handler's: `handleRequest` calls `WSConn.finish` when the handler returns (closes `Done()`, stops the ping goroutine), then the HTTP loop closes the conn
+- **Connection limits**: on by default — 1 MB request head (`431`), 30 s to read a head (`408`; also bounds the TLS handshake), 120 s keep-alive idle. Body-read and write timeouts are off by default; `WriteTimeout` bounds each stalled write of ≤ 1 MB (sized streams are sliced so sendfile is kept), and SSE has its own 30 s per-flush timeout
 - **Reverse Proxy**: `Proxy(urlPrefix, targetURL, stripPrefixSegments)`
 - **File Uploads**: Handled via `GetFormFile()` on Request
 - **Multiple Response Types**: JSON, HTML, Text, CSS, File responses

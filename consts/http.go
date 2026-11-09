@@ -34,6 +34,12 @@ const (
 	HTTPNotImplemented  = "HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 	HTTPInternalError   = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
 	HTTPPayloadTooLarge = "HTTP/1.1 413 Request Entity Too Large\r\nConnection: close\r\n\r\n"
+	// HTTPRequestTimeout answers a request whose head (or body, under
+	// ReadTimeout) did not arrive in time; the connection is closed after it.
+	HTTPRequestTimeout = "HTTP/1.1 408 Request Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+	// HTTPHeaderTooLarge answers a request whose line and headers exceed
+	// MaxHeaderBytes (RFC 6585 §5); the connection is closed after it.
+	HTTPHeaderTooLarge = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
 )
 
 var ( // HTTP messages

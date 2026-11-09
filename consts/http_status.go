@@ -37,6 +37,8 @@ const ( // HTTP status codes
 	StatusGone              = 410
 	StatusUpgradeRequired   = 426
 
+	StatusRequestHeaderFieldsTooLarge = 431
+
 	StatusInternalServerError     = 500
 	StatusNotImplemented          = 501
 	StatusBadGateway              = 502
@@ -80,6 +82,8 @@ var StatusTextFromCode = map[int]string{
 	StatusConflict:          "Conflict",
 	StatusGone:              "Gone",
 	StatusUpgradeRequired:   "Upgrade Required",
+
+	StatusRequestHeaderFieldsTooLarge: "Request Header Fields Too Large",
 
 	StatusInternalServerError:     "Internal Server Error",
 	StatusNotImplemented:          "Not Implemented",

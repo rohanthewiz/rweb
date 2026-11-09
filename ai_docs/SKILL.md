@@ -71,6 +71,39 @@ go http.ListenAndServe(":80", m.HTTPHandler(nil))
 log.Fatal(s.Run())
 ```
 
+### Connection Limits and Timeouts (v0.2.1+)
+
+Every connection is bounded by default. For each option, **zero selects the
+default and a negative value disables it**.
+
+| Option | Default | Bounds | On breach |
+|--------|---------|--------|-----------|
+| `MaxHeaderBytes` | 1 MB | request line + all headers of one request | `431`, close |
+| `ReadHeaderTimeout` | 30 s | first byte of a request → end of its headers (new conn: also the TLS handshake and the wait for the first byte) | `408`, close (silent close if nothing arrived) |
+| `IdleTimeout` | 120 s | wait for the next request on a keep-alive conn | silent close |
+| `ReadTimeout` | off | reading the request body | `408`, close |
+| `WriteTimeout` | off | any single stalled write (each ≤ 1 MB piece), **not** the whole response | response ends, close |
+| `SSECfg.WriteTimeout` | 30 s | each flush of an event stream (on even when `WriteTimeout` is off) | stream ends, cleanup runs |
+
+```go
+s := rweb.NewServerWithOptions(
+    rweb.WithAddress(":8080"),
+    rweb.WithMaxHeaderBytes(64<<10),
+    rweb.WithReadHeaderTimeout(10*time.Second),
+    rweb.WithIdleTimeout(60*time.Second),
+    rweb.WithReadTimeout(time.Minute),
+    rweb.WithWriteTimeout(30*time.Second),
+    rweb.WithSSEWriteTimeout(15*time.Second),
+)
+// or the same fields on rweb.ServerOptions{...}
+```
+
+Read deadlines are cleared before the handler runs, and write deadlines after
+each response, so handlers, `Request().Context()`, WebSockets and `GetConn`
+never meet a request's deadline. Because `WriteTimeout` bounds a *stalled*
+write, a long download that keeps moving is not cut off; static files keep
+using sendfile.
+
 ## Routing
 
 ### HTTP Methods

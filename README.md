@@ -216,6 +216,28 @@ func main() {
 }
 ```
 
+## Connection Limits and Timeouts
+
+Connections are bounded by default. Each limit is a `ServerOptions` field with a matching
+`With…` option; zero selects the default and a negative value disables the limit.
+
+| Option | `With…` | Default | Bounds |
+|--------|---------|---------|--------|
+| `MaxHeaderBytes` | `WithMaxHeaderBytes` | 1 MB | request line + headers of one request (over: `431`) |
+| `ReadHeaderTimeout` | `WithReadHeaderTimeout` | 30 s | reading a request's head; on a new connection also the TLS handshake (late: `408`) |
+| `IdleTimeout` | `WithIdleTimeout` | 120 s | waiting for the next request on a keep-alive connection (then closed) |
+| `ReadTimeout` | `WithReadTimeout` | off | reading the request body (late: `408`) |
+| `WriteTimeout` | `WithWriteTimeout` | off | any single stalled write of a response, not the whole response |
+| `SSECfg.WriteTimeout` | `WithSSEWriteTimeout` | 30 s | each flush of an SSE stream, so a client that stops reading is let go |
+
+```go
+s := rweb.NewServerWithOptions(
+	rweb.WithAddress(":8080"),
+	rweb.WithReadHeaderTimeout(10*time.Second),
+	rweb.WithWriteTimeout(30*time.Second),
+)
+```
+
 ## Request Context and Cancellation
 
 `ctx.Request().Context()` returns a `context.Context` for the request, like net/http's

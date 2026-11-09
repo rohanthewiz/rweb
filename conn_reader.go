@@ -132,8 +132,10 @@ func (cr *connReader) watch(conn net.Conn, done chan struct{}) {
 	}
 	// Any error other than the deadline stopWatch set means the connection
 	// is gone (EOF on close, ECONNRESET, a TLS close_notify, ...). A deadline
-	// error that stopWatch did not cause also counts: nothing in rweb sets
-	// read deadlines on this path, so the conn's state is no longer known.
+	// error that stopWatch did not cause also counts: the request loop clears
+	// its read deadlines before the handler runs (see conn_limits.go), so no
+	// other deadline should be on the conn here and its state is no longer
+	// known.
 	if err != nil && !(cr.aborted && errors.Is(err, os.ErrDeadlineExceeded)) {
 		cr.cancel()
 	}
