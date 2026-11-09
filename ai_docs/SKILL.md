@@ -686,6 +686,12 @@ s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, func(ws *rweb.W
 - The message size limit applies to the decompressed size.
 - Off by default: `s.WebSocket()` and `ctx.UpgradeWebSocket()` never negotiate it.
 
+### Protocol Enforcement
+
+- A ping, pong or close frame longer than 125 bytes, or without FIN, fails the
+  connection: `ReadMessage` returns `rweb.ErrWebSocketBadControlFrame`, a close
+  frame with code 1002 is sent and the connection is closed (RFC 6455 §5.5).
+
 ### Message Types
 
 ```go

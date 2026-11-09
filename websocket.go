@@ -51,6 +51,10 @@ var (
 	ErrWebSocketPayloadTooLarge = errors.New("websocket payload too large")
 	ErrWebSocketBadMask         = errors.New("websocket frame not masked")
 	ErrWebSocketBadRSV          = errors.New("websocket frame has a reserved bit set that no extension negotiated")
+	// ErrWebSocketBadControlFrame: a ping, pong or close frame longer than
+	// 125 bytes or without FIN (RFC 6455 §5.5). The connection is failed
+	// with close code 1002 when ReadMessage returns it.
+	ErrWebSocketBadControlFrame = errors.New("websocket control frame longer than 125 bytes or fragmented")
 )
 
 // WebSocket GUID as per RFC 6455
@@ -256,6 +260,9 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 	for {
 		frameType, fin, rsv1, data, err := ws.readFrame()
 		if err != nil {
+			if errors.Is(err, ErrWebSocketBadControlFrame) {
+				ws.failConnection(wsCloseProtocolError)
+			}
 			return nil, err
 		}
 		// RSV1 is permessage-deflate's "this message is compressed" (RFC 7692
@@ -424,6 +431,14 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 			return 0, false, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint64(extLen))
+	}
+
+	// Control frames (opcode 0x8 and up) are at most 125 bytes and never
+	// fragmented (RFC 6455 §5.5). Checked on the header, before the payload
+	// is read, so a peer cannot have the server buffer (and, for a ping,
+	// echo back) a "control frame" as large as the message limit.
+	if opcode >= wsClose && (!fin || payloadLen > 125) {
+		return 0, false, false, nil, ErrWebSocketBadControlFrame
 	}
 
 	// Check payload size
@@ -611,6 +626,36 @@ func (ws *WSConn) handleClose(code int, text string) {
 	ws.writeMutex.Unlock()
 	ws.signalDone()
 	ws.conn.Close()
+}
+
+// failConnection is RFC 6455 §7.1.7 "Fail the WebSocket Connection", for a
+// peer that broke the protocol: send a close frame with code, then close
+// the TCP connection without waiting for the peer's reply (a peer that
+// sends malformed frames is not owed a close handshake, and whatever it
+// sends next cannot be trusted to parse).
+//
+// The close frame is best-effort and bounded by closeHandshakeTimeout
+// whatever the connection's write settings: a peer that is also not
+// reading must not hold the reading goroutine here.
+func (ws *WSConn) failConnection(code int) {
+	ws.closeMutex.Lock()
+	defer ws.closeMutex.Unlock()
+	if ws.closed.Load() {
+		return
+	}
+
+	var data [2]byte
+	binary.BigEndian.PutUint16(data[:], uint16(code))
+	ws.writeMutex.Lock()
+	if frame, err := ws.appendFrame(ws.wbuf[:0], wsClose, data[:]); err == nil {
+		_ = ws.conn.SetWriteDeadline(time.Now().Add(closeHandshakeTimeout))
+		_, _ = ws.conn.Write(frame)
+	}
+	ws.wbuf = nil // the connection is done; nothing will reuse it
+	ws.closed.Store(true)
+	ws.writeMutex.Unlock()
+	ws.signalDone()
+	_ = ws.conn.Close()
 }
 
 // writePong writes a pong frame
