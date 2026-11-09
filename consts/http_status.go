@@ -35,6 +35,7 @@ const ( // HTTP status codes
 	StatusRequestTimeout    = 408
 	StatusConflict          = 409
 	StatusGone              = 410
+	StatusExpectationFailed = 417
 	StatusUpgradeRequired   = 426
 
 	StatusRequestHeaderFieldsTooLarge = 431
@@ -81,6 +82,7 @@ var StatusTextFromCode = map[int]string{
 	StatusRequestTimeout:    "Request Timeout",
 	StatusConflict:          "Conflict",
 	StatusGone:              "Gone",
+	StatusExpectationFailed: "Expectation Failed",
 	StatusUpgradeRequired:   "Upgrade Required",
 
 	StatusRequestHeaderFieldsTooLarge: "Request Header Fields Too Large",

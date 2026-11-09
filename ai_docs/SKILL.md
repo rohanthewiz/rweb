@@ -120,6 +120,12 @@ smuggling behind a proxy) are refused and the connection closed:
 Chunked bodies accept chunk extensions (ignored) and trailers (read and
 discarded, counted against `MaxHeaderBytes`).
 
+`Expect: 100-continue` on an HTTP/1.1 request with a body gets
+`HTTP/1.1 100 Continue` just before the body is read, after the framing and
+`MaxRequestBodySize` checks, so a request that will be refused (e.g. `413`) never
+has its body sent. Any other `Expect` value gets `417` and a close. HTTP/1.0
+requests get no `100`.
+
 ## Routing
 
 ### HTTP Methods

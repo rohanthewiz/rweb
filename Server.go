@@ -1475,9 +1475,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
 
+		// The protocol version is the request line's last field. A line with
+		// none ("GET /", HTTP/0.9 style) has always been served as HTTP/1.1
+		// and still is. Only an exact "HTTP/1.0" changes anything: 1.0
+		// clients get no 100 Continue (below) and different keep-alive rules.
+		// Anything else is treated as 1.1, as before, rather than refused.
+		var proto string
 		if lastSpace == space {
 			lastSpace = len(message) - len(consts.CRLF)
+		} else {
+			proto = strings.TrimRight(message[lastSpace+1:], "\r\n")
 		}
+		isHTTP10 := proto == consts.HTTP10
 
 		url = message[space+1 : lastSpace]
 
@@ -1490,6 +1499,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 		var sawContentLength bool
 		var transferEncoding string
 		var sawTransferEncoding bool
+
+		// Expect (RFC 9110 §10.1.1): 100-continue is the only expectation
+		// defined, and the only one rweb can meet.
+		var expectContinue, expectUnmet bool
 
 		// Read headers until we meet an empty line
 		for {
@@ -1567,9 +1580,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 				//   - the fallback grants nothing: a client able to omit Host
 				//     could just as well send "Host: localhost", and the
 				//     DNS-rebinding case needs a browser, which always sends one;
-				//   - the request line's version is not parsed, and HTTP/1.0
-				//     may omit Host legitimately, so enforcing it would mean
-				//     version parsing while the fallback stayed for 1.0 anyway;
+				//   - HTTP/1.0 may omit Host legitimately, so the fallback
+				//     would stay for 1.0 anyway (the version is parsed now,
+				//     for Expect and keep-alive, but that changes nothing
+				//     here);
 				//   - hand-rolled clients and raw-socket tests omit it.
 				if sawHost || !isValidHostHeader(value) {
 					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
@@ -1585,6 +1599,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 					return
 				}
 				transferEncoding, sawTransferEncoding = value, true
+			} else if strings.EqualFold(key, consts.HeaderExpect) {
+				if strings.EqualFold(value, consts.ExpectContinue) {
+					expectContinue = true
+				} else {
+					expectUnmet = true
+				}
 			}
 		}
 
@@ -1603,6 +1623,28 @@ func (s *Server) handleConnection(conn net.Conn) {
 				return
 			}
 			isChunked = true
+		}
+
+		// An expectation rweb cannot meet is answered 417 before any body
+		// is read; the client may already have sent one, so the connection
+		// is closed after it rather than resynchronised.
+		if expectUnmet {
+			_, _ = io.WriteString(conn, consts.HTTPExpectationFailed)
+			return
+		}
+
+		// With "Expect: 100-continue" the client holds the body back until
+		// told to send it. The interim response goes out just before the
+		// body is read, after every check that could refuse the request
+		// (framing above, the size cap below), so a refused request never
+		// has its body sent: that is the mechanism's whole purpose, and why
+		// it is not sent on reading the header. Only for a request with a
+		// body, and never to an HTTP/1.0 client, which cannot know a 1xx
+		// (RFC 9110 §10.1.1: the server MUST ignore the expectation).
+		sendContinue := expectContinue && !isHTTP10 && (contentLen > 0 || isChunked)
+		writeContinue := func() bool {
+			_, err := conn.Write(consts.BytResponseContinue)
+			return err == nil
 		}
 
 		// Resolve the request-body cap; 0 means "use default", negative disables.
@@ -1625,6 +1667,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 			// client-supplied Content-Length must not dictate our memory use.
 			if maxBody > 0 && contentLen > maxBody {
 				_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
+				return
+			}
+
+			if sendContinue && !writeContinue() {
 				return
 			}
 
@@ -1654,7 +1700,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 		} else if isChunked {
 			// Chunked encoding: size lines, data, CRLFs and trailers are all
 			// checked as they are read (see readChunkedBody), and the body
-			// cap applies to the accumulated data.
+			// cap applies to the accumulated data. A chunked body's size is
+			// unknown up front, so 100 Continue cannot wait for the cap check.
+			if sendContinue && !writeContinue() {
+				return
+			}
 			err = readChunkedBody(ctx.reader, &lr, &ctx.request.body, maxBody, lim.maxHeaderBytes)
 			switch {
 			case err == nil:

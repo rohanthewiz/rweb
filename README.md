@@ -244,6 +244,10 @@ ends: both `Content-Length` and `Transfer-Encoding`, a non-numeric or conflictin
 line folding) or malformed chunked framing gets `400`, and a transfer coding other than
 `chunked` gets `501`; the connection is closed after either.
 
+`Expect: 100-continue` is honoured: an HTTP/1.1 upload that asks for it gets `100 Continue`
+once its head has passed every check, and an oversized one gets `413` without its body ever
+being sent. Other expectations get `417`.
+
 ## Request Context and Cancellation
 
 `ctx.Request().Context()` returns a `context.Context` for the request, like net/http's

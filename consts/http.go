@@ -13,11 +13,12 @@ const (
 )
 
 const (
-	HTTP  = "http"
-	HTTPS = "https"
-	HTTP1 = "HTTP/1.1"
-	HTTP2 = "HTTP/2.0"
-	OK200 = "200 OK"
+	HTTP   = "http"
+	HTTPS  = "https"
+	HTTP1  = "HTTP/1.1"
+	HTTP10 = "HTTP/1.0"
+	HTTP2  = "HTTP/2.0"
+	OK200  = "200 OK"
 
 	ProtocolTCP     = "tcp"
 	ProtocolUDP     = "udp"
@@ -40,6 +41,13 @@ const (
 	// HTTPHeaderTooLarge answers a request whose line and headers exceed
 	// MaxHeaderBytes (RFC 6585 §5); the connection is closed after it.
 	HTTPHeaderTooLarge = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+	// HTTPExpectationFailed answers an Expect header other than
+	// 100-continue (RFC 9110 §10.1.1); the connection is closed after it.
+	HTTPExpectationFailed = "HTTP/1.1 417 Expectation Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+	// ExpectContinue is the one Expect value defined (RFC 9110 §10.1.1),
+	// matched case-insensitively.
+	ExpectContinue = "100-continue"
 )
 
 var ( // HTTP messages
