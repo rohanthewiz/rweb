@@ -14,7 +14,9 @@ import (
 // read or write on a connection may wait.
 //
 // Deadlines across the life of a keep-alive connection, as set by
-// handleConnection (read side) and writeResponse (write side):
+// serveConn (read side) and writeResponse (write side). Shutdown may also
+// set a past read deadline on a connection in the wait phase, to wake and
+// close it (see shutdown.go):
 //
 //	accept
 //	  │

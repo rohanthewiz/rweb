@@ -104,6 +104,45 @@ never meet a request's deadline. Because `WriteTimeout` bounds a *stalled*
 write, a long download that keeps moving is not cut off; static files keep
 using sendfile.
 
+### Graceful Shutdown (v0.2.1+)
+
+`s.Run()` serves until SIGINT/SIGTERM, then shuts down gracefully and returns
+nil. It waits up to `ShutdownTimeout` for requests in progress (`WithShutdownTimeout`;
+0 = default 10 s, negative = close everything at once; if the timeout runs out
+Run returns an error wrapping `context.DeadlineExceeded`). It calls
+`signal.Stop` before returning, so a later SIGTERM ends the process normally.
+`RunWithHttpsRedirect()` shuts down the HTTPS server and its redirector together;
+an error on either side stops both.
+
+Own listener / own lifecycle — `Serve` and `Shutdown` (net/http style):
+
+```go
+ln, _ := net.Listen("tcp", ":8080") // TLS: tls.NewListener(ln, cfg)
+go func() {
+    if err := s.Serve(ln); !errors.Is(err, rweb.ErrServerClosed) {
+        log.Fatal(err)
+    }
+}()
+<-readyCh // WithReadyChan: Serve is accepting; GetListenAddr() is ln's address
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+err := s.Shutdown(ctx) // nil = drained; ctx.Err() = remaining conns were closed
+```
+
+What `Shutdown` does, in order: close listeners (`Serve` returns
+`ErrServerClosed`) → cancel every `Request().Context()` → close idle keep-alive
+connections at once → send each WebSocket a close frame (1001 going away) → end
+SSE streams (flush + cleanup) → wait for in-flight requests → at ctx's end,
+close whatever is left (stuck handlers keep running, but their conn is closed).
+Safe to call repeatedly/concurrently; the server can be served again after.
+Handlers should watch `ctx.Request().Context()` to finish early. Don't call
+`Shutdown` before `ReadyChan` fires for a `Serve` started in a goroutine: a
+Shutdown that runs before Serve starts has nothing to stop.
+
+Tests: prefer `Serve` + `Shutdown` over sending SIGTERM to the test process —
+once no `Run` is listening, SIGTERM kills the process.
+
 ### Strict Request Framing (v0.2.1+)
 
 Requests whose length two parsers could read differently (the basis of request
@@ -1040,7 +1079,8 @@ s.Use(func(ctx rweb.Context) error {
 
 `ctx.Request().Context()` is the request's `context.Context` (net/http's `Request.Context()`
 counterpart). It is cancelled when the client closes the connection while the handler runs, when
-the server shuts down (`Run` got SIGINT/SIGTERM; it does not wait for handlers), and
+the server shuts down (`Shutdown`, which `Run` calls on SIGINT/SIGTERM and which then waits
+for handlers up to its deadline), and
 always once the request is finished. Pass it to outbound calls, queries and worker pools:
 
 ```go

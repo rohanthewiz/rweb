@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -117,6 +118,13 @@ type ServerOptions struct {
 	// that times out ends the response and closes the connection. Off by
 	// default; SSE streams have their own, see SSECfg.WriteTimeout.
 	WriteTimeout time.Duration
+
+	// ShutdownTimeout is how long Run waits, after SIGINT or SIGTERM, for
+	// requests in progress to finish before it closes their connections
+	// (see Shutdown, which Run calls with this timeout). Zero selects the
+	// default (10 s); a negative value closes every connection at once.
+	// It does not apply to Shutdown called directly, which takes a context.
+	ShutdownTimeout time.Duration
 }
 
 // defaultMaxRequestBodySize is the request-body cap used when
@@ -340,6 +348,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.IdleTimeout = serverOpts.IdleTimeout
 		opts.ReadTimeout = serverOpts.ReadTimeout
 		opts.WriteTimeout = serverOpts.WriteTimeout
+		opts.ShutdownTimeout = serverOpts.ShutdownTimeout
 	}
 }
 
@@ -396,7 +405,10 @@ type Server struct {
 	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
 	options      ServerOptions
-	listenAddr   string // the actual listen address used by net.Listen
+	// listenAddr is the address of the listener most recently served
+	// (GetListenAddr). Guarded by lifeMu: Serve sets it from its own
+	// goroutine while the caller may already be reading it.
+	listenAddr string
 
 	// limits is options' connection limits with defaults applied, resolved
 	// once in NewServer so the per-request path reads plain values.
@@ -410,17 +422,34 @@ type Server struct {
 	cookieAEADErr error
 
 	// baseCtx is the parent of every request context (Request().Context()),
-	// and Run cancels it on shutdown, so in-flight handlers, SSE producers
-	// and outbound calls tied to their request learn the server is going
-	// away. A server-wide context was chosen over tracking connections: it
-	// needs no registry, costs nothing per request, and reaches handlers
-	// that are blocked on something other than the conn. Each connection
-	// snapshots it when it starts (request.baseCtx), so the lock is taken
-	// once per connection, not per request. Run renews it if a previous Run
-	// cancelled it, so a server can be run again. Guarded by baseMu.
+	// and Shutdown cancels it, so in-flight handlers, SSE producers and
+	// outbound calls tied to their request learn the server is going away.
+	// It reaches handlers blocked on something other than the conn, which
+	// the connection registry below cannot. Each connection snapshots it
+	// when it starts (request.baseCtx), so the lock is taken once per
+	// connection, not per request. Serve and Run renew it if a previous
+	// Shutdown cancelled it, so a server can be run again. Guarded by baseMu.
 	baseMu     sync.Mutex
 	baseCtx    stdctx.Context
 	baseCancel stdctx.CancelFunc
+
+	// Lifecycle: the listeners being served and the connections open on
+	// them, so Shutdown can close the former, wake idle connections, wait
+	// for the rest and, at its deadline, close them. The design (and why a
+	// registry after all) is in shutdown.go. lifeMu guards everything here
+	// but inShutdown, which the request loop reads once per request without
+	// the lock.
+	lifeMu    sync.Mutex
+	listeners map[net.Listener]struct{}
+	conns     map[*trackedConn]struct{}
+	// connsGone is closed when conns becomes empty while a Shutdown waits.
+	connsGone chan struct{}
+	// shutdowns counts Shutdown calls in progress; beginServing does not
+	// re-arm the server while one runs.
+	shutdowns int
+	// inShutdown is set when a Shutdown starts and cleared by the next
+	// Serve or Run once no Shutdown is running.
+	inShutdown atomic.Bool
 }
 
 // NewServer creates a new HTTP server with an optional ServerOptions struct.
@@ -556,8 +585,9 @@ func (s *Server) baseContext() stdctx.Context {
 }
 
 // renewBaseContext replaces a base context that an earlier shutdown
-// cancelled, so a Run after a Run serves live request contexts again.
-// Connections still open from before keep the cancelled one they took.
+// cancelled, so a Run (or Serve) after a Shutdown serves live request
+// contexts again; beginServing calls it. Connections still open from before
+// keep the cancelled one they took.
 func (s *Server) renewBaseContext() {
 	s.baseMu.Lock()
 	defer s.baseMu.Unlock()
@@ -567,7 +597,7 @@ func (s *Server) renewBaseContext() {
 }
 
 // cancelBaseContext cancels every request context derived from the current
-// base: what Run does on shutdown.
+// base: step 2 of Shutdown.
 func (s *Server) cancelBaseContext() {
 	s.baseMu.Lock()
 	defer s.baseMu.Unlock()
@@ -1200,28 +1230,75 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
-func (s *Server) RunWithHttpsRedirect() error {
-	// Start HTTPS server
-	go func() {
-		err := s.Run()
-		if err != nil {
-			fmt.Println("Error starting HTTPS server: ", err)
-		}
-	}()
+// Timeouts of the plain-HTTP redirector RunWithHttpsRedirect runs beside the
+// HTTPS server. Each exchange is a request head in and a short 301 out, so
+// they can be tight; IdleTimeout lets a browser reuse the connection for the
+// redirect of its next request without holding it for long.
+const (
+	redirectReadHeaderTimeout = 10 * time.Second
+	redirectReadTimeout       = 15 * time.Second
+	redirectWriteTimeout      = 15 * time.Second
+	redirectIdleTimeout       = 60 * time.Second
+	redirectMaxHeaderBytes    = 64 << 10
+)
 
-	// Start HTTP redirect server
-	return http.ListenAndServe(s.options.Address, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		httpsURL := "https://" + r.Host + r.RequestURI
-		http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
-	}))
+// RunWithHttpsRedirect runs the server over TLS (TLS.TLSAddr) and, beside it,
+// a plain-HTTP server on Address that answers every request with a 301 to
+// the same URL over https. Signals are handled as by Run, and stop both
+// sides: SIGINT or SIGTERM shuts both down (the redirector with net/http's
+// Shutdown, under the same ShutdownTimeout) and returns. An error on either
+// side, a listener that cannot be opened included, stops the other too and
+// is returned; a process is never left serving redirects to a server that
+// is gone.
+//
+// The redirector is net/http's server, with its own timeouts (above) rather
+// than the ServerOptions limits, which are about rweb's own connections.
+func (s *Server) RunWithHttpsRedirect() error {
+	ln, err := s.listen()
+	if err != nil {
+		return err
+	}
+	rl, err := net.Listen(consts.ProtocolTCP, s.options.Address)
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+	redirector := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpsURL := "https://" + r.Host + r.RequestURI
+			http.Redirect(w, r, httpsURL, http.StatusMovedPermanently)
+		}),
+		ReadHeaderTimeout: redirectReadHeaderTimeout,
+		ReadTimeout:       redirectReadTimeout,
+		WriteTimeout:      redirectWriteTimeout,
+		IdleTimeout:       redirectIdleTimeout,
+		MaxHeaderBytes:    redirectMaxHeaderBytes,
+	}
+	return s.runUntilSignal(ln, redirector, rl)
 }
 
-// Run starts the server on the given address.
+// Run listens on Address (or, with TLS.UseTLS, on TLS.TLSAddr over TLS) and
+// serves until the process receives SIGINT or SIGTERM. It then stops
+// listening for those signals, so a second one gets the process's default
+// handling again, and shuts the server down gracefully (see Shutdown),
+// waiting up to ServerOptions.ShutdownTimeout for requests in progress.
+//
+// It returns nil after a signal or after Shutdown is called directly; the
+// error that stopped serving if the listener failed; and, when requests were
+// still running at the end of ShutdownTimeout and had their connections
+// closed, an error wrapping context.DeadlineExceeded. A server can be run
+// again after Run returns.
 func (s *Server) Run() (err error) {
-	var listener net.Listener
+	listener, err := s.listen()
+	if err != nil {
+		return err
+	}
+	return s.runUntilSignal(listener, nil, nil)
+}
 
-	s.renewBaseContext()
-
+// listen opens Run's listener: TLS on TLS.TLSAddr when TLS.UseTLS is set,
+// plain TCP on Address otherwise.
+func (s *Server) listen() (listener net.Listener, err error) {
 	if s.options.TLS.UseTLS {
 		tlsConfig := s.options.TLS.Config
 		if tlsConfig == nil {
@@ -1229,7 +1306,7 @@ func (s *Server) Run() (err error) {
 			// life of the process. Callers needing rotation supply TLS.Config.
 			cert, err := tls.LoadX509KeyPair(s.options.TLS.CertFile, s.options.TLS.KeyFile)
 			if err != nil {
-				return fmt.Errorf("failed to load TLS certificate: %v", err)
+				return nil, fmt.Errorf("failed to load TLS certificate: %v", err)
 			}
 
 			tlsConfig = &tls.Config{
@@ -1246,69 +1323,76 @@ func (s *Server) Run() (err error) {
 		// Create TLS listener
 		listener, err = tls.Listen(consts.ProtocolTCP, s.options.TLS.TLSAddr, tlsConfig)
 		if err != nil {
-			return fmt.Errorf("failed to create TLS listener: %v", err)
+			return nil, fmt.Errorf("failed to create TLS listener: %v", err)
 		}
-
-	} else { // Create regular TCP listener
-		listener, err = net.Listen(consts.ProtocolTCP, s.options.Address)
-		if err != nil {
-			return err
-		}
+		return listener, nil
 	}
-	defer listener.Close()
 
-	s.listenAddr = listener.Addr().String()
+	// Create regular TCP listener
+	return net.Listen(consts.ProtocolTCP, s.options.Address)
+}
 
-	// Go accept and handle connections
-	go func() {
-		if s.options.Verbose {
-			protocol := consts.HTTP
-			if s.options.TLS.UseTLS {
-				protocol = consts.HTTPS
-			}
-			fmt.Printf("Serving at %s://%s\n", protocol, listener.Addr()) // address
-		}
-
-		if s.options.ReadyChan != nil { // remember to nil check!
-			select {
-			// Let the caller know we are running
-			case s.options.ReadyChan <- struct{}{}: // attempt to send to channel
-			default: // Don't block if out can't receive for some reason
-			}
-		}
-
-		for {
-			conn, err := listener.Accept() // accept next client connection
-			if err != nil {
-				// When the listener is closed during shutdown, Accept returns net.ErrClosed.
-				// This is expected — break out of the loop to stop the goroutine cleanly.
-				if errors.Is(err, net.ErrClosed) {
-					return
-				}
-				if s.options.Debug {
-					fmt.Println("Error accepting connection:", err)
-				}
-				continue
-			}
-			// fmt.Printf("** Connection established: %s <-- %s\n", conn.LocalAddr(), conn.RemoteAddr())
-
-			// Each connection separately bc a copy is passed in
-			go s.handleConnection(conn)
-		}
-	}()
-
-	// Handle SIGTERM (like CTRL-C)
+// runUntilSignal is Run's body, shared with RunWithHttpsRedirect, which also
+// passes its redirector and that server's listener (both nil for Run):
+//
+//	signal.Notify ─► serve l (and the redirector) ─► wait for the first of
+//	                                                   SIGINT / SIGTERM,
+//	                                                   either side returning
+//	─► signal.Stop ─► Shutdown (and redirector.Shutdown) within ShutdownTimeout
+//
+// Signals are registered before serving starts, so by the time ReadyChan
+// fires a SIGTERM is certain to reach this Run rather than the process's
+// default handler. They are released (signal.Stop) as soon as one has
+// arrived: Run used to leave its registration behind, which kept every later
+// SIGTERM from ending a process that went on doing other work (a redirect
+// server, say) after Run returned. Several Runs in one process each register
+// their own channel; the signal package delivers to all of them, and one
+// Run's Stop does not affect another's registration.
+func (s *Server) runUntilSignal(l net.Listener, redirector *http.Server, rl net.Listener) error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
-	listener.Close()
+	defer signal.Stop(stop)
 
-	// Cancel the request contexts of everything still in flight. Run does
-	// not wait for those handlers; this only tells them to wrap up. Each
-	// keep-alive connection closes after the response it is working on
-	// (see handleConnection).
-	s.cancelBaseContext()
+	// Re-armed here, synchronously, rather than inside the serve goroutine:
+	// see beginServing.
+	s.beginServing()
+	errc := make(chan error, 2)
+	go func() { errc <- s.serve(l) }()
+	if redirector != nil {
+		go func() { errc <- redirector.Serve(rl) }()
+	}
 
+	var serveErr error
+	select {
+	case <-stop:
+	case serveErr = <-errc:
+	}
+	signal.Stop(stop)
+
+	ctx, cancel := s.shutdownContext()
+	defer cancel()
+
+	// A Shutdown called directly made serve return ErrServerClosed; that
+	// Shutdown is in charge of draining, and Run just returns. Otherwise (a
+	// signal, or a listener failing) Run shuts the server down itself.
+	var shutErr error
+	if !errors.Is(serveErr, ErrServerClosed) {
+		shutErr = s.Shutdown(ctx)
+	}
+	if redirector != nil {
+		if err := redirector.Shutdown(ctx); err != nil {
+			_ = redirector.Close() // past the timeout: drop what is left
+		}
+	}
+
+	switch {
+	case serveErr != nil && !errors.Is(serveErr, ErrServerClosed) && !errors.Is(serveErr, http.ErrServerClosed):
+		return serveErr
+	case shutErr != nil && s.shutdownTimeout() > 0:
+		// With a negative ShutdownTimeout, closing everything at once is what
+		// was asked for, not a failure, so its context error is not reported.
+		return fmt.Errorf("rweb: shutdown: %w", shutErr)
+	}
 	return nil
 }
 
@@ -1354,8 +1438,23 @@ func (s *Server) Group(prefix string, handlers ...Handler) *Group {
 	}
 }
 
-// handleConnection handles an accepted connection.
+// handleConnection handles an accepted connection: it registers it with the
+// server (so Shutdown sees it) and serves it. Serve's accept loop registers
+// connections itself, before starting their goroutine, and calls serveConn;
+// this entry point is for connections accepted elsewhere.
 func (s *Server) handleConnection(conn net.Conn) {
+	tc := s.trackConn(conn)
+	if tc == nil { // the server is shutting down
+		_ = conn.Close()
+		return
+	}
+	s.serveConn(tc)
+}
+
+// serveConn runs the request loop of a registered connection until it
+// closes, then removes it from the registry.
+func (s *Server) serveConn(tc *trackedConn) {
+	conn := tc.conn
 	var method, url string
 	var ctx = s.contextPool.Get().(*context) // get a new context from the pool
 
@@ -1366,15 +1465,24 @@ func (s *Server) handleConnection(conn net.Conn) {
 	ctx.request.cr.reset(conn)
 	ctx.reader.Reset(&ctx.request.cr)
 	ctx.conn = conn // store connection for WebSocket upgrades
-	// The parent for this connection's request contexts; cancelled by Run
-	// on shutdown. Taken once here (see Server.baseCtx).
+	// The registry entry, for a WebSocket upgrade to record itself in. Not
+	// reset by Clean, which runs between the requests of this connection.
+	ctx.tracked = tc
+	// The parent for this connection's request contexts; cancelled by
+	// Shutdown. Taken once here (see Server.baseCtx).
 	ctx.request.baseCtx = s.baseContext()
+
+	// Leaves the registry last (defers run LIFO), after the conn is closed:
+	// a Shutdown that sees the registry empty can rely on every connection
+	// in it being closed, not just about to be.
+	defer s.untrackConn(tc)
 
 	defer conn.Close()
 
 	defer func() {
 		// Clean up the context and return it to the pool
 		ctx.Clean()
+		ctx.tracked = nil
 		s.contextPool.Put(ctx)
 	}()
 
@@ -1428,13 +1536,28 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 		firstRequest = false
 		rd.set(wait)
+		// Idle from here until a request's first byte: the state in which
+		// Shutdown closes a connection at once (see shutdown.go). The deadline
+		// above is armed before the state is published, so a past deadline
+		// Shutdown sets after seeing it idle is never overwritten. A server
+		// already shutting down closes the connection rather than wait.
+		if !s.connIdle(tc) {
+			return
+		}
 		if _, err := ctx.reader.Peek(1); err != nil {
 			// Nothing of a request has arrived, so there is nothing to answer:
-			// the client closed, went idle too long, or never finished its
-			// handshake.
+			// the client closed, went idle too long, never finished its
+			// handshake, or Shutdown woke the read with a past deadline.
 			if s.options.Debug && !errors.Is(err, io.EOF) && !isTimeout(err) {
 				fmt.Println("Error reading connection:", err)
 			}
+			return
+		}
+		// A request has arrived, unless Shutdown claimed the connection while
+		// it was idle; then it is closed unanswered, as an idle connection
+		// closed a moment earlier would have been (a client retries an
+		// idempotent request that met a closed keep-alive connection).
+		if !tc.state.CompareAndSwap(connIdle, connActive) {
 			return
 		}
 
@@ -1772,12 +1895,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 
-		// The server has shut down (Run cancelled the base context): the
-		// response just written is this connection's last. Waiting for
-		// another request would only serve it with a context that is
-		// already cancelled. A connection idle in the read above is not
-		// woken by shutdown; it serves at most one more request and then
-		// closes here.
+		// The base context this connection took is cancelled: the response
+		// just written is its last, since another request would only be
+		// served with a context that is already done. Shutdown is also
+		// caught by connIdle at the top of the loop (and an idle connection
+		// is woken by Shutdown itself); this check covers a base context
+		// cancelled without a Shutdown, and a connection that outlived the
+		// base it started with.
 		if ctx.request.baseCtx.Err() != nil {
 			return
 		}
@@ -2397,6 +2521,18 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 			ctx.sseEventName, ctx.sseEventsChan, ctx.status)
 	}
 
+	// The server shutting down ends the stream too. An event stream has no
+	// end of its own, so without this a stream whose producer simply stops
+	// (the common pattern: produce until Request().Context() is done, and
+	// never close the channel) would hold its connection until Shutdown's
+	// deadline forced it closed. The base context rather than the request
+	// context: the latter is also cancelled by the client leaving, which
+	// connGone already covers. A nil channel (no base) never fires.
+	var shuttingDown <-chan struct{}
+	if ctx.request.baseCtx != nil {
+		shuttingDown = ctx.request.baseCtx.Done()
+	}
+
 	// Event Loop - until the input channel is closed or we exit
 	for {
 		select {
@@ -2404,6 +2540,15 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 			// Client disconnected — clean exit
 			if s.options.Verbose {
 				fmt.Printf("RWEB SSE client disconnected (conn closed), cleaning up channel: %v\n", ctx.sseEventsChan)
+			}
+			_ = rw.Flush()
+			return nil
+
+		case <-shuttingDown:
+			// Flush what was written, return (the deferred cleanup runs and
+			// the connection loop closes the conn), as for SSEClose.
+			if s.options.Verbose {
+				fmt.Printf("RWEB SSE stream ended by server shutdown, channel: %v\n", ctx.sseEventsChan)
 			}
 			_ = rw.Flush()
 			return nil
@@ -2626,12 +2771,16 @@ func (s *Server) newContext() *context {
 	}
 }
 
+// GetListenAddr returns the address of the listener the server is serving
+// (from Run or Serve); "" before the first one starts.
 func (s *Server) GetListenAddr() string {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
 	return s.listenAddr
 }
 
 func (s *Server) GetListenPort() (port string) {
-	addr := s.listenAddr
+	addr := s.GetListenAddr()
 
 	lastColonIndex := strings.LastIndex(addr, ":")
 	if lastColonIndex != -1 {

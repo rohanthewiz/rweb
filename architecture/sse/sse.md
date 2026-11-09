@@ -118,7 +118,7 @@ handleConnection()
                  ├─ defer sseCleanup()
                  ├─ spawn connGone goroutine
                  ├─ optional "Connected" event
-                 └─ select loop: connGone | eventsChan
+                 └─ select loop: connGone | server shutdown | eventsChan
 ```
 
 #### Client Disconnect Detection
@@ -148,6 +148,10 @@ for {
     case <-connGone:
         _ = rw.Flush()
         return nil
+
+    case <-shuttingDown:           // the base context: Shutdown (or Run on SIGTERM) cancelled it
+        _ = rw.Flush()
+        return nil                 // cleanup runs, the conn is closed
 
     case event, ok := <-ctx.sseEventsChan:
         if !ok { return }          // channel closed

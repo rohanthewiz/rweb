@@ -210,6 +210,11 @@ type context struct {
 	wsConn *WSConn
 	// Flag indicating if connection was upgraded to WebSocket
 	wsUpgraded bool
+	// tracked is this connection's entry in the server's registry (see
+	// shutdown.go); nil for a synthetic request. Set for the life of the
+	// connection by serveConn, so Clean, which runs between its requests,
+	// leaves it alone.
+	tracked *trackedConn
 	// Scratch buffer reused by writeResponse to assemble the status line
 	// and headers, avoiding a per-request allocation
 	respBuf bytes.Buffer
@@ -787,6 +792,10 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 	ctx.wsConn.applyOptions(opts)
 	ctx.wsConn.startKeepalive()
 	ctx.wsUpgraded = true
+	// Let Shutdown find the socket, to send it a close frame (1001).
+	if ctx.tracked != nil {
+		ctx.server.trackWebSocket(ctx.tracked, ctx.wsConn)
+	}
 
 	return ctx.wsConn, nil
 }

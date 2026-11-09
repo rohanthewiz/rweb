@@ -95,7 +95,7 @@ type request struct {
 
 	// cr is the io.Reader under reader. It is per-connection, not
 	// per-request: a byte it read ahead belongs to the next request on the
-	// same connection, so Clean leaves it alone (handleConnection resets it
+	// same connection, so Clean leaves it alone (serveConn resets it
 	// when the pooled context moves to a new connection).
 	cr connReader
 
@@ -105,8 +105,8 @@ type request struct {
 	reqCtx    stdctx.Context
 	reqCancel stdctx.CancelFunc
 
-	// baseCtx is reqCtx's parent: the server's base context, which Run
-	// cancels on shutdown. Set per connection by handleConnection (and by
+	// baseCtx is reqCtx's parent: the server's base context, which Shutdown
+	// cancels (Run calls it on a signal). Set per connection by serveConn (and by
 	// Server.Request); Clean leaves it, since the next request on the
 	// connection has the same parent. Nil means context.Background.
 	baseCtx stdctx.Context
@@ -121,7 +121,7 @@ type request struct {
 	// connection ends after this response: the request said
 	// "Connection: close", or is HTTP/1.0 without "keep-alive", or (set by
 	// writeResponse) the handler's response says close, or the body can
-	// only be delimited by closing. handleConnection assigns both for every
+	// only be delimited by closing. serveConn assigns both for every
 	// request before the handler runs, so they need no reset in Clean; a
 	// synthetic Server.Request leaves them false, which writes nothing.
 	http10    bool

@@ -923,6 +923,48 @@ func (ws *WSConn) Close(code int, reason string) error {
 	return ws.conn.Close()
 }
 
+// goingAway starts the closing handshake from the server's side when the
+// server shuts down: a close frame with 1001 (going away), so a well-behaved
+// client answers and leaves within the shutdown grace period instead of
+// being cut off at its end. It is Close without the two parts that would
+// collide with the session still running in the handler's goroutine:
+//
+//   - it does not read the peer's answering close frame; the handler's own
+//     ReadMessage does (handleClose sees closed already set, so it sends no
+//     second frame, and ReadMessage returns the CloseMessage);
+//   - it does not close the conn; the handler returns and the connection
+//     loop closes it, or Shutdown does at its deadline.
+//
+// What it shares with Close: closeMutex decides once whether to close,
+// writeMutex keeps the frame from interleaving with an app write, and closed
+// is set under writeMutex so no data frame follows the close frame. The
+// wait for the peer's answer is bounded by closeHandshakeTimeout as in
+// Close, set under deadlineMu after closed so the liveness reader cannot
+// push it back out. Called on its own goroutine (it waits for any app write
+// in progress), and safe on a socket already closing: then it does nothing.
+func (ws *WSConn) goingAway() {
+	ws.closeMutex.Lock()
+	if ws.closed.Load() {
+		ws.closeMutex.Unlock()
+		return
+	}
+	var data [2]byte
+	binary.BigEndian.PutUint16(data[:], wsCloseGoingAway)
+	ws.writeMutex.Lock()
+	err := ws.writeFrame(wsClose, data[:])
+	ws.closed.Store(true)
+	ws.writeMutex.Unlock()
+	ws.signalDone()
+	ws.closeMutex.Unlock()
+	if err != nil {
+		return // the conn is broken; the handler's next read fails on it
+	}
+
+	ws.deadlineMu.Lock()
+	_ = ws.conn.SetReadDeadline(time.Now().Add(closeHandshakeTimeout))
+	ws.deadlineMu.Unlock()
+}
+
 // signalDone closes the Done channel, once, whichever path ends the
 // connection first.
 func (ws *WSConn) signalDone() {

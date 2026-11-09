@@ -16,6 +16,7 @@ Thanks and credit to Akyoto, especially for the radix tree!
 - Low latency
 - Server Sent Events
 - Request cancellation: `ctx.Request().Context()` is cancelled when the client disconnects (see below)
+- Graceful shutdown: `s.Shutdown(ctx)` drains in-flight requests; `Run` does it on SIGINT/SIGTERM; `s.Serve(listener)` for your own listener
 - WebSockets, with optional permessage-deflate compression (`s.WebSocketWithOptions`)
 - Flexible static files handling
 - Scales incredibly well with the number of routes
@@ -257,8 +258,8 @@ chunked encoding: a body of unknown length goes to it unframed and the connectio
 
 `ctx.Request().Context()` returns a `context.Context` for the request, like net/http's
 `Request.Context()`. It is cancelled when the client closes the connection while the handler
-is still running, and always once the request is finished. Pass it to slow work so that work
-stops when nobody is waiting for the answer:
+is still running, when the server shuts down (see below), and always once the request is
+finished. Pass it to slow work so that work stops when nobody is waiting for the answer:
 
 ```go
 s.Post("/report", func(ctx rweb.Context) error {
@@ -277,6 +278,42 @@ so an event producer can stop on `<-rc.Done()`. After a WebSocket upgrade or `ct
 the connection belongs to the caller, so the context is only cancelled when the handler
 returns (a WebSocket peer leaving shows up as a `ReadMessage` error). A pipelined request
 (the client already sent its next one) is not watched either.
+
+## Graceful Shutdown
+
+`s.Run()` serves until the process gets SIGINT or SIGTERM, then shuts down gracefully and
+returns. It waits up to `ShutdownTimeout` (`WithShutdownTimeout`; default 10 s, negative =
+close everything at once) for requests in progress, and stops listening for those signals
+before it returns, so a later SIGTERM ends the process as usual. `RunWithHttpsRedirect()`
+does the same for the HTTPS server and its plain-HTTP redirector together; an error on
+either side stops both.
+
+To control the lifecycle yourself, serve a listener and call `Shutdown`:
+
+```go
+ln, err := net.Listen("tcp", ":8080") // or tls.NewListener(ln, cfg), a systemd socket, ...
+if err != nil {
+	log.Fatal(err)
+}
+go func() {
+	if err := s.Serve(ln); !errors.Is(err, rweb.ErrServerClosed) {
+		log.Fatal(err)
+	}
+}()
+
+// ... later, e.g. on your own signal handling:
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+if err := s.Shutdown(ctx); err != nil {
+	log.Println("forced shutdown:", err) // context.DeadlineExceeded
+}
+```
+
+`Shutdown` closes the listeners (`Serve` returns `rweb.ErrServerClosed`), cancels every
+`Request().Context()`, closes idle keep-alive connections at once, sends each WebSocket a
+close frame (1001, going away), ends SSE streams, and waits for requests in progress to
+finish. If its context ends first, it closes the remaining connections and returns the
+context's error. It is safe to call more than once; a server can be served again afterwards.
 
 ## WebSockets
 
