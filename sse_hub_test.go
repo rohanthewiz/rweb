@@ -2,6 +2,7 @@ package rweb
 
 import (
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -421,4 +422,79 @@ func TestSSEHubConcurrentBroadcast(t *testing.T) {
 	<-drainDone
 
 	assert.Equal(t, 2, hub.ClientCount())
+}
+
+// TestSSEHubOnDisconnectMayCallHub pins that OnDisconnect runs with no hub lock
+// held. It used to run inside unregisterLocked, under the hub's write lock, so
+// a callback that called back into the hub (ClientCount, Broadcast, Register)
+// blocked on that lock forever. Both removal paths are covered: an explicit
+// Unregister and the eviction of a stale client during a broadcast.
+func TestSSEHubOnDisconnectMayCallHub(t *testing.T) {
+	// callWithin fails the test if fn does not return in time, which is how a
+	// self-deadlock shows up; the stuck goroutine is left behind.
+	callWithin := func(t *testing.T, what string, fn func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			fn()
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not return: OnDisconnect deadlocked on the hub lock", what)
+		}
+	}
+
+	t.Run("unregister", func(t *testing.T) {
+		var hub *SSEHub
+		countSeen := make(chan int, 1)
+		hub = NewSSEHub(SSEHubOptions{OnDisconnect: func() {
+			countSeen <- hub.ClientCount()
+		}})
+		defer hub.Close()
+
+		ch := make(chan any, 8)
+		hub.Register(ch)
+		callWithin(t, "Unregister", func() { hub.Unregister(ch) })
+		// The callback sees the hub after the removal.
+		assert.Equal(t, 0, <-countSeen)
+	})
+
+	t.Run("eviction", func(t *testing.T) {
+		var hub *SSEHub
+		var calls atomic.Int32
+		hub = NewSSEHub(SSEHubOptions{ChannelSize: 1, MaxDropped: 1, OnDisconnect: func() {
+			calls.Add(1)
+			_ = hub.ClientCount()
+		}})
+		defer hub.Close()
+
+		stale := make(chan any) // unbuffered and never read: every send drops
+		hub.Register(stale)
+		callWithin(t, "BroadcastRaw", func() { hub.BroadcastRaw(SSEvent{Type: "x", Data: "1"}) })
+		assert.Equal(t, 0, hub.ClientCount())
+		assert.Equal(t, int32(1), calls.Load())
+	})
+}
+
+// TestSSEHubCloseConcurrent closes a hub from many goroutines at once. A
+// check-then-close on the done channel lets two callers both see it open and
+// both close it, which panics; Close must be safe under concurrency.
+func TestSSEHubCloseConcurrent(t *testing.T) {
+	for range 50 {
+		hub := NewSSEHub(SSEHubOptions{HeartbeatInterval: time.Hour})
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				hub.Close()
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
 }

@@ -148,6 +148,7 @@ type SSEHub struct {
     clients map[chan any]*hubClient
     opts    SSEHubOptions
     done    chan struct{}
+    closeOnce sync.Once  // Close() closes done exactly once
 }
 
 type hubClient struct {
@@ -162,9 +163,18 @@ type SSEHubOptions struct {
     ChannelSize       int            // Per-client buffer (default: 8)
     MaxDropped        int            // Eviction threshold (default: 3; 0 = disabled)
     HeartbeatInterval time.Duration  // Keepalive period (default: 0 = disabled)
-    OnDisconnect      func()         // Callback on client removal
+    OnDisconnect      func()         // Callback on client removal (once per client, outside the hub lock)
 }
 ```
+
+`OnDisconnect` is never called with `h.mu` held. `unregisterLocked` only
+reports whether it removed the client; `Unregister` and the eviction pass in
+`broadcastToClients` fire the callback (via `notifyDisconnect`) after
+unlocking. `sync.RWMutex` is not reentrant, so a callback that called
+`ClientCount`, `Broadcast` or `Register` under the lock used to deadlock.
+
+`Close()` closes the heartbeat's `done` channel through a `sync.Once`, so
+concurrent calls cannot double-close it.
 
 #### Registration & Cleanup
 
@@ -191,7 +201,7 @@ Three broadcast methods, all backed by `broadcastToClients()`:
 
 #### Stale Client Eviction
 
-During each broadcast, clients whose drop count exceeds `MaxDropped` are collected into a `stale` slice. After releasing the read lock, a write lock is acquired and each stale client is unregistered (channel closed, removed from map, `OnDisconnect` called).
+During each broadcast, clients whose drop count exceeds `MaxDropped` are collected into a `stale` slice. After releasing the read lock, a write lock is acquired and each stale client is unregistered (channel closed, removed from map). Once the write lock is released, `OnDisconnect` is called once for each client this pass actually removed (a concurrent broadcast may have evicted the same client first).
 
 Setting `MaxDropped = 0` disables eviction entirely.
 
@@ -275,6 +285,8 @@ func (hub *SSEHub) Handler(server *Server, eventName ...string) Handler
 | `TestSSEHubBackwardCompatibility` | Default options preserved |
 | `TestSSEHubCustomChannelSize` | Custom ChannelSize respected |
 | `TestSSEHubOnDisconnectCalledOnUnregister` | Callback fires on removal |
+| `TestSSEHubOnDisconnectMayCallHub` | Callback may call hub methods (unregister and eviction paths) |
+| `TestSSEHubCloseConcurrent` | Concurrent Close() calls do not panic |
 
 ### `sse_test.go` (2 tests)
 

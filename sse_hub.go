@@ -30,7 +30,11 @@ type SSEHubOptions struct {
 	HeartbeatInterval time.Duration
 
 	// OnDisconnect is called whenever a client is removed from the hub — either by
-	// normal unregister or by auto-eviction. Optional.
+	// normal unregister or by auto-eviction — once per removed client. Optional.
+	// It runs after the hub's lock is released, on the goroutine that removed
+	// the client (the SSE handler's, or a broadcaster's for an eviction), so it
+	// may call back into the hub (ClientCount, Broadcast, Register). Keep it
+	// short: an eviction callback delays the Broadcast that triggered it.
 	OnDisconnect func()
 }
 
@@ -64,6 +68,11 @@ type SSEHub struct {
 	clients map[chan any]*hubClient
 	opts    SSEHubOptions
 	done    chan struct{} // signals heartbeat goroutine to stop
+
+	// closeOnce guards close(done). A select-then-close is a check-then-act:
+	// two concurrent Close calls can both see done open and both close it,
+	// which panics. sync.Once makes the close happen exactly once.
+	closeOnce sync.Once
 }
 
 // NewSSEHub creates a new SSEHub ready to accept client registrations.
@@ -130,12 +139,7 @@ func (h *SSEHub) runHeartbeat() {
 // Close stops the heartbeat goroutine (if running) and releases resources.
 // Safe to call multiple times; subsequent calls are no-ops.
 func (h *SSEHub) Close() {
-	select {
-	case <-h.done:
-		// Already closed
-	default:
-		close(h.done)
-	}
+	h.closeOnce.Do(func() { close(h.done) })
 }
 
 // Register adds a client channel to the hub so it receives broadcast events.
@@ -147,23 +151,38 @@ func (h *SSEHub) Register(client chan any) {
 
 // Unregister removes a client channel from the hub and closes it.
 // Safe to call multiple times — the channel is only closed if still registered,
-// preventing double-close panics. Fires OnDisconnect if configured.
+// preventing double-close panics. Fires OnDisconnect if configured, once, and
+// only when this call actually removed the client.
 func (h *SSEHub) Unregister(client chan any) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.unregisterLocked(client)
+	removed := h.unregisterLocked(client)
+	h.mu.Unlock()
+
+	// Outside the lock: see notifyDisconnect.
+	if removed {
+		h.notifyDisconnect()
+	}
 }
 
-// unregisterLocked removes and closes a client while the write lock is held.
-// Fires OnDisconnect callback if configured.
-func (h *SSEHub) unregisterLocked(client chan any) {
+// unregisterLocked removes and closes a client while the write lock is held,
+// and reports whether the client was still registered. It does not fire
+// OnDisconnect itself; the caller does that once the lock is released.
+func (h *SSEHub) unregisterLocked(client chan any) (removed bool) {
 	if _, ok := h.clients[client]; ok {
 		delete(h.clients, client)
 		close(client)
+		return true
+	}
+	return false
+}
 
-		if h.opts.OnDisconnect != nil {
-			h.opts.OnDisconnect()
-		}
+// notifyDisconnect runs the OnDisconnect callback, if any. Callers must not
+// hold h.mu: sync.RWMutex is not reentrant, so a callback that calls back into
+// the hub (ClientCount takes the read lock, Register the write lock) would
+// block forever on a lock its own goroutine holds.
+func (h *SSEHub) notifyDisconnect() {
+	if h.opts.OnDisconnect != nil {
+		h.opts.OnDisconnect()
 	}
 }
 
@@ -195,13 +214,23 @@ func (h *SSEHub) broadcastToClients(value any) {
 
 	h.mu.RUnlock()
 
-	// Evict stale clients under a write lock
+	// Evict stale clients under a write lock, counting only the ones this call
+	// actually removed: a concurrent broadcast or Unregister may have removed
+	// one already, and OnDisconnect fires once per client, not once per attempt.
 	if len(stale) > 0 {
+		evicted := 0
 		h.mu.Lock()
 		for _, client := range stale {
-			h.unregisterLocked(client)
+			if h.unregisterLocked(client) {
+				evicted++
+			}
 		}
 		h.mu.Unlock()
+
+		// Callbacks run after the lock is released (see notifyDisconnect).
+		for range evicted {
+			h.notifyDisconnect()
+		}
 	}
 }
 

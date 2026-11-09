@@ -504,14 +504,16 @@ hub := rweb.NewSSEHub(rweb.SSEHubOptions{
     // (typically 30-60s timeout). Default: 0 (disabled).
     HeartbeatInterval: 30 * time.Second,
 
-    // Called when any client is removed — normal disconnect or eviction. Optional.
+    // Called once per removed client — normal disconnect or eviction. Optional.
+    // Runs after the hub's lock is released, so it may call hub methods
+    // (e.g. hub.ClientCount()). An eviction runs it on the broadcasting goroutine.
     OnDisconnect: func() {
         fmt.Println("Client disconnected")
     },
 })
 
 // Close() stops the heartbeat goroutine — call on shutdown.
-// Safe to call multiple times.
+// Safe to call multiple times, including concurrently.
 defer hub.Close()
 ```
 
