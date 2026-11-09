@@ -5,6 +5,9 @@ package rweb_test
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -449,4 +452,59 @@ func TestGroupMiddlewareStopsChain(t *testing.T) {
 	assert.False(t, laterRan)
 	assert.False(t, handlerRan)
 	assert.Equal(t, "", string(response.Body()))
+}
+
+// TestGroupMiddlewareCoversStaticAndProxy verifies that a group's middleware
+// runs in front of the routes StaticFiles, StaticFilesAbs and Proxy register.
+// Those are built inside the Server rather than through Group.addRoute, and
+// used to be registered bare: files and an upstream mounted on an
+// authenticated group were served to anyone.
+func TestGroupMiddlewareCoversStaticAndProxy(t *testing.T) {
+	dir := t.TempDir()
+	assert.Nil(t, os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("SECRET"), 0o600))
+
+	// The upstream records whether the proxy ever reached it.
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		_, _ = w.Write([]byte("UPSTREAM"))
+	}))
+	defer upstream.Close()
+
+	s := rweb.NewServer()
+
+	// allow is flipped by the test; the middleware denies by returning
+	// without Next(), the way an auth check does.
+	allow := false
+	admin := s.Group("/admin", func(ctx rweb.Context) error {
+		if !allow {
+			return ctx.SetStatus(http.StatusUnauthorized).WriteString("denied")
+		}
+		return ctx.Next()
+	})
+	admin.StaticFilesAbs("/files/", dir, 2)
+	assert.Nil(t, admin.Proxy("/px", upstream.URL, 2))
+
+	// Denied: neither the file nor the upstream is reached.
+	r := s.Request("GET", "/admin/files/secret.txt", nil, nil)
+	assert.Equal(t, http.StatusUnauthorized, r.Status())
+	assert.Equal(t, "denied", string(r.Body()))
+
+	for _, p := range []string{"/admin/px", "/admin/px/anything"} {
+		r = s.Request("POST", p, nil, nil)
+		assert.Equal(t, http.StatusUnauthorized, r.Status())
+		assert.Equal(t, "denied", string(r.Body()))
+	}
+	assert.Equal(t, false, upstreamHit)
+
+	// Allowed: the middleware passes control on and both work as before.
+	allow = true
+	r = s.Request("GET", "/admin/files/secret.txt", nil, nil)
+	assert.Equal(t, http.StatusOK, r.Status())
+	assert.Equal(t, "SECRET", string(r.Body()))
+
+	r = s.Request("GET", "/admin/px/anything", nil, nil)
+	assert.Equal(t, http.StatusOK, r.Status())
+	assert.Equal(t, "UPSTREAM", string(r.Body()))
+	assert.Equal(t, true, upstreamHit)
 }

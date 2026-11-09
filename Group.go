@@ -90,28 +90,33 @@ func (g *Group) Trace(path string, handler Handler) {
 }
 
 // StaticFiles serves static files with the group prefix.
+// The group's middleware (as it stands when this is called) runs in front of
+// the file handler, as it does for any other route of the group, so files
+// under an authenticated group are behind that authentication.
 // reqDir is the URL path relative to the group prefix.
 // targetDir is the local filesystem directory containing the files.
 // nbrOfTokensToStrip removes URL path segments when mapping to filesystem paths.
 func (g *Group) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
 	fullPath := path.Join(g.prefix, reqDir)
-	g.server.StaticFiles(fullPath, targetDir, nbrOfTokensToStrip)
+	g.server.staticFiles(fullPath, targetDir, nbrOfTokensToStrip, false, g.wrap)
 }
 
 // StaticFilesAbs is StaticFiles for a targetDir given as an absolute
 // filesystem path. See Server.StaticFilesAbs for why it is a separate method.
 func (g *Group) StaticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int) {
 	fullPath := path.Join(g.prefix, reqDir)
-	g.server.StaticFilesAbs(fullPath, targetDir, nbrOfTokensToStrip)
+	g.server.staticFilesAbs(fullPath, targetDir, nbrOfTokensToStrip, g.wrap)
 }
 
 // Proxy sets up a reverse proxy with the group prefix.
+// The group's middleware runs in front of the proxy handler, as for any other
+// route of the group.
 // pathPrefix is the URL path relative to the group prefix.
 // targetURL is the backend server URL to proxy requests to.
 // prefixTokensToRemove strips URL segments before forwarding the request.
 func (g *Group) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove int) error {
 	fullPath := path.Join(g.prefix, pathPrefix)
-	return g.server.Proxy(fullPath, targetURL, prefixTokensToRemove)
+	return g.server.proxy(fullPath, targetURL, prefixTokensToRemove, g.wrap)
 }
 
 // SSEHandler returns a handler that sets up Server-Sent Events with the group prefix.
@@ -129,6 +134,23 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 	// The leading "/" ensures proper path formatting
 	fullPath := path.Join("/", g.prefix, routePath)
 
+	g.server.AddMethod(method, fullPath, g.wrap(handler))
+}
+
+// wrap returns handler with the group's middleware in front of it.
+//
+// It is separate from addRoute because not every route of a group is
+// registered through addRoute: StaticFiles, StaticFilesAbs and Proxy build
+// their handler and their routes (a wildcard, several methods) inside the
+// Server. Those used to register straight on the server, so a group's
+// middleware silently did not apply to them, and files or an upstream placed
+// under an authenticated group were served to anyone. They now take wrap as
+// the hook that puts the group's chain in front of whatever they register.
+//
+// The middleware slice is read here, at registration, so (as with any group
+// route) middleware added by a later Use does not apply to routes already
+// registered.
+func (g *Group) wrap(handler Handler) Handler {
 	// Build the middleware chain - start with the route handler as the final handler
 	finalHandler := handler
 
@@ -161,7 +183,7 @@ func (g *Group) addRoute(method, routePath string, handler Handler) {
 		}
 	}
 
-	g.server.AddMethod(method, fullPath, finalHandler)
+	return finalHandler
 }
 
 // contextWrapper wraps a Context to intercept Next() calls.

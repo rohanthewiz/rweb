@@ -383,6 +383,11 @@ admin := s.Group("/admin", authMiddleware)
 admin.StaticFilesAbs("/files/", "/var/lib/myapp/files", 2) // strips "admin" and "files"
 ```
 
+Group middleware runs in front of `g.StaticFiles`, `g.StaticFilesAbs` and `g.Proxy`
+(v0.2.1+), as for any other group route, so files or an upstream mounted on an
+authenticated group are behind that authentication. Earlier versions registered these
+routes bare, without the group's middleware.
+
 - `localPath` must be absolute; a relative one is refused at registration (a message is
   printed and no route is added). Do NOT pass an absolute path to `StaticFiles` expecting
   this behavior — it will be treated as relative to the working directory and 404.

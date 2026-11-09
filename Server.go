@@ -692,6 +692,14 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 // If there is any prefix left after stripping, it is added to the leftmost of the target URL.
 // If there is a path specified in the target URL, it is appended after the stripped prefix.
 func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove int) (err error) {
+	return s.proxy(pathPrefix, targetURL, prefixTokensToRemove, nil)
+}
+
+// proxy is Proxy with an optional wrap applied to the proxy handler before it
+// is registered. A Group passes its middleware chain (Group.wrap), so a proxy
+// mounted on a group is behind the group's middleware; nil registers the
+// handler bare.
+func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove int, wrap func(Handler) Handler) (err error) {
 	tURL, err := url.Parse(targetURL)
 	if err != nil {
 		return err
@@ -790,9 +798,14 @@ func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		return nil
 	}
 
-	s.setMethodProxyHandler(path.Join("/", pathPrefix, "*path"), hdlr)
+	var routeHdlr Handler = hdlr
+	if wrap != nil {
+		routeHdlr = wrap(routeHdlr)
+	}
+
+	s.setMethodProxyHandler(path.Join("/", pathPrefix, "*path"), routeHdlr)
 	// The wildcard route does not handle the root of the prefix, so have to handle that separately
-	s.setMethodProxyHandler(path.Join("/", pathPrefix), hdlr)
+	s.setMethodProxyHandler(path.Join("/", pathPrefix), routeHdlr)
 	return nil
 }
 
@@ -844,7 +857,7 @@ func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) 
 //  2. s.StaticFiles("/css/", "assets/css", 1)
 //  3. s.StaticFiles("/.well-known/", "/", 0)
 func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
-	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, false)
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, false, nil)
 }
 
 // StaticFilesAbs is StaticFiles for a directory named by its absolute
@@ -865,18 +878,29 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 //	s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)
 //	// GET /editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
 func (s *Server) StaticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int) {
+	s.staticFilesAbs(reqDir, targetDir, nbrOfTokensToStrip, nil)
+}
+
+// staticFilesAbs is StaticFilesAbs with the optional handler wrap of
+// staticFiles, so Group.StaticFilesAbs shares the absolute-path check.
+func (s *Server) staticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int, wrap func(Handler) Handler) {
 	if !filepath.IsAbs(targetDir) {
 		fmt.Printf("StaticFilesAbs target dir %q is not an absolute path -- not handling\n", targetDir)
 		return
 	}
-	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, true)
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, true, wrap)
 }
 
 // staticFiles is the shared implementation. absTarget selects how targetDir
 // is turned into the root directory on disk; everything else — the route,
 // token stripping, traversal rejection, containment check, conditional GET —
 // is common, so the two public methods cannot drift apart on safety.
-func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int, absTarget bool) {
+//
+// wrap, when not nil, is applied to the file handler before it is registered.
+// A Group passes its middleware chain (Group.wrap), which is what puts static
+// files mounted on a group behind the group's middleware; the Server's own
+// methods pass nil.
+func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int, absTarget bool, wrap func(Handler) Handler) {
 	if len(reqDir) < 2 {
 		fmt.Println("StaticFiles request dir is too short -- not handling")
 		return
@@ -895,7 +919,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 	}
 
 	// We use the wildcard parameter in the route here
-	s.Get(route, func(ctx Context) error {
+	var fileHandler Handler = func(ctx Context) error {
 		var rhTokens []string
 		// Strip off the left -- keep the right side tokens here
 		// It is okay if we strip all
@@ -1015,7 +1039,12 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		// takes ownership of f and writeResponse copies it to the conn (see
 		// response.bodyStream).
 		return Stream(ctx, f, info.Size())
-	})
+	}
+
+	if wrap != nil {
+		fileHandler = wrap(fileHandler)
+	}
+	s.Get(route, fileHandler)
 }
 
 // Request performs a synthetic request and returns the response.

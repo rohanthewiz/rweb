@@ -80,8 +80,6 @@ code at `3169f85`.
   SSE options: `Access-Control-Allow-Origin: *` is unconditional (`Response.go:277`); no `id:`/`retry:` fields. Needs decision D8. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-055** · raised `2026-1109-once-over-review` · value low
   `ClientIP` trusts `X-Forwarded-For` from any peer; add trusted proxies. Needs decision D9. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-058** · raised `2026-1109-once-over-review` · value high
-  `Group.StaticFiles`, `StaticFilesAbs` and `Proxy` register straight on the server, so the group's middleware never runs for them (`Group.go:89-108`). SKILL.md's `admin := s.Group("/admin", authMiddleware); admin.StaticFilesAbs(...)` example reads as if those files are behind auth; they are not. Found while auditing for N-029; read, not reproduced.
 
 ## Validate
 
@@ -116,6 +114,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-058** · raised `2026-1109-once-over-review` · closed 2026-11-09
+  `Group.StaticFiles`, `StaticFilesAbs` and `Proxy` registered straight on the server, so group middleware never ran for them: files or an upstream under an authenticated group were served to anyone. Done: `Group.wrap` (split out of `addRoute`) is passed to the server's private `staticFiles` / `staticFilesAbs` / `proxy`, which apply it to the handler before registering. Test: `TestGroupMiddlewareCoversStaticAndProxy` (200 on the old code where 401 is expected). SKILL.md notes it.
 - **N-034** · raised `2026-1109-once-over-review` · closed 2026-11-09, `ee2b87c`
   `writeResponse` sends a 1xx, 204 or 304 as the header block alone: no Content-Length or Transfer-Encoding, no body, pending stream closed unread. An SSE stream on such a status is not started. Synthetic `s.Request` is unchanged. Tests: `bodyless_status_test.go`.
 - **N-033** · raised `2026-1109-once-over-review` · closed 2026-11-09, `db5bce9`
