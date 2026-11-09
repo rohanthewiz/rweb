@@ -631,7 +631,8 @@ The framework handles the HTTP upgrade handshake automatically.
 A request to the route that is not a valid handshake never reaches the handler and is
 not logged as an error: a plain GET or a HEAD gets `426 Upgrade Required` with
 `Upgrade: websocket`, an unsupported `Sec-WebSocket-Version` gets 426 with
-`Sec-WebSocket-Version: 13`, and an incomplete handshake gets 400.
+`Sec-WebSocket-Version: 13`, and an incomplete handshake gets 400. A
+cross-origin handshake gets 403 (see Safety Defaults).
 
 ```go
 s.WebSocket("/ws/echo", func(ws *rweb.WSConn) error {
@@ -690,6 +691,27 @@ s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, func(ws *rweb.W
 
 These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
 `ctx.UpgradeWebSocket()` alike; `WSOptions` fields adjust them per route.
+
+- **Same-origin check**: browsers send cookies with a WebSocket handshake from
+  any page and apply no CORS, so a handshake whose `Origin` names another host
+  than the request's `Host` (compared as host[:port], case-insensitively, any
+  scheme) is refused with **403** before upgrading. No `Origin` header
+  (curl, Go, mobile clients) is allowed; `Origin: null` is refused. Opt-outs:
+
+  ```go
+  rweb.WSOptions{
+      // Further origins besides the server's own host: full origin, bare
+      // host[:port] (any scheme), or "*" for any origin (no check).
+      AllowedOrigins: []string{"https://app.example.com", "admin.example.com:8443"},
+      // Or decide yourself; when set, it alone decides (Origin header or not).
+      CheckOrigin: func(ctx rweb.Context) bool { return true },
+  }
+  ```
+
+  Behind a reverse proxy that rewrites `Host`, list the public origin in
+  `AllowedOrigins`. A manual `ctx.UpgradeWebSocket()` takes no options, so it
+  gets the default check; it returns `rweb.ErrWebSocketOriginNotAllowed` with
+  the 403 already set — return nil to send it (see Manual Upgrade).
 
 - **Server pings** (`WSOptions.PingInterval`, default 30 s, negative disables;
   `WSOptions.PongTimeout`, default 10 s): the server pings the peer on the
@@ -842,6 +864,9 @@ s.Get("/ws/custom", func(ctx rweb.Context) error {
     }
 
     ws, err := ctx.UpgradeWebSocket()
+    if errors.Is(err, rweb.ErrWebSocketOriginNotAllowed) {
+        return nil // cross-origin handshake: the 403 is already set
+    }
     if err != nil {
         return err
     }

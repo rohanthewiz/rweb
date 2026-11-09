@@ -6,6 +6,7 @@ package rweb
 
 import (
 	"bufio"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -75,6 +76,134 @@ func TestWebSocketRouteRejectsNonHandshake(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// --- Origin check ------------------------------------------------------------
+//
+// Browsers attach cookies to a cross-site WebSocket handshake and apply no
+// CORS to it, so without an Origin check any page could open a socket as the
+// logged-in user. A handshake whose Origin names a different host than the
+// request's is refused with 403 before upgrading; no Origin (a non-browser
+// client) is allowed.
+
+// handshakeHeaders is a complete opening handshake for Host "test", plus
+// an Origin header when origin is not empty.
+func handshakeHeaders(origin string) []Header {
+	h := []Header{
+		{Key: "Host", Value: "test"},
+		{Key: "Upgrade", Value: "websocket"},
+		{Key: "Connection", Value: "Upgrade"},
+		{Key: "Sec-WebSocket-Key", Value: "dGhlIHNhbXBsZSBub25jZQ=="},
+		{Key: "Sec-WebSocket-Version", Value: "13"},
+	}
+	if origin != "" {
+		h = append(h, Header{Key: "Origin", Value: origin})
+	}
+	return h
+}
+
+// Refused handshakes, through each way of upgrading. They are answered
+// before the upgrade, so the synthetic s.Request can carry them.
+func TestWebSocketOriginRefused(t *testing.T) {
+	cases := []struct {
+		name   string
+		opts   WSOptions
+		origin string
+	}{
+		{"other host", WSOptions{}, "https://evil.example"},
+		{"same host, other port", WSOptions{}, "http://test:8080"},
+		{"opaque origin", WSOptions{}, "null"},
+		{"not in AllowedOrigins", WSOptions{AllowedOrigins: []string{"https://app.example"}}, "https://evil.example"},
+		{"CheckOrigin says no", WSOptions{CheckOrigin: func(Context) bool { return false }}, ""},
+		{"CheckOrigin wins over AllowedOrigins",
+			WSOptions{AllowedOrigins: []string{"*"}, CheckOrigin: func(Context) bool { return false }}, "https://evil.example"},
+	}
+
+	for _, tc := range cases {
+		routes := map[string]func(s *Server, handled *bool, upgradeErr *error){
+			"WebSocketWithOptions": func(s *Server, handled *bool, _ *error) {
+				s.WebSocketWithOptions("/ws", tc.opts, func(*WSConn) error { *handled = true; return nil })
+			},
+		}
+		// s.WebSocket and a manual UpgradeWebSocket have no options: only the
+		// default check applies to them.
+		if tc.opts.CheckOrigin == nil && tc.opts.AllowedOrigins == nil {
+			routes["WebSocket"] = func(s *Server, handled *bool, _ *error) {
+				s.WebSocket("/ws", func(*WSConn) error { *handled = true; return nil })
+			}
+			routes["manual UpgradeWebSocket"] = func(s *Server, handled *bool, upgradeErr *error) {
+				s.Get("/ws", func(ctx Context) error {
+					ws, err := ctx.UpgradeWebSocket()
+					*upgradeErr = err
+					if errors.Is(err, ErrWebSocketOriginNotAllowed) {
+						return nil // the 403 is already set
+					}
+					*handled = ws != nil
+					return err
+				})
+			}
+		}
+
+		for routeName, register := range routes {
+			t.Run(tc.name+"/"+routeName, func(t *testing.T) {
+				s := NewServer()
+				var handlerErr, upgradeErr error
+				var handled bool
+				s.errorHandler = func(_ Context, err error) { handlerErr = err }
+				register(s, &handled, &upgradeErr)
+
+				resp := s.Request("GET", "/ws", handshakeHeaders(tc.origin), nil)
+				if resp.Status() != consts.StatusForbidden {
+					t.Fatalf("status = %d, want 403", resp.Status())
+				}
+				if handled {
+					t.Fatal("handler ran for a refused origin")
+				}
+				if handlerErr != nil {
+					t.Fatalf("error handler called: %v", handlerErr)
+				}
+				if routeName == "manual UpgradeWebSocket" && !errors.Is(upgradeErr, ErrWebSocketOriginNotAllowed) {
+					t.Fatalf("UpgradeWebSocket error = %v, want ErrWebSocketOriginNotAllowed", upgradeErr)
+				}
+			})
+		}
+	}
+}
+
+// Accepted handshakes upgrade (101); these need a real connection.
+func TestWebSocketOriginAccepted(t *testing.T) {
+	cases := []struct {
+		name   string
+		opts   *WSOptions // nil: s.WebSocket
+		origin string
+	}{
+		{"no Origin (non-browser client)", nil, ""},
+		{"same host", nil, "http://test"},
+		{"same host, any case, other scheme", nil, "HTTPS://TEST"},
+		{"listed in AllowedOrigins", &WSOptions{AllowedOrigins: []string{"https://app.example"}}, "https://APP.example"},
+		{"listed as a bare host", &WSOptions{AllowedOrigins: []string{"app.example:8443"}}, "https://app.example:8443"},
+		{"AllowedOrigins keeps same host", &WSOptions{AllowedOrigins: []string{"https://app.example"}}, "http://test"},
+		{"AllowedOrigins wildcard", &WSOptions{AllowedOrigins: []string{"*"}}, "https://evil.example"},
+		{"CheckOrigin says yes", &WSOptions{CheckOrigin: func(ctx Context) bool {
+			return ctx.Request().Header("Origin") == "https://partner.example"
+		}}, "https://partner.example"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer()
+			h := func(ws *WSConn) error { return nil }
+			if tc.opts == nil {
+				s.WebSocket("/ws", h)
+			} else {
+				s.WebSocketWithOptions("/ws", *tc.opts, h)
+			}
+			extra := ""
+			if tc.origin != "" {
+				extra = "Origin: " + tc.origin + "\r\n"
+			}
+			upgradeOn(t, s, extra) // fails the test unless 101
+		})
 	}
 }
 

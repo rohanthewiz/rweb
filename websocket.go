@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,11 @@ var (
 	// 125 bytes or without FIN (RFC 6455 §5.5). The connection is failed
 	// with close code 1002 when ReadMessage returns it.
 	ErrWebSocketBadControlFrame = errors.New("websocket control frame longer than 125 bytes or fragmented")
+	// ErrWebSocketOriginNotAllowed is returned by UpgradeWebSocket for a
+	// handshake from an origin the route does not accept. The response is
+	// already set to 403 when it is returned; a handler that returns nil
+	// sends it as is.
+	ErrWebSocketOriginNotAllowed = errors.New("websocket handshake from a disallowed origin")
 )
 
 // WebSocket GUID as per RFC 6455
@@ -360,6 +366,64 @@ func rejectWebSocketRequest(ctx Context) error {
 	default:
 		return ctx.SetStatus(consts.StatusBadRequest).WriteString("Bad Request: incomplete WebSocket handshake")
 	}
+}
+
+// originAllowed reports whether a handshake may be upgraded, by its Origin
+// header (RFC 6454 serialised origin, "scheme://host[:port]").
+//
+// Why: a browser sends the site's cookies with a WebSocket handshake to any
+// host, whichever page opened it, and applies no CORS to WebSockets. Without
+// this check any page on the web could open a socket to this server as the
+// logged-in user (cross-site WebSocket hijacking). The Origin header is set
+// by the browser and cannot be forged by page script, which makes it the
+// one reliable signal here.
+//
+//	opts.CheckOrigin set         -> its answer, nothing else consulted
+//	no Origin header             -> allowed: not a browser (curl, a Go or
+//	                                mobile client), and no ambient cookies
+//	                                for a page to abuse
+//	origin host[:port] == Host() -> allowed: the server's own pages
+//	listed in AllowedOrigins     -> allowed (full origin, bare host, or "*")
+//	anything else ("null" too)   -> refused
+//
+// The host comparison ignores scheme so a page on http://example.com may
+// reach wss://example.com (and the reverse, behind a TLS-terminating proxy
+// where this server sees plain HTTP), and ignores case since host names are
+// case-insensitive. Ports must match exactly: another port is another
+// origin, possibly another app.
+func originAllowed(ctx Context, opts WSOptions) bool {
+	if opts.CheckOrigin != nil {
+		return opts.CheckOrigin(ctx)
+	}
+	origin := ctx.Request().Header(consts.HeaderOrigin)
+	if origin == "" {
+		return true
+	}
+
+	// An opaque origin ("null": sandboxed iframes, file: pages) parses to no
+	// host, matches no Host, and so is refused unless listed verbatim.
+	var originHost string
+	if u, err := url.Parse(origin); err == nil {
+		originHost = u.Host
+	}
+	if originHost != "" && strings.EqualFold(originHost, ctx.Request().Host()) {
+		return true
+	}
+
+	for _, allowed := range opts.AllowedOrigins {
+		allowed = strings.TrimSuffix(strings.TrimSpace(allowed), "/")
+		switch {
+		case allowed == "*":
+			return true
+		case strings.Contains(allowed, "://") || allowed == "null":
+			if strings.EqualFold(allowed, origin) {
+				return true
+			}
+		case originHost != "" && strings.EqualFold(allowed, originHost):
+			return true
+		}
+	}
+	return false
 }
 
 func performHandshake(ctx *context, opts WSOptions) (*wsDeflate, error) {

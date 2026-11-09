@@ -64,6 +64,17 @@ type WSOptions struct {
 	// silent. 0 selects 10 s; negative keeps the pings (for proxies that
 	// drop idle connections) but sets no read deadline.
 	PongTimeout time.Duration
+
+	// AllowedOrigins lists further origins, besides the request's own host,
+	// whose pages may open this socket. An entry with a scheme
+	// ("https://app.example.com") must match the Origin header exactly; one
+	// without ("app.example.com:8443") matches the origin's host[:port] on
+	// any scheme; "*" allows every origin (no check). Case-insensitive.
+	AllowedOrigins []string
+	// CheckOrigin, when set, alone decides whether a handshake is accepted
+	// (true) or refused with 403 (false), Origin header or not; the default
+	// check and AllowedOrigins are then not consulted.
+	CheckOrigin func(Context) bool
 }
 
 // deflateTail completes a message for the inflater: the 00 00 ff ff the

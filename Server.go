@@ -653,6 +653,12 @@ func (s *Server) WebSocket(path string, handler WebSocketHandler) {
 
 		// Upgrade the connection to WebSocket
 		ws, err := ctx.UpgradeWebSocket()
+		if errors.Is(err, ErrWebSocketOriginNotAllowed) {
+			// A cross-origin handshake: refused with the 403 the upgrade
+			// already set. The client's doing, not a server failure, so it
+			// is neither logged nor handed to the error handler.
+			return nil
+		}
 		if err != nil {
 			fmt.Printf("Failed to upgrade connection to WebSocket: %v\n", err)
 			// If upgrade fails, return error (will send appropriate HTTP error response)
@@ -665,9 +671,11 @@ func (s *Server) WebSocket(path string, handler WebSocketHandler) {
 	})
 }
 
-// WebSocketWithOptions is WebSocket with per-route options — currently
-// permessage-deflate compression (WSOptions.Compression), negotiated with
-// clients that offer it; others connect uncompressed as before.
+// WebSocketWithOptions is WebSocket with per-route options: permessage-deflate
+// compression (WSOptions.Compression, negotiated with clients that offer it),
+// the origin check (AllowedOrigins, CheckOrigin), server pings
+// (PingInterval, PongTimeout) and the write timeout (WriteTimeout). Zero
+// fields keep the defaults s.WebSocket uses.
 // Usage: s.WebSocketWithOptions("/ws", rweb.WSOptions{Compression: true}, handler)
 func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSocketHandler) {
 	s.Get(path, func(ctx Context) error {
@@ -679,6 +687,9 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 			return rejectWebSocketRequest(ctx)
 		}
 		ws, err := c.upgradeWebSocket(opts)
+		if errors.Is(err, ErrWebSocketOriginNotAllowed) {
+			return nil // the 403 is set; see WebSocket
+		}
 		if err != nil {
 			fmt.Printf("Failed to upgrade connection to WebSocket: %v\n", err)
 			return err

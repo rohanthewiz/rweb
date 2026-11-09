@@ -738,6 +738,18 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 		return nil, ErrWebSocketNotUpgraded
 	}
 
+	// Refuse a cross-origin handshake before anything is written (see
+	// originAllowed). Done here rather than in the route helpers so a
+	// manual ctx.UpgradeWebSocket() in an app's own handler is covered by
+	// the same default; its signature takes no options, so it gets exactly
+	// the default (same host or no Origin). The 403 is set on the response
+	// here, so that every caller only has to return nil to send it.
+	if !originAllowed(ctx, opts) {
+		ctx.SetStatus(consts.StatusForbidden)
+		_ = ctx.WriteString("Forbidden: cross-origin WebSocket handshake")
+		return nil, ErrWebSocketOriginNotAllowed
+	}
+
 	// Perform the WebSocket handshake
 	deflate, err := performHandshake(ctx, opts)
 	if err != nil {
