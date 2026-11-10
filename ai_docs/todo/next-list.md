@@ -34,38 +34,42 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-059
+**Next ID:** N-063
 
 ## Open
 
-- **N-042** · raised `2026-1109-once-over-review` · value medium
+- **N-042** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Headers and body leave in two writes (`Server.go:1675`, `1702`); a prototype measured 3–4 % on plain TCP. Adds the phase's benchmark file. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-043** · raised `2026-1109-once-over-review` · value medium
-  WebSocket `readFrame` does three or four unbuffered reads and allocations per frame (`websocket.go:383`). Benchmark first. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-044** · raised `2026-1109-once-over-review` · value low
+- **N-043** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
+  WebSocket `readFrame` does three or four unbuffered reads and allocations per frame (`websocket.go:383`). Benchmark first. Also for this item (found during N-040): `Close` called from another goroutine while the handler is blocked in `ReadMessage` puts two readers on the conn, and `SetPingHandler`/`SetPongHandler`/`OnClose` have no locking; the liveness read deadline now costs one `SetReadDeadline` per socket read, which a buffered reader would cut. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-044** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   One allocation per request line and header line (7 of 8 allocs/op). After N-035; drop if under 5 %. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-045** · raised `2026-1109-once-over-review` · value low
+- **N-045** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   Static handler splits the prefix and calls `filepath.Abs` twice per request (`Server.go:888`, `940`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-046** · raised `2026-1109-once-over-review` · value medium
+- **N-046** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Look the route up before reading the body, so an unrouted request does not buffer up to 100 MB first (`Server.go:1352`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-047** · raised `2026-1109-once-over-review` · value medium
+- **N-047** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   `Proxy` uses `http.DefaultClient` (no timeout, follows redirects), forwards hop-by-hop headers and buffers the response (`Server.go:738`). Reopens declined N-011. Needs decision D6. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-048** · raised `2026-1109-once-over-review` · value medium
+- **N-048** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   No setter for the error handler and no not-found / method-not-allowed hooks; `ListRoutes` omits param routes. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-049** · raised `2026-1109-once-over-review` · value medium
+- **N-049** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Path params are not percent-decoded (`/greet/John%20Doe` → `John%20Doe`). Reproduced. Needs decision D7. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-050** · raised `2026-1109-once-over-review` · value low
+- **N-050** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   Response header names are matched case-sensitively, so two Content-Type lines can be sent (`Response.go:151`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-051** · raised `2026-1109-once-over-review` · value low
+- **N-051** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   `WriteHTML`/`WriteText` send no charset although documented to. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-052** · raised `2026-1109-once-over-review` · value medium
+- **N-052** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Static files and `SendFile`: no Range, ETag, Cache-Control or index options; unknown types forced to download; filename encoding. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-053** · raised `2026-1109-once-over-review` · value medium
-  Logging goes straight to stdout through about thirty `fmt.Print*` calls, several unconditional; add a pluggable logger. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-054** · raised `2026-1109-once-over-review` · value low
+- **N-053** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
+  Logging goes straight to stdout through about thirty `fmt.Print*` calls, several unconditional; add a pluggable logger. Includes the unconditional `log.Printf` for a dropped response header name added by N-031 (`Response.go`, `acceptHeaderKey`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-054** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   SSE options: `Access-Control-Allow-Origin: *` is unconditional (`Response.go:277`); no `id:`/`retry:` fields. Needs decision D8. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-055** · raised `2026-1109-once-over-review` · value low
+- **N-055** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   `ClientIP` trusts `X-Forwarded-For` from any peer; add trusted proxies. Needs decision D9. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
+- **N-059** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
+  No lingering close after an early 431 or 413: the server answers and closes while the client may still be sending, so on Linux the client can get a reset before it reads the response (reliable on macOS loopback). Read a bounded amount, or half-close and wait briefly, before closing (`Server.go`, `headFailed` and the 413 paths). From the N-035 report; not reproduced.
+- **N-060** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
+  Request header values containing control characters (other than the line's own CRLF) are accepted and handed to handlers. RFC 9110 §5.5 allows refusing them; decide between 400 and stripping. From the N-036 report.
 
 ## Validate
 
@@ -73,16 +77,19 @@ Items whose remaining work is purely testing: run, look, measure, or write or
 repair the test that covers it. No product change is planned unless the check
 finds a defect. Same item form as Open.
 
-_(none)_
+- **N-061** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
+  `staticcheck ./...` has not run since `9781e96`: the installed binary was built with go1.23.2 and refuses this go1.24 module, and the cached v0.8.1 needs Go 1.26 (the machine has 1.25.4). Rebuild or install a matching staticcheck and run it over the 26 commits of this session.
+- **N-062** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
+  The WebSocket changes of N-040 (origin check, 30 s pings, write timeout, 1001 at shutdown) are covered by Go-client tests only. Check with a real browser and `wscat`, including one run behind a reverse proxy that rewrites `Host` (expected: 403 until `AllowedOrigins` lists the public origin).
 
 ## Roadmap
 
 Wanted, but deliberately not next. Parked, not declined. Same item form as
 Open.
 
-- **N-056** · raised `2026-1109-once-over-review` · value low
+- **N-056** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   Helpers and middleware: `rweb.BindJSON`, and `cors`, `reqlog`, `gzip` subpackages. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
-- **N-057** · raised `2026-1109-once-over-review` · value medium
+- **N-057** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Lazy request body (`Request().BodyReader()`), so uploads are not held in memory and a per-route cap becomes possible. Design sketch under N-046 in the plan. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 
 ## Non-goals
@@ -100,35 +107,35 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
-- **N-039** · raised `2026-1109-once-over-review` · closed 2026-11-09, `9b57685`
+- **N-039** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`9b57685`)
   Added `Serve(l)`, `Shutdown(ctx)`, `ErrServerClosed`, `ServerOptions.ShutdownTimeout` (default 10 s) and `WithShutdownTimeout`. `Run` is built on them and calls `signal.Stop`, so a later SIGTERM is no longer swallowed. Shutdown closes listeners, cancels the base context, wakes idle keep-alive conns with a past read deadline, sends WebSockets a 1001 close frame, ends SSE streams, waits for the connection registry to empty, and force-closes on ctx done. This adds the registry N-020 avoided: a mutex per conn open/close and two atomics per request (`shutdown.go`). Accept errors back off 5 ms to 1 s. `RunWithHttpsRedirect` opens both listeners first and shuts both down together. Behaviour to know: `Run` returns an error wrapping `context.DeadlineExceeded` when the shutdown timeout runs out (it used to return nil always), and a SIGTERM with no `Run` listening now kills the process. Tests: `graceful_shutdown_test.go`; `shutdown_test.go` moved to `Shutdown`.
-- **N-041** · raised `2026-1109-once-over-review` · closed 2026-11-09, `863d3b4`
+- **N-041** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`863d3b4`)
   `Clean` drops `request.body`, `response.body` or `respBuf` when its capacity exceeds 256 KB (`maxRetainedBuf`). Test: `buffer_retention_test.go`.
-- **N-040** · raised `2026-1109-once-over-review` · closed 2026-11-09, `009122c`..`15d0cd0`
+- **N-040** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`009122c`..`15d0cd0`)
   Decision D5: on by default. Cross-origin handshakes get 403 (same host or no Origin allowed; `AllowedOrigins` adds, `CheckOrigin` decides alone), manual `UpgradeWebSocket` included. Server pings every 30 s with a 40 s read window (`PingInterval`, `PongTimeout`), 10 s write timeout (`WriteTimeout`), `closed` is atomic, oversized or fragmented control frames close with 1002, `WSOptions.Subprotocols` selects (no blind echo; `ws.Subprotocol()`), handler errors after the upgrade skip the error handler and normal disconnects are not logged, `Close` releases its lock before waiting for the peer. Note for deployments: the origin check compares against `Host()`, so a proxy that rewrites Host needs `AllowedOrigins`. Left for N-043: `Close` from another goroutine during `ReadMessage` puts two readers on the conn. Tests: `websocket_hardening_test.go`, `websocket_reject_test.go`.
-- **N-038** · raised `2026-1109-once-over-review` · closed 2026-11-09, `2e0407d`
+- **N-038** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`2e0407d`)
   Decision D4: yes. The request-line version is parsed; HTTP/1.1 closes on `Connection: close`, HTTP/1.0 closes unless `Connection: keep-alive`; the response carries the matching header, and a handler's own `Connection: close` now closes. A missing or unknown version is still served as 1.1. Tests: `connection_close_test.go`.
-- **N-037** · raised `2026-1109-once-over-review` · closed 2026-11-09, `6b6513b`
+- **N-037** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`6b6513b`)
   `Expect: 100-continue` on an HTTP/1.1 request with a body is answered `100 Continue` just before the body is read, after the framing and size checks, so a refused request never has its body sent. Any other expectation gets 417. Tests: `expect_continue_test.go`.
-- **N-036** · raised `2026-1109-once-over-review` · closed 2026-11-09, `dcef51d`
+- **N-036** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`dcef51d`)
   Decision D3: 400. Refused with 400: Content-Length together with Transfer-Encoding, non-digit or conflicting Content-Length, a header line with no colon or a non-token name, a folded line, a bare-LF end of head, a second Transfer-Encoding line, `chunked` not last. Other codings ending in `chunked` get 501. The chunked reader accepts extensions and trailers within limits and checks each CRLF. `TestBadRequestHeader` rewritten to expect 400. Code in `request_framing.go`; tests `request_framing_test.go`.
-- **N-035** · raised `2026-1109-once-over-review` · closed 2026-11-09, `28f214c`
+- **N-035** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`28f214c`)
   Decision D2: on by default. `MaxHeaderBytes` 1 MB (431 over it), `ReadHeaderTimeout` 30 s (408 mid-head), `IdleTimeout` 120 s (silent close); `ReadTimeout` and `WriteTimeout` off by default; SSE has its own per-flush `SSECfg.WriteTimeout`, default 30 s. Zero selects the default, negative disables. `WriteTimeout` bounds each write, not the response: bodies and sized streams go out in 1 MB slices with the deadline renewed. A failed header/body write now closes the conn. Also fixed: `sendSSE` kept writing to a dead conn after a write error on an event over 4 KB. Open edge: no lingering close after 431/413, so on Linux a client still sending may see a reset before the response. Code in `conn_limits.go`; tests `conn_limits_test.go`; benchmark `keepalive_bench_test.go` (4 allocs/op before and after).
-- **N-058** · raised `2026-1109-once-over-review` · closed 2026-11-09
+- **N-058** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`c6a1ecd`)
   `Group.StaticFiles`, `StaticFilesAbs` and `Proxy` registered straight on the server, so group middleware never ran for them: files or an upstream under an authenticated group were served to anyone. Done: `Group.wrap` (split out of `addRoute`) is passed to the server's private `staticFiles` / `staticFilesAbs` / `proxy`, which apply it to the handler before registering. Test: `TestGroupMiddlewareCoversStaticAndProxy` (200 on the old code where 401 is expected). SKILL.md notes it.
-- **N-034** · raised `2026-1109-once-over-review` · closed 2026-11-09, `ee2b87c`
+- **N-034** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`ee2b87c`)
   `writeResponse` sends a 1xx, 204 or 304 as the header block alone: no Content-Length or Transfer-Encoding, no body, pending stream closed unread. An SSE stream on such a status is not started. Synthetic `s.Request` is unchanged. Tests: `bodyless_status_test.go`.
-- **N-033** · raised `2026-1109-once-over-review` · closed 2026-11-09, `db5bce9`
+- **N-033** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`db5bce9`)
   Every event goes through `writeSSEEvent`: text per `sseDataText` (string/[]byte as is, error/Stringer by method, basic kinds incl. named types via strconv, else JSON), one `data:` line per payload line, CR/LF stripped from the event name. `rweb.SSEClose` added; bare `"close"` still ends a stream. A payload JSON cannot encode is logged and skipped. The CLAUDE.md "SSE tests need fixing" note was stale (all pass under -race, none skipped) and is removed. Tests: `TestSSEEventFormatting`, `TestSSECloseSentinel`.
-- **N-032** · raised `2026-1109-once-over-review` · closed 2026-11-09, `4b7d319`
+- **N-032** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`4b7d319`)
   `OnDisconnect` runs after the hub lock is released, once per client actually removed, on both the unregister and eviction paths; `Close` uses `sync.Once`. Tests: `TestSSEHubOnDisconnectMayCallHub`, `TestSSEHubCloseConcurrent`.
-- **N-031** · raised `2026-1109-once-over-review` · closed 2026-11-09, `2a35db0`
+- **N-031** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`2a35db0`)
   `SetHeader`/`AddHeader` replace CR, LF and NUL in values with a space and drop a header whose name is not an RFC 9110 token. The drop is logged unconditionally (the response cannot see the Debug option); revisit with N-053. Other control bytes still pass. Tests: `response_header_test.go`, `header_injection_test.go`.
-- **N-030** · raised `2026-1109-once-over-review` · closed 2026-11-09, `eeb9004`
+- **N-030** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`eeb9004`)
   `Group.Group` builds the child slice with `slices.Concat`; `Server.Group` had the same hazard with the caller's variadic slice and now clones it. Tests: `TestSiblingSubGroupsKeepOwnMiddleware`, `TestServerGroupDoesNotAliasCallerSlice`.
-- **N-029** · raised `2026-1109-once-over-review` · closed 2026-11-09, `af2afcf`
+- **N-029** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`af2afcf`)
   Decision D1: stop. The auto-continue branch in `Group.addRoute` is gone; group middleware continues only through `Next()`, as `s.Use` does. No example relied on it (their deny paths were the ones leaking). Test: `TestGroupMiddlewareStopsChain`. SKILL.md and README say so.
-- **N-028** · raised `2026-1109-once-over-review` · closed 2026-11-09, `0812f95`
+- **N-028** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-09, 2026-1109-1806-once-over-review-phases-1-2 (`0812f95`)
   `parseURL` takes a scheme and host only from an absolute-form target and only before the first `?`; an origin-form target skips the scan. Also fixed on the way: a schemeless target such as `evil.com/admin` is no longer split into host and path, and `http://example.com` (no path) now parses. Tests in `Request_scheme_host_test.go`.
 - **N-027** · raised `2026-1011-2314-stream-response-bodies` (from the cats-todo backlog) · closed 2026-10-11, 2026-1011-2314-stream-response-bodies
   A downstream app could not stream a database-dump download: every response
