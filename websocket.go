@@ -117,9 +117,28 @@ type WSConn struct {
 	closeMutex     sync.Mutex
 	writeMutex     sync.Mutex
 	maxMessageSize int64
-	closeHandlers  []func(code int, text string)
-	pingHandler    func([]byte) error
-	pongHandler    func([]byte) error
+
+	// The app's callbacks. An app may set them from any goroutine — a hub
+	// installing a pong handler while the connection's own handler is
+	// blocked in ReadMessage — so they are guarded by handlersMu. The read
+	// path takes it only when a ping, pong or close frame arrives, to copy
+	// the handler out, and calls the copy with the lock released: a callback
+	// may itself call a setter. Data frames never touch it.
+	handlersMu    sync.Mutex
+	closeHandlers []func(code int, text string)
+	pingHandler   func([]byte) error
+	pongHandler   func([]byte) error
+
+	// readSem makes frame reading single-owner. Whoever reads frames holds
+	// its one slot: ReadMessage for the length of the call, or Close while
+	// it waits for the peer's close frame. A channel rather than a
+	// sync.Mutex because Close must wait for it with a timeout (select).
+	// See Close for the two cases it decides between.
+	readSem chan struct{}
+	// closeRcvd is set once a close frame from the peer has been read, by
+	// whichever reader read it, before that reader gives up readSem: a Close
+	// that then takes readSem knows the closing handshake is complete.
+	closeRcvd atomic.Bool
 
 	// Deadlines an app set explicitly (SetReadDeadline, SetWriteDeadline);
 	// the zero time means none. Guarded by deadlineMu rather than by the
@@ -186,6 +205,7 @@ func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 		maxMessageSize: defaultMaxMessageSize,
 		closeHandlers:  make([]func(int, string), 0),
 		done:           make(chan struct{}),
+		readSem:        make(chan struct{}, 1),
 	}
 
 	// Set default ping handler that responds with pong
@@ -538,7 +558,16 @@ func selectSubprotocol(headers []Header, supported []string) string {
 
 // ReadMessage reads a complete message from the WebSocket connection
 // It handles fragmentation and returns the complete message
+//
+// It holds the read side (readSem) for the whole call, so it never reads
+// alongside a Close waiting for the peer's close frame, nor alongside a
+// second ReadMessage: calls from two goroutines take turns rather than
+// splitting frames between them. After a Close on another goroutine it
+// fails (the connection is closed by then) instead of reading.
 func (ws *WSConn) ReadMessage() (*WSMessage, error) {
+	ws.readSem <- struct{}{}
+	defer func() { <-ws.readSem }()
+
 	for {
 		frameType, fin, rsv1, data, err := ws.readFrame()
 		if err != nil {
@@ -600,6 +629,9 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			// More fragments expected — keep reading
 
 		case wsClose:
+			// Recorded before readSem is given up (on return), so a Close
+			// waiting for it sees the handshake completed (see Close).
+			ws.closeRcvd.Store(true)
 			// Handle close frame
 			code := wsCloseNoStatusReceived
 			text := ""
@@ -614,8 +646,11 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 
 		case wsPing:
 			// Handle ping frame
-			if ws.pingHandler != nil {
-				if err := ws.pingHandler(data); err != nil {
+			ws.handlersMu.Lock()
+			h := ws.pingHandler
+			ws.handlersMu.Unlock()
+			if h != nil {
+				if err := ws.runControlHandler(h, data); err != nil {
 					return nil, err
 				}
 			}
@@ -623,8 +658,11 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 
 		case wsPong:
 			// Handle pong frame
-			if ws.pongHandler != nil {
-				if err := ws.pongHandler(data); err != nil {
+			ws.handlersMu.Lock()
+			h := ws.pongHandler
+			ws.handlersMu.Unlock()
+			if h != nil {
+				if err := ws.runControlHandler(h, data); err != nil {
 					return nil, err
 				}
 			}
@@ -634,6 +672,27 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			return nil, fmt.Errorf("%w: %d", ErrWebSocketInvalidOpcode, frameType)
 		}
 	}
+}
+
+// runControlHandler calls the app's ping or pong handler with the read side
+// handed back for the duration (readSem released, then taken again).
+//
+// Why: the handler is app code, and may call Close. Close needs the read
+// side to wait for the peer's close frame; if ReadMessage kept it across
+// the call, a Close made from inside the handler would wait on its own
+// goroutine and sit out the full close-handshake timeout. Released, the
+// Close reads the peer's answer itself and returns as soon as it arrives.
+// Nothing is read between frames, so handing the read side over here never
+// splits a frame; when the handler returns, ReadMessage waits for the read
+// side again (a Close in progress finishes first) and carries on, failing
+// at its next read if the connection was closed meanwhile.
+//
+// The deferred re-acquire also runs when the handler panics, so the slot
+// ReadMessage's own deferred release gives back is always one it holds.
+func (ws *WSConn) runControlHandler(h func([]byte) error, data []byte) error {
+	<-ws.readSem
+	defer func() { ws.readSem <- struct{}{} }()
+	return h(data)
 }
 
 // WriteMessage writes a message to the WebSocket connection
@@ -713,6 +772,12 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 			return 0, false, false, nil, err
 		}
 		payloadLen = int64(binary.BigEndian.Uint64(extLen))
+		// The 64-bit length's top bit must be 0 (RFC 6455 §5.2). Set, the
+		// conversion above makes payloadLen negative, which slips past the
+		// size limit below and panics in make.
+		if payloadLen < 0 {
+			return 0, false, false, nil, ErrWebSocketPayloadTooLarge
+		}
 	}
 
 	// Control frames (opcode 0x8 and up) are at most 125 bytes and never
@@ -876,6 +941,37 @@ func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, erro
 }
 
 // Close closes the WebSocket connection with the given code and reason
+//
+// It sends the close frame, waits at most closeHandshakeTimeout for the
+// peer's answering close frame, then closes the TCP connection. Safe to call
+// from any goroutine, including while the connection's handler is blocked in
+// ReadMessage; only the first call does anything, later ones return nil.
+//
+// The wait must not add a second reader to the connection: two goroutines
+// reading at once split the byte stream between them, each parsing the
+// other's half-frames as headers. So Close waits for the read side
+// (readSem) and reads only if it gets it:
+//
+//	case 1: nobody in ReadMessage            case 2: handler blocked in ReadMessage
+//
+//	Close             peer                   ReadMessage        Close            peer
+//	  │ close frame ───►│                     │ holds readSem     │                │
+//	  │ takes readSem   │                     │ (blocked)         │ close frame ──►│
+//	  │ reads, dropping │                     │                   │ waits for      │
+//	  │ any data, until │                     │◄──────────────────┼────────────────┤ close frame
+//	  │◄────────────────┤ close frame         │ closeRcvd = true  │ readSem        │
+//	  │ conn.Close()    │                     │ releases readSem ►│ takes it, sees │
+//	                                          │ returns           │ closeRcvd      │
+//	                                          │ CloseMessage      │ conn.Close()   │
+//
+// In case 2 the ReadMessage that was blocked returns the peer's close frame
+// to the handler, as it would have without the Close. If it returns
+// something else first — a data message the peer sent before answering, or
+// a read error — Close takes the read side as it is released and carries
+// on as in case 1; the handler's next ReadMessage then waits for Close and
+// fails on the closed connection. Every path is bounded: the read deadline
+// set here ends the reads, and the timer ends the wait even if the app
+// moves the read deadline out again.
 func (ws *WSConn) Close(code int, reason string) error {
 	ws.closeMutex.Lock()
 	if ws.closed.Load() {
@@ -914,13 +1010,61 @@ func (ws *WSConn) Close(code int, reason string) error {
 	// instead of a blind sleep. Returns immediately when the frame arrives,
 	// or after closeHandshakeTimeout if the peer is unresponsive. Set under
 	// deadlineMu, after closed was stored, so the liveness reader cannot
-	// push it back out (see extendReadDeadline).
+	// push it back out (see extendReadDeadline). It bounds a ReadMessage
+	// blocked on another goroutine (case 2) as much as Close's own reads.
 	ws.deadlineMu.Lock()
 	ws.conn.SetReadDeadline(time.Now().Add(closeHandshakeTimeout))
 	ws.deadlineMu.Unlock()
-	ws.readFrame() // best-effort read; ignore errors (timeout or otherwise)
+	ws.awaitPeerClose()
 
-	return ws.conn.Close()
+	// The connection may already be closed by the time the wait ends: by
+	// the HTTP loop, once a handler that saw the close frame returned (case
+	// 2). That is the outcome Close is after, not a failure.
+	if err := ws.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
+}
+
+// awaitPeerClose is Close's wait for the peer's close frame (see Close for
+// the two cases). It takes the read side, at once when nobody is reading,
+// else when the ReadMessage in progress returns, and then reads frames
+// itself until the close frame or an error (the read deadline Close set
+// included) unless the reader it waited for already saw the close frame.
+// Frames before the close frame are dropped: after sending a close frame
+// this side has nothing left to do with data (RFC 6455 §5.5.1).
+//
+// The timer bounds the wait for the read side on its own, so a reader that
+// does not return — say the app moved the read deadline past Close's — still
+// cannot hold Close up; closing the connection then ends that read.
+func (ws *WSConn) awaitPeerClose() {
+	// The peer's close frame is already in: this Close is the answer to it
+	// (made from an OnClose handler, or racing handleClose). Nothing to wait
+	// for — and the reader that read it may be this very goroutine, still
+	// holding the read side.
+	if ws.closeRcvd.Load() {
+		return
+	}
+	timer := time.NewTimer(closeHandshakeTimeout)
+	defer timer.Stop()
+	select {
+	case ws.readSem <- struct{}{}:
+	case <-timer.C:
+		return
+	}
+	defer func() { <-ws.readSem }()
+
+	// closeRcvd was stored before readSem was released, so a close frame
+	// the previous holder read is visible here.
+	for !ws.closeRcvd.Load() {
+		opcode, _, _, _, err := ws.readFrame()
+		if err != nil {
+			return // timeout, EOF, a closed or broken conn: nothing more to wait for
+		}
+		if opcode == wsClose {
+			ws.closeRcvd.Store(true)
+		}
+	}
 }
 
 // goingAway starts the closing handshake from the server's side when the
@@ -972,17 +1116,43 @@ func (ws *WSConn) signalDone() {
 }
 
 // handleClose handles an incoming close frame
+//
+// The close handlers run first, outside closeMutex, and the answer is sent
+// after, under it:
+//
+//	closed already? ── yes ──► return (this frame answers our Close)
+//	     │ no
+//	run OnClose handlers (no lock held: a handler may call Close)
+//	     │
+//	closeMutex; closed now? ── yes ──► return (a Close, maybe from a
+//	     │ no                           handler, sent the answer)
+//	send the answering close frame, closed = true, close the conn
+//
+// The handlers used to run under closeMutex, so a handler calling Close —
+// to answer with a code of its own — deadlocked on it. Now such a Close
+// sends the answer itself and, finding the peer's frame already read
+// (closeRcvd), does not wait for another.
 func (ws *WSConn) handleClose(code int, text string) {
-	ws.closeMutex.Lock()
-	defer ws.closeMutex.Unlock()
-
 	if ws.closed.Load() {
 		return
 	}
 
-	// Call close handlers
-	for _, handler := range ws.closeHandlers {
+	// Call close handlers. The slice is copied out under handlersMu and
+	// iterated without it, so a handler may register another (OnClose)
+	// without deadlocking. Copying the slice header is enough: OnClose only
+	// appends, which writes past this copy's length or into a new array,
+	// never over the elements read here.
+	ws.handlersMu.Lock()
+	handlers := ws.closeHandlers
+	ws.handlersMu.Unlock()
+	for _, handler := range handlers {
 		handler(code, text)
+	}
+
+	ws.closeMutex.Lock()
+	defer ws.closeMutex.Unlock()
+	if ws.closed.Load() {
+		return
 	}
 
 	// Send close response. As in Close, closed is set under writeMutex
@@ -1051,19 +1221,30 @@ func (ws *WSConn) WritePing(data []byte) error {
 	return ws.writeFrame(wsPing, data)
 }
 
-// SetPingHandler sets the handler for ping messages
+// SetPingHandler sets the handler for ping messages. Safe to call from any
+// goroutine, also while ReadMessage runs; a ping already being handled
+// finishes with the handler it started with.
 func (ws *WSConn) SetPingHandler(handler func([]byte) error) {
+	ws.handlersMu.Lock()
 	ws.pingHandler = handler
+	ws.handlersMu.Unlock()
 }
 
-// SetPongHandler sets the handler for pong messages
+// SetPongHandler sets the handler for pong messages. Safe to call from any
+// goroutine, as SetPingHandler.
 func (ws *WSConn) SetPongHandler(handler func([]byte) error) {
+	ws.handlersMu.Lock()
 	ws.pongHandler = handler
+	ws.handlersMu.Unlock()
 }
 
-// OnClose adds a close handler
+// OnClose adds a close handler, run when the peer's close frame arrives.
+// Safe to call from any goroutine; a handler added while a close frame is
+// being handled may or may not run for it.
 func (ws *WSConn) OnClose(handler func(code int, text string)) {
+	ws.handlersMu.Lock()
 	ws.closeHandlers = append(ws.closeHandlers, handler)
+	ws.handlersMu.Unlock()
 }
 
 // SetMaxMessageSize sets the maximum message size

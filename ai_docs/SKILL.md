@@ -898,8 +898,8 @@ ws.WriteMessage(rweb.TextMessage, data)   // Send a message (one socket write)
 ws.WriteMessages(rweb.TextMessage, a, b)  // Several messages, one socket write
 
 // Connection lifecycle
-ws.Close(1000, "reason")                  // Send close frame and disconnect
-ws.OnClose(func(code int, text string) {  // Register close handler
+ws.Close(1000, "reason")                  // Send close frame, wait (≤ 2 s) for the peer's, disconnect
+ws.OnClose(func(code int, text string) {  // Register close handler (peer's close frame)
     fmt.Printf("Closed: %d %s\n", code, text)
 })
 
@@ -928,6 +928,18 @@ ws.RemoteAddr()  // Client's network address
 ws.LocalAddr()   // Server's network address
 ws.Subprotocol() // Subprotocol selected from WSOptions.Subprotocols ("" for none)
 ```
+
+**Goroutines.** Writes (`WriteMessage`, `WriteMessages`, `WritePing`), `Close`
+and the callback setters (`SetPingHandler`, `SetPongHandler`, `OnClose`) are
+safe from any goroutine, also while the handler is blocked in `ReadMessage`.
+Reading is single-owner: `ReadMessage` calls from two goroutines take turns
+(each gets whole messages), and `Close` never reads alongside one. When a hub
+calls `ws.Close` while the handler reads, the handler's `ReadMessage` returns
+the peer's answering close frame (`CloseMessage`) — or an error if the peer
+sends data first or never answers — and `Close` returns once it has, or after
+2 s. `Close` may also be called inside a ping, pong or `OnClose` handler; in an
+`OnClose` handler it answers the peer's close frame with its own code (without
+it, the peer's code is echoed back automatically).
 
 ### Chat Server with Broadcasting
 

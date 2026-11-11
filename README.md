@@ -347,6 +347,11 @@ defaults are chosen to be safe, and apply to `s.WebSocket` and `ctx.UpgradeWebSo
 | `Subprotocols` | none | The first protocol the client offers that is listed is selected (`ws.Subprotocol()`); with no match, no `Sec-WebSocket-Protocol` is sent. |
 | `Compression` | off | permessage-deflate with clients that offer it. |
 
+Writes, `ws.Close` and the callback setters (`SetPingHandler`, `SetPongHandler`, `OnClose`)
+are safe from any goroutine, also while the handler is blocked in `ReadMessage`. Reading is
+single-owner: a `Close` from a hub never reads alongside the handler's `ReadMessage` (which
+returns the peer's answering close frame), and two `ReadMessage` callers take turns.
+
 Control frames over 125 bytes or without FIN fail the connection with close code 1002.
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
