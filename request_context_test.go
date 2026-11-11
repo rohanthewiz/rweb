@@ -96,7 +96,8 @@ func dialTest(t *testing.T, addr string, tr transport) net.Conn {
 }
 
 // testCert is a throwaway self-signed certificate for the TLS transport.
-func testCert(t *testing.T) tls.Certificate {
+// It takes a testing.TB so the TLS benchmarks (bench_test.go) can use it.
+func testCert(t testing.TB) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

@@ -2215,6 +2215,28 @@ func (s *Server) writeWebSocketUpgradeResponse(ctx *context, respWriter io.Write
 	_, _ = respWriter.Write(tmp.Bytes())
 }
 
+// coalesceBodyMax is the largest in-memory body writeResponse copies into
+// the header block, so that the whole response leaves in one Write: one
+// syscall on plain TCP and one record (one seal, one syscall) on TLS,
+// instead of two of each.
+//
+// Beyond it the body gets a Write of its own. The copy grows with the body
+// while the saving does not: a body of a few KB already spans several TCP
+// segments (and past 16 KB several TLS records), so folding the header
+// into it saves one syscall and one small segment, which a large copy
+// outweighs. Measured on loopback with the keep-alive benchmarks
+// (bench_test.go), coalescing gained a few percent for bodies up to
+// 8-12 KB and lost 6-25 % on plain TCP from 16 KB up (TLS was flat
+// there). 8 KB stays clear of the loss and still covers typical JSON
+// responses and HTML fragments; bodies above it are written as before.
+//
+// It must stay well under maxRetainedBuf (256 KB): respBuf then keeps its
+// grown capacity from one request to the next instead of being dropped by
+// Clean and regrown, so the copy costs no allocation in steady state. It
+// is also far below writeSlice, so under a write timeout the combined
+// write is still a single deadline-bounded piece.
+const coalesceBodyMax = 8 << 10
+
 func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// Skip normal response writing if connection was upgraded to WebSocket
 	// The upgrade response has already been written in UpgradeWebSocket()
@@ -2341,7 +2363,35 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	}
 	tmp.WriteString(consts.CRLF)
 
-	// Write headers to the response writer
+	// A small in-memory body rides in the header block's Write rather than
+	// a second one of its own (see coalesceBodyMax). That covers the
+	// ordinary response, Content-Length framed and sent whole:
+	//
+	//	coalesced    [ status line | headers | CRLF | body ]  one Write
+	//	                                                      (+ sized stream after, if any)
+	//	separate     [ status line | headers | CRLF ]         Write 1
+	//	             [ body ... ]  or chunks, stream, events  Write 2..n
+	//
+	// The header block is written alone, as before, when there is nothing
+	// in memory to send after it the plain way: HEAD and the bodyless
+	// statuses send no body at all; an event stream, a chunked body and an
+	// HTTP/1.0 unframed body each have their own writer, which sends the
+	// in-memory part in its own framing; and a body over the cap is not
+	// worth the copy. An empty body counts as coalesced, which drops the
+	// zero-length Write it used to cost.
+	//
+	// A sized body stream (SendFile, a static file, rweb.Stream with a
+	// size) that follows the in-memory body is unaffected: the in-memory
+	// part is coalesced here and the stream is copied after it by
+	// writeBodyStream, straight to the conn, so a file still goes out by
+	// sendfile(2). The stream is never read into respBuf.
+	coalesced := ctx.sseEventsChan == nil && ctx.request.method != consts.MethodHead &&
+		!bodyless && !chunked && !unframed && len(ctx.response.body) <= coalesceBodyMax
+	if coalesced {
+		tmp.Write(ctx.response.body)
+	}
+
+	// Write the header block (and the coalesced body) to the response writer
 	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
 		fmt.Println("Error writing headers: ", err)
@@ -2384,8 +2434,13 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 			} else if unframed {
 				s.writeUnframedBody(ctx, respWriter)
 			} else {
-				if _, err := respWriter.Write(ctx.response.body); err != nil {
-					closeConn(ctx) // as for the headers above
+				// Already sent with the header block when coalesced. Either
+				// way a failed write has closed the conn, so a pending stream
+				// below fails at its first write and is released.
+				if !coalesced {
+					if _, err := respWriter.Write(ctx.response.body); err != nil {
+						closeConn(ctx) // as for the headers above
+					}
 				}
 				s.writeBodyStream(ctx, respWriter)
 			}
