@@ -996,6 +996,13 @@ func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) 
 // leading "/" does not change that: "/assets/images" and "assets/images" both
 // mean ./assets/images, and "/" means the working directory itself. To serve a
 // directory by its absolute filesystem path, use StaticFilesAbs.
+//
+// The working directory is read once, when the route is registered: an
+// os.Chdir after that does not move the served directory (before v0.2.1 the
+// root was resolved against the working directory of each request). The
+// files themselves are still looked up per request, so files added, replaced
+// or removed in the directory are seen at once, as is a directory swapped in
+// by rename or a "current" symlink moved to a new release.
 // Examples:
 //  1. s.StaticFiles("static/images/", "/assets/images", 2)
 //  2. s.StaticFiles("/css/", "assets/css", 1)
@@ -1062,28 +1069,85 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		reqDir = reqDir[1:]
 	}
 
+	// Everything that depends only on the arguments is worked out here, once,
+	// rather than in the handler: the route tokens kept after stripping and
+	// the absolute root directory. The handler used to split reqDir and, for a
+	// relative root, call filepath.Abs twice on every request, and each Abs
+	// calls os.Getwd (two stats, or a getcwd, per call).
+	//
+	//	registration (once)                     request (each)
+	//	─────────────────────────────────────   ──────────────────────────────────
+	//	reqDir "/pub/img/", strip 1             wildcard "a/b.png"
+	//	  → ["pub","img",""] → ["img",""]         → decoded, ".." and NUL refused
+	//	  → tail "img/"                         candAbs = baseAbs/decoded
+	//	targetDir "assets" (relative)             = <cwd>/assets/img/a/b.png
+	//	  → rootAbs = <cwd>/assets              Rel(rootAbs, candAbs) inside?
+	//	baseAbs = rootAbs/tail                  open: os.Open, or (contain
+	//	        = <cwd>/assets/img                symlinks) os.Root on rootAbs
+	//
+	// Consequence for a relative root (StaticFiles): the working directory is
+	// read when the route is registered, so an os.Chdir after that no longer
+	// moves the served directory. Anchoring a route to wherever the process
+	// happens to stand at request time was never a useful property, and a
+	// Chdir in some unrelated part of the program silently re-pointing (or
+	// breaking) every static route is worse. Documented on StaticFiles.
+	//
+	// Only paths are cached. With StaticContainSymlinks the os.Root is still
+	// opened per request (openContained), so a deploy that swaps the served
+	// directory by rename, or moves a "current" release link, is seen at once;
+	// a Root held from registration would pin the directory it first opened.
+	var rhTokens []string
+	if s.options.Debug {
+		fmt.Printf("**-> reqPath: %q\n", reqDir)
+	}
+
+	tokens := strings.Split(reqDir, "/")
+	if s.options.Debug {
+		fmt.Printf("**-> tokens: %q", tokens)
+	}
+
+	// Remove unwanted tokens from the request path.
+	// Strip off the left -- keep the right side tokens here.
+	// It is okay if we strip all.
+	if len(tokens) >= nbrOfTokensToStrip {
+		rhTokens = tokens[nbrOfTokensToStrip:]
+	}
+	if s.options.Debug {
+		fmt.Printf("**-> rhTokens: %q\n", rhTokens)
+	}
+	// tail is the part of the route prefix that survives stripping, as a
+	// path under the root ("" when everything was stripped).
+	tail := strings.Join(rhTokens, "/")
+
+	// The root directory, absolute and clean. The two modes differ only in
+	// where it is anchored. Relative (StaticFiles): "." is prefixed, so
+	// whatever targetDir looks like (a leading "/", "..") it lands under the
+	// working directory. Absolute (StaticFilesAbs): targetDir is the root as
+	// given (staticFilesAbs has checked that it is absolute).
+	var rootAbs string
+	if absTarget {
+		rootAbs = filepath.Clean(targetDir)
+	} else {
+		var err error
+		rootAbs, err = filepath.Abs("." + filepath.Join("/", targetDir))
+		if err != nil {
+			// Only os.Getwd can fail here (the working directory was removed,
+			// say). Requests would have 404'd on the same failure before
+			// (the handler resolved the root per request), so the route is
+			// not registered, as for StaticFilesAbs with a relative dir.
+			fmt.Printf("StaticFiles cannot resolve target dir %q: %v -- not handling\n", targetDir, err)
+			return
+		}
+	}
+	// baseAbs is the root plus the surviving route tokens: every file the
+	// route serves is decoded-wildcard-path under it.
+	baseAbs := filepath.Join(rootAbs, tail)
+	if s.options.Debug {
+		fmt.Printf("**-> static root: %q, base: %q\n", rootAbs, baseAbs)
+	}
+
 	// We use the wildcard parameter in the route here
 	var fileHandler Handler = func(ctx Context) error {
-		var rhTokens []string
-		// Strip off the left -- keep the right side tokens here
-		// It is okay if we strip all
-		if s.options.Debug {
-			fmt.Printf("**-> reqPath: %q\n", reqDir)
-		}
-
-		tokens := strings.Split(reqDir, "/")
-		if s.options.Debug {
-			fmt.Printf("**-> tokens: %q", tokens)
-		}
-
-		// Remove unwanted tokens from the request path
-		if len(tokens) >= nbrOfTokensToStrip {
-			rhTokens = tokens[nbrOfTokensToStrip:]
-		}
-		if s.options.Debug {
-			fmt.Printf("**-> rhTokens: %q\n", rhTokens)
-		}
-
 		// Build the actual filepath now
 		wildcardPath := ctx.Request().Param("path")
 
@@ -1099,37 +1163,23 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 			return nil
 		}
 
-		fileSpec := filepath.Join("/", targetDir,
-			strings.Join(rhTokens, "/"), decoded)
+		// The candidate is joined onto the absolute base in both modes. The
+		// relative mode used to build "/"+targetDir+tail+decoded and make
+		// that absolute per request; with ".." and NUL already refused
+		// above, both forms name the same file, and joining onto baseAbs
+		// keeps a Windows root such as C:\data intact (a leading "/" would
+		// mangle it), as the absolute mode always did.
+		candAbs := filepath.Join(baseAbs, decoded)
 		if s.options.Debug {
-			fmt.Println("**-> fileFullPath", fileSpec)
+			fmt.Println("**-> fileFullPath", candAbs)
 		}
 
 		// Belt-and-suspenders containment check: even with `..` rejected above,
-		// resolve both the configured root and the candidate to absolute paths
-		// and require the candidate to be inside the root via `filepath.Rel`.
+		// require the candidate to be inside the root via `filepath.Rel`.
 		// This catches any unforeseen normalization quirks (e.g. odd separators
-		// on different OSes) without re-implementing them ourselves.
-		//
-		// The two modes differ only in where the root is anchored. Relative
-		// (StaticFiles): "." is prefixed, so whatever targetDir looks like it
-		// lands under the working directory. Absolute (StaticFilesAbs):
-		// targetDir is the root as given, and the candidate is joined onto it
-		// directly rather than taken from fileSpec, whose leading "/" would
-		// mangle a Windows root such as C:\data.
-		var rootAbs, candAbs string
-		var rErr, cErr error
-		if absTarget {
-			rootAbs = filepath.Clean(targetDir)
-			candAbs = filepath.Join(rootAbs, strings.Join(rhTokens, "/"), decoded)
-		} else {
-			rootAbs, rErr = filepath.Abs("." + filepath.Join("/", targetDir))
-			candAbs, cErr = filepath.Abs("." + fileSpec)
-		}
-		if rErr != nil || cErr != nil {
-			ctx.SetStatus(consts.StatusNotFound)
-			return nil
-		}
+		// on different OSes) without re-implementing them ourselves. It is
+		// against rootAbs, not baseAbs, so the route tokens kept in the path
+		// are part of what is checked.
 		rel, relErr := filepath.Rel(rootAbs, candAbs)
 		if relErr != nil || rel == ".." ||
 			strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

@@ -151,6 +151,8 @@ func main() {
 
 	// StaticFiles' target is always relative to the working directory -- a leading "/" does not
 	// change that ("/assets/images" above is ./assets/images, and "/" is the working directory).
+	// The working directory is read once, when the route is registered: a later os.Chdir does not
+	// move it, so register static routes after any Chdir done at startup.
 	// To serve a directory by its absolute path, e.g. one under the user's home, use StaticFilesAbs.
 	// e.g. http://localhost:8080/editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
 	s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)

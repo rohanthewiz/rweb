@@ -171,6 +171,38 @@ func TestStaticFilesStaysRelativeToCWD(t *testing.T) {
 	}
 }
 
+// A relative root is resolved against the working directory once, when the
+// route is registered (N-045), not on every request: a later os.Chdir does
+// not move it. The second directory holds a file of the same name with a
+// different body, so serving from the new cwd cannot pass by coincidence,
+// and a file that exists only there must not be reachable either.
+func TestStaticFilesRootResolvedAtRegistration(t *testing.T) {
+	staticFixture(t) // cwd holds safe/allowed.txt = "from-cwd"
+	s := rweb.NewServer()
+	s.StaticFiles("/a/", "safe", 1)
+
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(other, "safe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"allowed.txt": "from-other-cwd", "only-there.txt": "x"} {
+		if err := os.WriteFile(filepath.Join(other, "safe", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// staticFixture's cleanup restores the original working directory.
+	if err := os.Chdir(other); err != nil {
+		t.Fatal(err)
+	}
+
+	if status, body := get(s, "/a/allowed.txt"); status != 200 || body != "from-cwd" {
+		t.Errorf("after chdir: GET /a/allowed.txt = %d %q, want 200 %q (the root at registration)", status, body, "from-cwd")
+	}
+	if status, _ := get(s, "/a/only-there.txt"); status != 404 {
+		t.Errorf("after chdir: a file only in the new cwd got %d, want 404", status)
+	}
+}
+
 // symlinkFixture adds three links to the absolute tree from staticFixture:
 //
 //	root/inside.txt  -> root/sub/deep.txt   stays within the root

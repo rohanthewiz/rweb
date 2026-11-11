@@ -470,6 +470,13 @@ leading `/` does not change that: `"/assets/css"`, `"assets/css"` and `"./assets
 mean `./assets/css`, and `"/"` means the working directory itself. It cannot reach a
 directory outside the working directory.
 
+The working directory is read **once, when the route is registered** (v0.2.1+): an
+`os.Chdir` afterwards does not move the served directory. Register static routes after any
+`Chdir` the app does at startup. (Before v0.2.1 the root was resolved against the working
+directory at each request.) Files are still looked up per request, so changes in the
+directory, a directory swapped in by rename, or a moved `current -> releases/N` link are
+seen at once.
+
 ### Absolute Paths: StaticFilesAbs (v0.1.30+)
 
 To serve a directory by its absolute filesystem path — a per-user data or cache directory,
