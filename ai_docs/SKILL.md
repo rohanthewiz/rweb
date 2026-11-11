@@ -851,6 +851,9 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
   fails at whichever comes first, `t` or the ping window. So an app deadline
   can shorten reads but does not switch off dead-peer detection (use
   `PingInterval: -1` for that). The zero time clears the app deadline.
+  Frames are read through a 4 KB per-connection buffer, so a deadline bounds
+  waiting on the socket: messages that already arrived are still returned
+  after it passes, and the first read that must wait fails.
 - **Write timeout** (`WSOptions.WriteTimeout`, default 10 s, negative disables):
   each socket write (a message, a `WriteMessages` batch, a ping, a close frame)
   must finish within it, so a peer that stops reading fails the writer instead

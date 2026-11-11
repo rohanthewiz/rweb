@@ -1,6 +1,7 @@
 package rweb
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -106,7 +107,28 @@ type WSConn struct {
 	// first bytes arrived with its upgrade request and HTTP had already read
 	// them — those bytes followed by conn (see upgradeWebSocket). Deadlines
 	// and writes still go to conn directly.
-	r        io.Reader
+	r io.Reader
+	// br buffers r; readFrame reads only through it. The full read chain:
+	//
+	//	readFrame ─► br (bufio, 4 KB) ─► livenessReader ─► [lead bytes ─►] conn
+	//	                                 (pings on: one     (MultiReader, only
+	//	                                 deadline push per  when HTTP had read
+	//	                                 socket read)       past the upgrade)
+	//
+	// Without it, each frame took three or four reads on the socket (header,
+	// extended length, mask, payload), each one a syscall and, with pings
+	// on, a SetReadDeadline. Through br a small frame — or a burst of them
+	// queued in the socket buffer — comes in with one.
+	//
+	// Made by readFrame on first use rather than here, so that it wraps r
+	// as upgradeWebSocket left it (lead bytes and liveness reader are added
+	// after NewWSConn), and so a connection that only writes never
+	// allocates its buffer. Only the holder of readSem touches it.
+	br *bufio.Reader
+	// hdr receives each frame header (see readFrame). A field rather than a
+	// local array: a slice of a local passed to io.ReadFull escapes, which
+	// cost two or three small allocations per frame. Holder of readSem only.
+	hdr      [maxFrameHeader]byte
 	isServer bool
 	// closed is set once a close frame has been sent (Close, or the reply in
 	// handleClose); every write checks it first. Atomic because it is written
@@ -195,6 +217,19 @@ type WSConn struct {
 // message should not pin its size in memory for the connection's lifetime.
 const maxRetainedWriteBuf = 1 << 20
 
+// wsReadBufferSize is the size of br, the buffer frames are read through:
+// bufio's default, the same as net/http's per-connection reader. It holds a
+// small message whole, header and payload, so one socket read brings in a
+// frame or several. A payload at least this large mostly bypasses it:
+// bufio.Reader.Read with an empty buffer and a destination no smaller than
+// the buffer reads straight into the destination, so a 64 KB message is not
+// copied twice.
+const wsReadBufferSize = 4096
+
+// maxFrameHeader is the longest frame header (RFC 6455 §5.2): 2 bytes, 8 of
+// extended payload length, 4 of mask key.
+const maxFrameHeader = 2 + 8 + 4
+
 // NewWSConn creates a new WebSocket connection from an existing net.Conn
 // The isServer parameter indicates if this is a server-side connection
 func NewWSConn(conn net.Conn, isServer bool) *WSConn {
@@ -250,13 +285,16 @@ func (ws *WSConn) applyOptions(opts WSOptions) {
 //
 //	I = pingInterval, P = pongTimeout, I+P = readWindow
 //
-// Every read that brings bytes in — a pong, a data frame, anything — moves
-// the read deadline to now+I+P (livenessReader). A live peer answers each
-// ping within P, so the deadline is always pushed out before it is reached;
-// a vanished peer sends nothing, and the read blocked in ReadMessage fails
-// at most I+P after the last thing it heard. Extending on bytes rather than
-// on whole frames also keeps a large message arriving slowly from timing
-// out half way through.
+// Every socket read that brings bytes in — a pong, a data frame, anything —
+// moves the read deadline to now+I+P (livenessReader). A live peer answers
+// each ping within P, so the deadline is always pushed out before it is
+// reached; a vanished peer sends nothing, and the read blocked in
+// ReadMessage fails at most I+P after the last thing it heard. Extending on
+// bytes rather than on whole frames also keeps a large message arriving
+// slowly from timing out half way through. The liveness reader sits under
+// the frame buffer (br), so the deadline moves once per socket read, not
+// once per header or payload piece: frames already buffered need no
+// deadline, since nothing blocks reading them.
 //
 // The ping goroutine exits on Done(), which closes when Close or a peer
 // close frame ends the connection, or when the handler returns (finish,
@@ -265,6 +303,7 @@ func (ws *WSConn) applyOptions(opts WSOptions) {
 // already broken and the read deadline will end the handler.
 func (ws *WSConn) startKeepalive() {
 	if ws.readWindow > 0 {
+		// Before the first read: br, made then, wraps this (see WSConn.br).
 		ws.r = livenessReader{ws: ws, r: ws.r}
 		ws.extendReadDeadline()
 	}
@@ -732,24 +771,40 @@ func (ws *WSConn) WriteMessages(messageType MessageType, data ...[]byte) error {
 // bit, and payload. The FIN bit indicates whether this is the final fragment of
 // a message (RFC 6455 §5.2); RSV1 marks a compressed message when
 // permessage-deflate is in use. RSV2/RSV3 have no meaning here and fail the read.
+//
+// Callers hold the read side (readSem), or are a test's only reader.
 func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, err error) {
-	// Read first 2 bytes
-	header := make([]byte, 2)
-	if _, err := io.ReadFull(ws.r, header); err != nil {
+	if ws.br == nil {
+		ws.br = bufio.NewReaderSize(ws.r, wsReadBufferSize)
+	}
+
+	// The header is read in two steps into ws.hdr: the two fixed bytes,
+	// then, in one read, whatever they say follows before the payload.
+	//
+	//	 hdr[0]                  hdr[1]           hdr[2:]
+	//	┌───┬──────┬──────┐  ┌────┬─────────┐  ┌────────────────────┬───────────────┐
+	//	│FIN│RSV1-3│opcode│  │MASK│ len (7) │  │ ext len: 0, 2 or 8 │ mask key: 0/4 │ payload…
+	//	└───┴──────┴──────┘  └────┴─────────┘  └────────────────────┴───────────────┘
+	//	 ◄──────── step 1: 2 bytes ─────────►   ◄───── step 2: 0 to 12 bytes ──────►
+	//
+	// len 0-125 is the payload length; 126 and 127 announce a 16- or 64-bit
+	// extended length. Both steps are usually copies out of br's buffer.
+	hdr := ws.hdr[:]
+	if _, err := io.ReadFull(ws.br, hdr[:2]); err != nil {
 		return 0, false, false, nil, err
 	}
 
 	// Parse first byte — FIN (bit 0), RSV1-3 (bits 1-3) and opcode (bits 4-7)
-	fin = (header[0] & 0x80) != 0
-	rsv1 = (header[0] & 0x40) != 0
-	if header[0]&0x30 != 0 {
+	fin = (hdr[0] & 0x80) != 0
+	rsv1 = (hdr[0] & 0x40) != 0
+	if hdr[0]&0x30 != 0 {
 		return 0, false, false, nil, ErrWebSocketBadRSV
 	}
-	opcode = int(header[0] & 0x0F)
+	opcode = int(hdr[0] & 0x0F)
 
 	// Parse second byte
-	masked := (header[1] & 0x80) != 0
-	payloadLen := int64(header[1] & 0x7F)
+	masked := (hdr[1] & 0x80) != 0
+	payloadLen := int64(hdr[1] & 0x7F)
 
 	// Client frames must be masked, server frames must not be masked
 	if ws.isServer && !masked {
@@ -759,19 +814,28 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 		return 0, false, false, nil, ErrWebSocketBadMask
 	}
 
-	// Read extended payload length if needed
-	if payloadLen == 126 {
-		extLen := make([]byte, 2)
-		if _, err := io.ReadFull(ws.r, extLen); err != nil {
+	// Step 2: extended payload length and mask key, together.
+	extLen := 0
+	switch payloadLen {
+	case 126:
+		extLen = 2
+	case 127:
+		extLen = 8
+	}
+	rest := extLen
+	if masked {
+		rest += 4
+	}
+	if rest > 0 {
+		if _, err := io.ReadFull(ws.br, hdr[2:2+rest]); err != nil {
 			return 0, false, false, nil, err
 		}
-		payloadLen = int64(binary.BigEndian.Uint16(extLen))
-	} else if payloadLen == 127 {
-		extLen := make([]byte, 8)
-		if _, err := io.ReadFull(ws.r, extLen); err != nil {
-			return 0, false, false, nil, err
-		}
-		payloadLen = int64(binary.BigEndian.Uint64(extLen))
+	}
+	switch extLen {
+	case 2:
+		payloadLen = int64(binary.BigEndian.Uint16(hdr[2:4]))
+	case 8:
+		payloadLen = int64(binary.BigEndian.Uint64(hdr[2:10]))
 		// The 64-bit length's top bit must be 0 (RFC 6455 §5.2). Set, the
 		// conversion above makes payloadLen negative, which slips past the
 		// size limit below and panics in make.
@@ -793,29 +857,62 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 		return 0, false, false, nil, ErrWebSocketPayloadTooLarge
 	}
 
-	// Read mask key if present
-	var maskKey []byte
-	if masked {
-		maskKey = make([]byte, 4)
-		if _, err := io.ReadFull(ws.r, maskKey); err != nil {
-			return 0, false, false, nil, err
-		}
-	}
-
-	// Read payload
+	// Read payload. Its own allocation: the slice is handed to the app as
+	// WSMessage.Data and may be kept, so it cannot be a reused buffer.
 	payload = make([]byte, payloadLen)
-	if _, err := io.ReadFull(ws.r, payload); err != nil {
+	if _, err := io.ReadFull(ws.br, payload); err != nil {
 		return 0, false, false, nil, err
 	}
 
-	// Unmask payload if needed
+	// Unmask payload if needed; the key is the last 4 header bytes.
 	if masked {
-		for i := range payload {
-			payload[i] ^= maskKey[i%4]
-		}
+		var key [4]byte
+		copy(key[:], hdr[2+extLen:2+extLen+4])
+		maskBytes(key, 0, payload)
 	}
 
 	return opcode, fin, rsv1, payload, nil
+}
+
+// maskBytes XORs b with the mask key (RFC 6455 §5.3) as the part of a
+// payload that starts at offset pos: b[i] ^= key[(pos+i)%4]. It returns the
+// offset just past b, mod 4, for masking a payload in pieces. Masking and
+// unmasking are the same operation.
+//
+// It works eight bytes at a time. The key, rotated to pos, is repeated into
+// a 64-bit word, and each 8-byte chunk of b is loaded, XORed and stored as
+// one word; the 0-7 bytes left over go one at a time:
+//
+//	key (rotated to pos)   k0 k1 k2 k3
+//	word                   k0 k1 k2 k3 k0 k1 k2 k3
+//	b                      b0 b1 b2 b3 b4 b5 b6 b7 │ b8 … b15 │ … │ tail
+//
+// Every chunk starts at a multiple of 8 from b's start, so also at a
+// multiple of 4: each lines up with the same word, and the tail with the
+// key from its start. The loads and stores are little-endian, as is the
+// word (k0 in the low byte), so byte j of a chunk meets k[j%4] whatever the
+// machine's byte order. binary.LittleEndian compiles to single unaligned
+// 8-byte moves on amd64 and arm64; on a platform without those it is byte
+// moves, slower but still correct, and no unsafe is needed.
+//
+// The byte-at-a-time loop this replaces (with i%4 per byte) was most of the
+// read cost of a large message: about a third of a 64 KB echo round trip.
+func maskBytes(key [4]byte, pos int, b []byte) int {
+	if pos&3 != 0 {
+		key = [4]byte{key[pos&3], key[(pos+1)&3], key[(pos+2)&3], key[(pos+3)&3]}
+	}
+	k32 := binary.LittleEndian.Uint32(key[:])
+	k64 := uint64(k32) | uint64(k32)<<32
+
+	n := len(b)
+	for len(b) >= 8 {
+		binary.LittleEndian.PutUint64(b, binary.LittleEndian.Uint64(b)^k64)
+		b = b[8:]
+	}
+	for i := range b {
+		b[i] ^= key[i&3]
+	}
+	return (pos + n) & 3
 }
 
 // writeFrame writes one complete message (or control frame) as a single frame,
@@ -934,9 +1031,7 @@ func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, erro
 	buf = append(buf, mask[:]...)
 	start := len(buf)
 	buf = append(buf, data...)
-	for i := range data {
-		buf[start+i] ^= mask[i%4]
-	}
+	maskBytes(mask, 0, buf[start:])
 	return buf, nil
 }
 
@@ -1267,6 +1362,11 @@ func (ws *WSConn) SetMaxMessageSize(size int64) {
 // So an app deadline can shorten reads but not switch off dead-peer
 // detection; WSOptions.PingInterval < 0 does that. Without pings this is a
 // plain net.Conn read deadline.
+//
+// The deadline bounds waiting on the socket. Frames are read through a
+// buffer, so frames that already arrived with an earlier socket read are
+// returned even once it has passed; the first read that has to wait for
+// the peer fails.
 func (ws *WSConn) SetReadDeadline(t time.Time) error {
 	ws.deadlineMu.Lock()
 	defer ws.deadlineMu.Unlock()
