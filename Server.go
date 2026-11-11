@@ -125,6 +125,15 @@ type ServerOptions struct {
 	// default (10 s); a negative value closes every connection at once.
 	// It does not apply to Shutdown called directly, which takes a context.
 	ShutdownTimeout time.Duration
+
+	// ProxyResponseHeaderTimeout bounds how long a Proxy route waits for the
+	// upstream's response headers, from the end of sending it the request.
+	// An upstream that has not answered in time gets the client a 504
+	// Gateway Timeout. It does not bound the response body, which streams
+	// for as long as it takes. Zero selects the default (60 s, nginx's
+	// proxy_read_timeout); a negative value waits as long as the client
+	// stays connected.
+	ProxyResponseHeaderTimeout time.Duration
 }
 
 // defaultMaxRequestBodySize is the request-body cap used when
@@ -325,6 +334,15 @@ func WithSSEWriteTimeout(d time.Duration) ServerOption {
 	}
 }
 
+// WithProxyResponseHeaderTimeout bounds the wait of a Proxy route for the
+// upstream's response headers; past it the client gets a 504. 0 selects the
+// default (60 s); a negative value disables it.
+func WithProxyResponseHeaderTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.ProxyResponseHeaderTimeout = d
+	}
+}
+
 // WithOptions creates a ServerOption from a ServerOptions struct.
 // This is provided for backwards compatibility with the old configuration style.
 // Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
@@ -349,6 +367,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.ReadTimeout = serverOpts.ReadTimeout
 		opts.WriteTimeout = serverOpts.WriteTimeout
 		opts.ShutdownTimeout = serverOpts.ShutdownTimeout
+		opts.ProxyResponseHeaderTimeout = serverOpts.ProxyResponseHeaderTimeout
 	}
 }
 
@@ -450,6 +469,14 @@ type Server struct {
 	// inShutdown is set when a Shutdown starts and cleared by the next
 	// Serve or Run once no Shutdown is running.
 	inShutdown atomic.Bool
+
+	// proxyClient is the HTTP client Proxy routes send upstream requests
+	// with, built by the first Proxy registration (proxyHTTPClient, in
+	// proxy.go) and shared by every Proxy route of this server. An atomic
+	// pointer because Shutdown reads it from whatever goroutine calls it,
+	// with no other ordering against a registration.
+	proxyClientOnce sync.Once
+	proxyClient     atomic.Pointer[http.Client]
 }
 
 // NewServer creates a new HTTP server with an optional ServerOptions struct.
@@ -835,6 +862,23 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 // The pathPrefix can help us to distinguish between different proxy targets, from which we can strip any unneeded tokens (from the left)  in the handler
 // If there is any prefix left after stripping, it is added to the leftmost of the target URL.
 // If there is a path specified in the target URL, it is appended after the stripped prefix.
+//
+// How a request goes through (v0.2.1+; see proxy.go for the details):
+//   - The upstream's status, headers and body go to the client as sent, a
+//     3xx included: redirects are not followed by the proxy.
+//   - The response body is streamed (rweb.Stream), not read into memory; the
+//     request body is still read in full before the upstream call.
+//   - Hop-by-hop headers (Connection and the headers it names, Keep-Alive,
+//     TE, Trailer, Transfer-Encoding, Upgrade, Proxy-*) are dropped in both
+//     directions. X-Forwarded-For gets the client's IP appended;
+//     X-Forwarded-Proto and X-Forwarded-Host are set to this hop's values.
+//     The upstream sees its own host in Host.
+//   - No response headers within ServerOptions.ProxyResponseHeaderTimeout
+//     (default 60 s) is a 504; an unreachable or failing upstream is a 502.
+//     Both go through the error handler. A client that leaves mid-call
+//     cancels the upstream request and is recorded as 502 without it.
+//   - Every Proxy route of a server shares one HTTP client and connection
+//     pool, whose idle connections Shutdown closes.
 func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove int) (err error) {
 	return s.proxy(pathPrefix, targetURL, prefixTokensToRemove, nil)
 }
@@ -863,6 +907,13 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			strippedPrefix = strings.Join(tokens[prefixTokensToRemove:], "/")
 		}
 	}
+
+	// The server's own upstream client (proxy.go), built on the first Proxy
+	// registration and shared by all of them. It replaces
+	// http.DefaultClient, which had no timeout at all, followed redirects
+	// itself, and kept its idle connections in a process-wide pool nothing
+	// here could close.
+	client := s.proxyHTTPClient()
 
 	hdlr := func(ctx Context) (err error) {
 		ctxReq := ctx.Request()
@@ -900,37 +951,54 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			return err
 		}
 
-		// Take the original headers too
+		// Take the original headers too. Add, not Set: a header the client
+		// sent on several lines (Accept, Cookie, X-Forwarded-For from
+		// earlier proxies) keeps every line, where Set kept only the last.
+		// Host, Content-Length and Transfer-Encoding in req.Header are
+		// ignored by net/http, which writes them from req.Host (the
+		// target's) and the body.
 		for _, hdr := range ctxReq.Headers() {
-			req.Header.Set(hdr.Key, hdr.Value)
+			req.Header.Add(hdr.Key, hdr.Value)
 		}
+		removeHopByHop(req.Header)
+		// The client's 100-continue expectation was answered by this server
+		// (serveConn sent 100 Continue before reading the body), and the
+		// body is already in memory. Passing it on would only hold the
+		// upload back for a round trip, or for the transport's
+		// ExpectContinueTimeout (1 s) on an upstream that ignores it.
+		req.Header.Del(consts.HeaderExpect)
+		setForwardedHeaders(req.Header, ctx)
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			if reqCtx.Err() != nil {
 				return clientGone(ctx)
 			}
-			return err
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close() // on the error path too, so the upstream conn is released
-		if err != nil {
-			if reqCtx.Err() != nil {
-				return clientGone(ctx)
+			// The upstream failed, not this server, so the status says so:
+			// 504 when it did not answer in time (ResponseHeaderTimeout,
+			// or a dial that timed out), 502 for anything else (refused,
+			// reset, a malformed response). The error still goes to the
+			// error handler, which logs it and, by default, keeps a status
+			// already set to something other than 200. RFC 9110 §15.6.3
+			// and §15.6.5; nginx and httputil.ReverseProxy answer the
+			// same way.
+			if isTimeout(err) {
+				ctx.SetStatus(consts.StatusGatewayTimeout)
+			} else {
+				ctx.SetStatus(consts.StatusBadGateway)
 			}
-			return err
-		}
-
-		err = ctx.Bytes(body)
-		if err != nil {
 			return err
 		}
 
 		ctx.Response().SetStatus(resp.StatusCode)
 
+		removeHopByHop(resp.Header)
 		for hdr, vals := range resp.Header {
-			if strings.EqualFold(consts.HeaderContentLength, hdr) { // we auto set content-length - don't set it twice
+			// Content-Length is written by writeResponse from the stream's
+			// size below, which is the upstream's Content-Length (also for
+			// a HEAD, where net/http reports it without a body). Sending
+			// the upstream's header as well would state it twice.
+			if strings.EqualFold(consts.HeaderContentLength, hdr) {
 				continue
 			}
 			// One header line per value — joining with commas corrupts
@@ -939,7 +1007,28 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 				ctx.Response().AddHeader(hdr, val)
 			}
 		}
-		return nil
+
+		// Stream the body instead of reading it into memory first: the
+		// response takes resp.Body, and writeResponse copies it to the
+		// client after the handler returns, closing it when done (which
+		// returns the upstream connection to the pool, or closes it if
+		// the body was not read to the end).
+		//
+		//	resp.ContentLength >= 0  Content-Length, copied as it arrives;
+		//	                         an upstream that ends short closes the
+		//	                         client's connection (truncated, never
+		//	                         a short body that looks whole)
+		//	resp.ContentLength <  0  chunked to an HTTP/1.1 client, unframed
+		//	                         (ended by close) to an HTTP/1.0 one
+		//	HEAD, 204, 304           headers only; the body is closed unread
+		//
+		// The upstream request is tied to the request context, which stays
+		// live until the response has been written (it is cancelled after
+		// writeResponse, in handleRequest's deferred finishContext), so
+		// the body read is not cut off when the handler returns. Shutdown
+		// cancelling it does cut off a body still streaming, as it ends
+		// every other request-bound operation.
+		return Stream(ctx, resp.Body, resp.ContentLength)
 	}
 
 	var routeHdlr Handler = hdlr

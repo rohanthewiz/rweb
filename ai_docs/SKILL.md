@@ -84,6 +84,7 @@ default and a negative value disables it**.
 | `ReadTimeout` | off | reading the request body | `408`, close |
 | `WriteTimeout` | off | any single stalled write (each ≤ 1 MB piece), **not** the whole response | response ends, close |
 | `SSECfg.WriteTimeout` | 30 s | each flush of an event stream (on even when `WriteTimeout` is off) | stream ends, cleanup runs |
+| `ProxyResponseHeaderTimeout` | 60 s | a `Proxy` route's wait for the upstream's response headers (not the body) | `504` (see Reverse Proxy) |
 
 ```go
 s := rweb.NewServerWithOptions(
@@ -134,7 +135,8 @@ What `Shutdown` does, in order: close listeners (`Serve` returns
 `ErrServerClosed`) → cancel every `Request().Context()` → close idle keep-alive
 connections at once → send each WebSocket a close frame (1001 going away) → end
 SSE streams (flush + cleanup) → wait for in-flight requests → at ctx's end,
-close whatever is left (stuck handlers keep running, but their conn is closed).
+close whatever is left (stuck handlers keep running, but their conn is closed)
+→ close the `Proxy` client's idle upstream connections.
 Safe to call repeatedly/concurrently; the server can be served again after.
 Handlers should watch `ctx.Request().Context()` to finish early. Don't call
 `Shutdown` before `ReadyChan` fires for a `Serve` started in a goroutine: a
@@ -1029,8 +1031,41 @@ if err != nil {
 
 The upstream call carries the client's request context: a client that disconnects mid-proxy
 cancels the upstream request, and the abandoned request is recorded as 502 without calling the
-error handler (no `[ERR]` log line). An upstream failure with the client still connected goes to
-the error handler as before.
+error handler (no `[ERR]` log line).
+
+From v0.2.1:
+
+- **Redirects are passed through**, not followed: a 3xx from the upstream reaches the client
+  with its `Location` as sent (not rewritten to the proxy's prefix). Earlier versions used
+  `http.DefaultClient`, which followed them.
+- **The response is streamed** (`rweb.Stream`), not read into memory: the client gets bytes as
+  the upstream sends them. An upstream `Content-Length` is kept; an unknown length goes chunked
+  (unframed, ended by close, to an HTTP/1.0 client). An upstream that ends short closes the
+  client's connection, so a truncated body never looks complete. HEAD, 204 and 304 are sent
+  without a body. The **request** body is still read in full before the upstream call.
+- **Hop-by-hop headers are dropped both ways**: `Connection` and every header it names,
+  `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`,
+  `Proxy-Authenticate`, `Proxy-Authorization`; also the request's `Expect` (rweb already
+  answered `100 Continue`). So WebSocket upgrades cannot be proxied. Repeated request headers
+  keep every line (they used to collapse to the last one).
+- **`X-Forwarded-*` is set**: `X-Forwarded-For` gets the peer's IP appended (`"client, proxy1,
+  peer"`), `X-Forwarded-Proto` and `X-Forwarded-Host` are set to what this server saw,
+  replacing client-sent values. The upstream's `Host` is still the target's host.
+- **Upstream failures**: no response headers within `ProxyResponseHeaderTimeout` → **504**;
+  unreachable, refused or a bad response → **502** (was 500). Both still go to the error
+  handler, which logs them and keeps the status. The timeout covers only the wait for the
+  headers, not a long body.
+- All `Proxy` routes of a server share one client with its own connection pool (32 idle conns
+  per upstream host); `Shutdown` closes its idle connections. `Shutdown` also cuts off a
+  proxied body still streaming, since it cancels every request context.
+
+```go
+s := rweb.NewServerWithOptions(
+    rweb.WithAddress(":8080"),
+    // 0 = default 60 s (nginx's proxy_read_timeout); negative = wait as long as the client does
+    rweb.WithProxyResponseHeaderTimeout(30*time.Second),
+)
+```
 
 ## Request Information
 

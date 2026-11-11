@@ -202,6 +202,11 @@ func main() {
 	// e.g. curl -X POST http://localhost:8080/admin/post-form-data/330 -d '{"hi": "there"}' -H 'Content-Type: application/json'
 	// e.g. curl http://localhost:8080/via-proxy/usa/status
 	// 		- This will proxy to http://localhost:8081/usa/proxy-incoming/status
+	// The upstream's response is streamed to the client as it arrives, 3xx redirects are passed
+	// through rather than followed, hop-by-hop headers are dropped both ways, and X-Forwarded-For,
+	// -Proto and -Host are set. An upstream with no response headers within
+	// ProxyResponseHeaderTimeout (WithProxyResponseHeaderTimeout; default 60s) gets a 504, an
+	// unreachable one a 502.
 	err := s.Proxy("/via-proxy/usa", "http://localhost:8081/proxy-incoming", 1)
 	if err != nil {
 		log.Fatal(err)

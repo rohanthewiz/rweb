@@ -30,8 +30,9 @@ import (
 //	  │                (it never goes back to waiting for a request);
 //	  │                a WebSocket is also sent a close frame, 1001 going away
 //	  ├─ 4. wait until the registry is empty ……………… return nil
-//	  └─ 5. or ctx is done first: close every remaining conn
-//	        (WebSockets, SSE streams and stuck handlers included) … return ctx.Err()
+//	  ├─ 5. or ctx is done first: close every remaining conn
+//	  │     (WebSockets, SSE streams and stuck handlers included) … return ctx.Err()
+//	  └─ 6. on either return: close the Proxy client's idle upstream conns
 //
 // A connection's state, as the request loop (serveConn) moves it:
 //
@@ -368,6 +369,14 @@ func (s *Server) Shutdown(ctx stdctx.Context) error {
 
 	s.cancelBaseContext()
 	s.wakeConns()
+
+	// Last, on either way out: close the proxy client's idle upstream
+	// connections (step 6 in the diagram at the top). By then every request
+	// has finished or had its connection closed, and the upstream calls,
+	// tied to request contexts cancelled in step 2, have ended; a
+	// connection they used is idle and is closed here, rather than kept
+	// open in the pool for the transport's idle timeout.
+	defer s.closeProxyIdleConns()
 
 	for {
 		s.lifeMu.Lock()
