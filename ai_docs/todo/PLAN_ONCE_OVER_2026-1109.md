@@ -419,6 +419,10 @@ Steps:
    bodies keep two writes (the copy would cost more than the syscall).
 3. Depends on N-041 so `respBuf` cannot grow and stay grown.
 
+> **As done (2026-11-11):** the cap is 8 KB, not 64 KB. Coalescing lost
+> 6–25 % on plain TCP from 16 KB bodies up. The benchmarks are named
+> `BenchmarkKeepAlive*`. See N-042 under Closed in `next-list.md`.
+
 ### N-043 · WebSocket frame reads are unbuffered and allocate per frame · read · value medium
 
 `readFrame` (`websocket.go:383-441`) does three or four reads on the socket
@@ -438,6 +442,10 @@ per-context byte buffer and converted to one string, with header keys and
 values as substrings of it. The strings still own their memory, so a handler
 that keeps a header value after the request stays safe. Expected: 8 → about 3
 allocs/op. Do after N-035; drop the item if the benchmark shows under 5 %.
+
+> **As done (2026-11-11):** built and dropped. Allocations fell 12 → 2 per
+> browser-like request, but there was no time gain on one connection or on
+> 64 connections in parallel. See N-044 under Non-goals in `next-list.md`.
 
 ### N-045 · static handler recomputes per request · read · value low
 
@@ -469,6 +477,13 @@ Two steps, the first cheap:
 
 Step 1 is N-046, in Open. Step 2 is N-057, on the Roadmap until someone
 needs it.
+
+> **Decided (2026-11-11): step 1 dropped and folded into N-057.** Global
+> middleware (`s.Use`) runs before routing and can answer an unrouted
+> request itself. Skipping the body on a miss would therefore hand that
+> middleware an empty `Body()`. Every routed POST also accepts bodies up to
+> the cap already. Only a lazy body (step 2) removes the cost without
+> changing what middleware sees.
 
 ### N-047 · `Proxy` buffers the response and uses `http.DefaultClient` · read · value medium · needs D6
 
