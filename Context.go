@@ -239,11 +239,36 @@ type context struct {
 // maxRetainedWriteBuf for WebSocket frames).
 const maxRetainedBuf = 256 << 10
 
+// maxRetainedHeaders caps the capacity, in entries, that a pooled context
+// keeps in each of its request and response header slices between requests:
+// the same idea as maxRetainedBuf, for the header lists (N-069).
+//
+// The request's list is the one a client controls. A Header is two strings,
+// 32 bytes on 64-bit, so a 1 MB head (MaxHeaderBytes) of minimal "a:" lines
+// is about 260,000 entries, and append's doubling leaves a backing array of
+// about 8 MB, which a plain [:0] would keep for the rest of the keep-alive
+// connection and then in the pool. Real requests carry tens of headers; 256
+// entries (8 KB) leaves ample room, so the common case still reuses the
+// array without allocating.
+const maxRetainedHeaders = 256
+
 // Clean resets the context for reuse in the next request.
 // This is called between requests to avoid allocating new context objects.
 // It clears all request/response data while preserving the underlying
-// slice capacities for performance, up to maxRetainedBuf per buffer.
+// slice capacities for performance, up to maxRetainedBuf per buffer and
+// maxRetainedHeaders per header list.
 func (ctx *context) Clean() {
+	// Zero the header entries before truncating. Truncation alone leaves
+	// them in the backing array past len, where the GC still sees them, so
+	// the previous request's keys and values (a 1 MB header value, say)
+	// would stay reachable from an idle connection or a pooled context
+	// until a later request happened to overwrite the same slots. This
+	// costs a memclr of len×32 bytes, a few hundred bytes for a typical
+	// request; every slot written is zeroed here, so the array past len
+	// stays zero.
+	clear(ctx.request.headers)
+	clear(ctx.response.headers)
+
 	// Reset slices to zero length but keep capacity for reuse
 	ctx.request.headers = ctx.request.headers[:0]
 	ctx.request.body = ctx.request.body[:0]
@@ -261,6 +286,13 @@ func (ctx *context) Clean() {
 	}
 	if ctx.respBuf.Cap() > maxRetainedBuf {
 		ctx.respBuf = bytes.Buffer{}
+	}
+	// Same for the header lists, back to newContext's capacity of 8.
+	if cap(ctx.request.headers) > maxRetainedHeaders {
+		ctx.request.headers = make([]Header, 0, 8)
+	}
+	if cap(ctx.response.headers) > maxRetainedHeaders {
+		ctx.response.headers = make([]Header, 0, 8)
 	}
 	// A body stream still pending here was never sent (an error path, or a
 	// synthetic request whose caller never read Body); release it.

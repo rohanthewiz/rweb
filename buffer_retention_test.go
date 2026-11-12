@@ -64,3 +64,57 @@ func TestCleanKeepsSmallBuffers(t *testing.T) {
 			reqCap, cap(ctx.request.body), respCap, cap(ctx.response.body))
 	}
 }
+
+// The header lists get the same treatment (N-069): a 1 MB head of tiny
+// header lines grows request.headers to about 8 MB of entries, which Clean
+// must not keep.
+func TestCleanReleasesOversizedHeaderLists(t *testing.T) {
+	s := NewServer()
+	ctx := s.newContext()
+	for range 100_000 {
+		ctx.request.headers = append(ctx.request.headers, Header{Key: "a", Value: ""})
+		ctx.response.headers = append(ctx.response.headers, Header{Key: "b", Value: ""})
+	}
+
+	ctx.Clean()
+
+	if c := cap(ctx.request.headers); c > maxRetainedHeaders {
+		t.Errorf("request header capacity %d kept after Clean, cap is %d", c, maxRetainedHeaders)
+	}
+	if c := cap(ctx.response.headers); c > maxRetainedHeaders {
+		t.Errorf("response header capacity %d kept after Clean, cap is %d", c, maxRetainedHeaders)
+	}
+	if len(ctx.request.headers) != 0 || len(ctx.response.headers) != 0 {
+		t.Errorf("header lists not empty after Clean")
+	}
+}
+
+// A header list within the cap keeps its array, but with every entry zeroed,
+// so the previous request's keys and values are not kept reachable past len.
+func TestCleanKeepsSmallHeaderListsZeroed(t *testing.T) {
+	s := NewServer()
+	ctx := s.newContext()
+	big := string(bytes.Repeat([]byte("v"), 1<<20))
+	for range 20 {
+		ctx.request.headers = append(ctx.request.headers, Header{Key: "X-Big", Value: big})
+		ctx.response.headers = append(ctx.response.headers, Header{Key: "X-Big", Value: big})
+	}
+	reqCap, respCap := cap(ctx.request.headers), cap(ctx.response.headers)
+
+	ctx.Clean()
+
+	if cap(ctx.request.headers) != reqCap || cap(ctx.response.headers) != respCap {
+		t.Errorf("small header lists released: request %d -> %d, response %d -> %d",
+			reqCap, cap(ctx.request.headers), respCap, cap(ctx.response.headers))
+	}
+	for i, h := range ctx.request.headers[:reqCap] {
+		if h != (Header{}) {
+			t.Fatalf("request header slot %d still holds %q after Clean", i, h.Key)
+		}
+	}
+	for i, h := range ctx.response.headers[:respCap] {
+		if h != (Header{}) {
+			t.Fatalf("response header slot %d still holds %q after Clean", i, h.Key)
+		}
+	}
+}
