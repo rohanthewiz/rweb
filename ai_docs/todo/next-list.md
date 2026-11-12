@@ -34,7 +34,7 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-072
+**Next ID:** N-073
 
 ## Open
 
@@ -58,24 +58,20 @@ code at `3169f85`.
   No lingering close after an early 431 or 413: the server answers and closes while the client may still be sending, so on Linux the client can get a reset before it reads the response (reliable on macOS loopback). Read a bounded amount, or half-close and wait briefly, before closing (`Server.go`, `headFailed` and the 413 paths). From the N-035 report; not reproduced.
 - **N-060** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   Request header values containing control characters (other than the line's own CRLF) are accepted and handed to handlers. RFC 9110 §5.5 allows refusing them; decide between 400 and stripping. From the N-036 report.
-- **N-063** · raised `2026-1111-1143-phase-3-performance` · value medium
-  A request line with no version and a bare-LF ending is mis-parsed: `serveConn` (`Server.go`, after `lastSpace := strings.LastIndexByte(...)`) assumes the line ends in CRLF when there is no version field and cuts two bytes. `GET /xy\n` is routed to `/x`; `GET \n` panics (slice bounds [4:3]), is recovered as a 500 and logs a stack trace, for any client that sends it. Trim the actual line ending; an empty target → 400. Reproduced by the N-042 agent on committed code.
 - **N-064** · raised `2026-1111-1143-phase-3-performance` · value low
   No read timeout on a streamed body once its headers are sent: an upstream behind `Proxy` (or any slow `rweb.Stream` producer) that stalls mid-body holds the client connection until shutdown, and since the disconnect watch is stopped before `writeResponse`, a client that leaves during the stall is not noticed until the next write. nginx's `proxy_read_timeout` bounds each read; a per-read idle timer around `resp.Body` would do it for the proxy. From the N-047 report.
 - **N-065** · raised `2026-1111-1143-phase-3-performance` · value low
   `Proxy` does not rewrite an upstream `Location` (or cookie `Path`) under the proxy prefix, so an upstream redirect to `/new` sends the client to the proxy's root rather than under the prefix (no `ProxyPassReverse` equivalent). From the N-047 report.
 - **N-066** · raised `2026-1111-1143-phase-3-performance` · value low
   WebSocket upgrades cannot go through `Proxy`: `Upgrade` is hop-by-hop and stripped since N-047, so the upstream answers plainly (before N-047 the request hung). Proxying one needs the client conn taken over and bytes copied both ways. From the N-047 report.
-- **N-067** · raised `2026-1111-1143-phase-3-performance` · value low
-  `WSConn.SetMaxMessageSize` writes `maxMessageSize` without synchronisation while `ReadMessage` reads it (`websocket.go`); the same kind of race N-043 fixed for the handler setters. An `atomic.Int64` would do. From the N-043 report.
 - **N-068** · raised `2026-1111-1143-phase-3-performance` · value low
   The hub in `examples/websocket/main.go` and the chat example in `ai_docs/SKILL.md` call `client.Close` while holding the hub's lock. For a client that is gone, `Close` waits up to 2 s for the close reply, stalling every broadcast meanwhile. Collect under the lock, close outside it. From the N-043 report.
-- **N-069** · raised `2026-1111-1143-phase-3-performance` · value medium
-  `Clean` does not bound the capacity of `request.headers` (`Context.go`, `Clean`), as N-041 does for the body buffers: a 1 MB head of tiny header lines grows it to about 8 MB, which the pooled context then keeps. Cap it like `maxRetainedBuf`. From the N-042 report; not reproduced.
 - **N-070** · raised `2026-1111-1143-phase-3-performance` · value low
   Small allocation savings, unmeasured: `strconv.Itoa(int(ctx.status))` allocates on every response (`writeResponse`, `writeWebSocketUpgradeResponse`; one of hello's 4 allocs/op; `strconv.AppendInt` into `respBuf` avoids it), and `writeChunkedBody` allocates a 32 KB buffer per chunked response (pool it). Benchmark with `bench_test.go`; drop if under 5 %. From the N-042 report.
 - **N-071** · raised `2026-1111-1143-phase-3-performance` · value low
-  The test package does not compile for Windows: `graceful_shutdown_test.go` uses `syscall.Kill`. Move that test behind a `unix` build tag. From the N-042 report.
+  The test package does not compile for Windows. The note first named only `graceful_shutdown_test.go`, but 43 more `syscall.Kill(syscall.Getpid(), syscall.SIGTERM)` calls in 13 test files stop a `Run` server by signalling the test process (`Server_test.go` 11, `sse_test.go` 7, `Request_leak_test.go` 5, `head_and_unknown_method_test.go` and `Request_scheme_host_test.go` 4 each, `Server_options_test.go`, `bodyless_status_test.go`, `Request_test.go`, `proxy_test.go` 2 each, `Server_tls_test.go`, `method_not_allowed_test.go`, `header_injection_test.go`, `multipart_lazy_test.go` 1 each); `go vet` reports only the first failing file each time, which hid them. Done in `d746e23`: Run's genuine signal tests moved to `graceful_shutdown_signal_test.go` under `//go:build unix`, and `TestClientIPRemoteAddrFallback` runs on `Serve`/`Shutdown`. For the rest, a choice: (a) replace each signal with `s.Shutdown(ctx)` (a direct `Shutdown` makes `Run` return cleanly, so the tests can keep `Run`), or move them to `Serve` on their own listener, which CLAUDE.md asks of tests and which also removes the risk of a stray SIGTERM killing the test binary; or (b) tag the 13 files `unix`, which is smaller but leaves most of the suite unrun on Windows. Check with `GOOS=windows go vet .`. From the N-042 report.
+- **N-072** · raised `2026-1111-1814-n063-n069-n067-n071-hardening` · value low
+  The request line is split only at its first and last space (`serveConn`, `Server.go`), so extra spaces and a space inside the target are accepted: `GET /a b HTTP/1.1` reaches a `/a b` route (200), and `GET  /x HTTP/1.1` looks up ` /x` (404, not 400). RFC 9112 §3 says a recipient SHOULD NOT autocorrect an invalid request line and then process it, since such a line may be crafted to get past a filter in front, and §3.2 allows no whitespace in the target. A 400 would match the framing rules of N-036. Decide together with N-060 (control characters in header values). Found while fixing N-063; both cases checked on the wire with a throwaway test.
 
 ## Validate
 
@@ -112,6 +108,12 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-063** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-11, 2026-1111-1814-n063-n069-n067-n071-hardening (`5cb62b0`)
+  `serveConn` trims the request line's ending once (`TrimRight "\r\n"`, as the version field already was) and cuts the target and version from the trimmed line. A bare-LF line now keeps its whole target (`GET /xy\n` → `/xy`, was `/x`), and `GET \n` no longer panics. An empty target (`GET `, `GET  HTTP/1.1`) gets 400 and a close. Tests: `request_line_test.go`, tcp and tls; both cases failed before the change. Raised N-072 on the way.
+- **N-069** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-11, 2026-1111-1814-n063-n069-n067-n071-hardening (`15beae1`)
+  `Clean` drops a request or response header list whose capacity exceeds `maxRetainedHeaders` (256 entries, 8 KB) back to `newContext`'s 8, as N-041 does for the body buffers. It also clears the entries before truncating, so a kept array no longer holds the previous request's strings past `len`. Allocations unchanged (hello 4, browser-like 12). `cpu-ns/op` medians, interleaved on a noisy machine: hello 13.2 → 12.7 µs, browser-like 13.7 → 13.5 µs. Tests: `TestCleanReleasesOversizedHeaderLists` and `TestCleanKeepsSmallHeaderListsZeroed`; both failed with the change off.
+- **N-067** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-11, 2026-1111-1814-n063-n069-n067-n071-hardening (`bf71d71`)
+  `WSConn.maxMessageSize` is an `atomic.Int64`, so `SetMaxMessageSize` is safe from any goroutine. Test: `TestWebSocketSetMaxMessageSizeDuringReads`; before the change, `-race` flagged the setter against `readFrame`.
 - **N-042** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-11, 2026-1111-1143-phase-3-performance (`7ba428b`)
   `writeResponse` appends an in-memory body of at most `coalesceBodyMax` (8 KB) to the header block and writes once; HEAD, 1xx/204/304, SSE, chunked, HTTP/1.0 unframed and larger bodies keep the header block alone, and a sized stream after the in-memory part still goes by sendfile. An empty body no longer costs a zero-length Write. The plan said 64 KB; a size sweep showed coalescing lose 6–25 % on plain TCP from 16 KB up (TLS flat), so 8 KB. Results (interleaved, medians): hello −6.1 % ns/op (TLS −6.6 %), JSON −8.3 % (TLS −4.3 %), browser-like −8.4 % (TLS −4.1 %), 8 KB body −4.9 % (TLS −0.5 %). Adds the phase's benchmark file `bench_test.go` (keep-alive hello, JSON, browser-like and body-at-cap, plain and TLS, with a `cpu-ns/op` metric from getrusage; `BenchmarkKeepAliveHello` keeps its name). Phase 3 as a whole: `BenchmarkKeepAliveHello` 14.5 → 13.8 µs/op (−4.8 %) from `371ce8c` to the end of the phase. Tests: `write_coalesce_test.go`.
 - **N-043** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-11, 2026-1111-1143-phase-3-performance (`5fb94b0`, `0f71fda`)
