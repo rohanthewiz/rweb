@@ -350,3 +350,48 @@ func TestWebSocketCloseFromOnCloseHandler(t *testing.T) {
 		t.Fatalf("server answered with code %d, want the handler's %d", binary.BigEndian.Uint16(data), wsCloseGoingAway)
 	}
 }
+
+// SetMaxMessageSize from another goroutine while ReadMessage checks frames
+// against the limit (N-067): no data race (run with -race), and a limit set
+// before a frame is read applies to it.
+func TestWebSocketSetMaxMessageSizeDuringReads(t *testing.T) {
+	server, client := newTestPair()
+	defer client.conn.Close()
+	go drain(client.conn)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			server.SetMaxMessageSize(1 << 20)
+		}
+	}()
+
+	const n = 200
+	go func() {
+		for i := 0; i < n; i++ {
+			_ = writeRawFrame(client.conn, wsText, true, true, []byte("hello"))
+		}
+	}()
+	for i := 0; i < n; i++ {
+		if _, err := server.ReadMessage(); err != nil {
+			t.Fatalf("message %d: %v", i, err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+
+	// With the setter stopped, a lower limit is seen by the next frame.
+	server.SetMaxMessageSize(4)
+	go func() { _ = writeRawFrame(client.conn, wsText, true, true, []byte("hello")) }()
+	if _, err := server.ReadMessage(); !errors.Is(err, ErrWebSocketPayloadTooLarge) {
+		t.Fatalf("5-byte message with a 4-byte limit: err = %v, want ErrWebSocketPayloadTooLarge", err)
+	}
+}

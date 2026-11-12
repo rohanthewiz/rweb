@@ -135,10 +135,16 @@ type WSConn struct {
 	// under closeMutex and read under writeMutex — two different locks — and
 	// it is stored while writeMutex is still held for the close frame, so no
 	// data frame can be written after the close frame.
-	closed         atomic.Bool
-	closeMutex     sync.Mutex
-	writeMutex     sync.Mutex
-	maxMessageSize int64
+	closed     atomic.Bool
+	closeMutex sync.Mutex
+	writeMutex sync.Mutex
+	// maxMessageSize is the largest message ReadMessage accepts. Atomic
+	// because SetMaxMessageSize may be called from any goroutine (a hub
+	// tightening the limit, say) while the connection's handler is blocked
+	// in ReadMessage, which checks every frame against it; the same reason
+	// the callback setters take handlersMu (N-067). A load per frame costs
+	// no more than the plain read it replaces.
+	maxMessageSize atomic.Int64
 
 	// The app's callbacks. An app may set them from any goroutine — a hub
 	// installing a pong handler while the connection's own handler is
@@ -234,14 +240,14 @@ const maxFrameHeader = 2 + 8 + 4
 // The isServer parameter indicates if this is a server-side connection
 func NewWSConn(conn net.Conn, isServer bool) *WSConn {
 	ws := &WSConn{
-		conn:           conn,
-		r:              conn,
-		isServer:       isServer,
-		maxMessageSize: defaultMaxMessageSize,
-		closeHandlers:  make([]func(int, string), 0),
-		done:           make(chan struct{}),
-		readSem:        make(chan struct{}, 1),
+		conn:          conn,
+		r:             conn,
+		isServer:      isServer,
+		closeHandlers: make([]func(int, string), 0),
+		done:          make(chan struct{}),
+		readSem:       make(chan struct{}, 1),
 	}
+	ws.maxMessageSize.Store(defaultMaxMessageSize)
 
 	// Set default ping handler that responds with pong
 	ws.pingHandler = func(data []byte) error {
@@ -628,7 +634,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			if fin {
 				// Unfragmented message — the common fast path
 				if rsv1 {
-					if data, err = ws.deflate.decompress(data, ws.maxMessageSize); err != nil {
+					if data, err = ws.deflate.decompress(data, ws.maxMessageSize.Load()); err != nil {
 						return nil, err
 					}
 				}
@@ -650,7 +656,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			ws.fragmentedMessage = append(ws.fragmentedMessage, data...)
 			// The per-frame size check sees one fragment at a time; the
 			// message as a whole is held to the same limit.
-			if int64(len(ws.fragmentedMessage)) > ws.maxMessageSize {
+			if int64(len(ws.fragmentedMessage)) > ws.maxMessageSize.Load() {
 				ws.fragmentedMessage = nil
 				return nil, ErrWebSocketPayloadTooLarge
 			}
@@ -659,7 +665,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 				data := ws.fragmentedMessage
 				ws.fragmentedMessage = nil
 				if ws.fragmentedCompressed {
-					if data, err = ws.deflate.decompress(data, ws.maxMessageSize); err != nil {
+					if data, err = ws.deflate.decompress(data, ws.maxMessageSize.Load()); err != nil {
 						return nil, err
 					}
 				}
@@ -853,7 +859,7 @@ func (ws *WSConn) readFrame() (opcode int, fin bool, rsv1 bool, payload []byte, 
 	}
 
 	// Check payload size
-	if payloadLen > ws.maxMessageSize {
+	if payloadLen > ws.maxMessageSize.Load() {
 		return 0, false, false, nil, ErrWebSocketPayloadTooLarge
 	}
 
@@ -1342,9 +1348,11 @@ func (ws *WSConn) OnClose(handler func(code int, text string)) {
 	ws.handlersMu.Unlock()
 }
 
-// SetMaxMessageSize sets the maximum message size
+// SetMaxMessageSize sets the maximum message size. Safe to call from any
+// goroutine; a frame already being read is checked against the limit in
+// force when its header was parsed.
 func (ws *WSConn) SetMaxMessageSize(size int64) {
-	ws.maxMessageSize = size
+	ws.maxMessageSize.Store(size)
 }
 
 // SetReadDeadline sets the read deadline; the zero time clears it.
