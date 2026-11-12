@@ -1,14 +1,16 @@
 package rweb_test
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rohanthewiz/assert"
 	"github.com/rohanthewiz/rweb"
@@ -143,14 +145,14 @@ func TestClientIP(t *testing.T) {
 // when neither X-Forwarded-For nor X-Real-IP is set, ClientIP must return
 // the connection's RemoteAddr with the port stripped. The synthetic
 // Request() path doesn't carry a real conn, so this needs a real server.
+//
+// The server runs through Serve on the test's own listener and stops with
+// Shutdown. It used to run through Run and stop with a SIGTERM to the test
+// process, which ties the test to Unix (syscall.Kill does not exist on
+// Windows, so the package's tests did not build there, N-071) and kills
+// the whole test binary if the signal arrives when no Run is listening.
 func TestClientIPRemoteAddrFallback(t *testing.T) {
-	readyChan := make(chan struct{}, 1)
-	clientDone := make(chan struct{})
-
-	s := rweb.NewServer(rweb.ServerOptions{
-		ReadyChan: readyChan,
-		Address:   "localhost:",
-	})
+	s := rweb.NewServer()
 
 	var captured atomic.Value // string
 	s.Get("/whoami", func(ctx rweb.Context) error {
@@ -158,31 +160,35 @@ func TestClientIPRemoteAddrFallback(t *testing.T) {
 		return ctx.WriteString("ok")
 	})
 
-	go func() {
-		defer close(clientDone)
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-		<-readyChan
-
-		// No XFF/X-Real-IP — exercise the RemoteAddr fallback.
-		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%s/whoami", s.GetListenPort()))
-		assert.Nil(t, err)
-		_ = resp.Body.Close()
-
-		ip, _ := captured.Load().(string)
-		// Port should be stripped (net.SplitHostPort succeeds on real conns).
-		// We accept either the IPv4 loopback (127.0.0.1) or the IPv6 loopback
-		// (::1) depending on how the OS resolves it.
-		if ip != "127.0.0.1" && ip != "::1" {
-			t.Errorf("expected loopback IP without port, got %q", ip)
-		}
-		// Defense in depth: ensure no `:port` slipped through.
-		if strings.Contains(ip, ":") && !strings.Contains(ip, "::") {
-			t.Errorf("ClientIP returned host:port form, expected host only: %q", ip)
-		}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	assert.Nil(t, err)
+	go func() { _ = s.Serve(ln) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.Shutdown(ctx)
 	}()
 
-	_ = s.Run()
-	<-clientDone
+	// No XFF/X-Real-IP — exercise the RemoteAddr fallback. The listener is
+	// already bound, so the dial is queued even if Serve has not reached
+	// Accept yet.
+	resp, err := http.Get(fmt.Sprintf("http://%s/whoami", ln.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	ip, _ := captured.Load().(string)
+	// Port should be stripped (net.SplitHostPort succeeds on real conns).
+	// We accept either the IPv4 loopback (127.0.0.1) or the IPv6 loopback
+	// (::1) depending on how the OS resolves it.
+	if ip != "127.0.0.1" && ip != "::1" {
+		t.Errorf("expected loopback IP without port, got %q", ip)
+	}
+	// Defense in depth: ensure no `:port` slipped through.
+	if strings.Contains(ip, ":") && !strings.Contains(ip, "::") {
+		t.Errorf("ClientIP returned host:port form, expected host only: %q", ip)
+	}
 }
 
 func TestBasicAuth(t *testing.T) {
