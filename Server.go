@@ -1735,22 +1735,42 @@ func (s *Server) serveConn(tc *trackedConn) {
 			fmt.Println(strings.Repeat("-", 64))
 		}
 
-		lastSpace := strings.LastIndexByte(message, consts.RuneSingleSpace)
+		// Work on the line without its ending. readLine stops at the first
+		// LF, so the ending is "\r\n" or, which RFC 9112 §2.2 lets a
+		// recipient accept, a bare "\n". Both fields below are cut from this
+		// trimmed line, so neither depends on which ending arrived: the
+		// target used to be cut by assuming a two-byte CRLF whenever there
+		// was no version field, which dropped the target's last byte after a
+		// bare LF ("GET /xy\n" → "/x") and sliced past its start for an
+		// empty one ("GET \n" → [4:3], a panic) (N-063). TrimRight, as the
+		// version field always had, also takes stray CRs before the LF.
+		line := strings.TrimRight(message, "\r\n")
+		lastSpace := strings.LastIndexByte(line, consts.RuneSingleSpace)
 
 		// The protocol version is the request line's last field. A line with
 		// none ("GET /", HTTP/0.9 style) has always been served as HTTP/1.1
 		// and still is. Only an exact "HTTP/1.0" changes anything: 1.0
 		// clients get no 100 Continue (below) and different keep-alive rules.
 		// Anything else is treated as 1.1, as before, rather than refused.
+		//
+		//   "GET /xy HTTP/1.1"     space=3, lastSpace=7 → url "/xy", proto "HTTP/1.1"
+		//   "GET /xy"              space=3, lastSpace=3 → url "/xy", no proto
+		//   "GET " / "GET  HTTP/1.1"                     → url "", refused below
 		var proto string
 		if lastSpace == space {
-			lastSpace = len(message) - len(consts.CRLF)
+			url = line[space+1:]
 		} else {
-			proto = strings.TrimRight(message[lastSpace+1:], "\r\n")
+			url = line[space+1 : lastSpace]
+			proto = line[lastSpace+1:]
 		}
 		isHTTP10 := proto == consts.HTTP10
 
-		url = message[space+1 : lastSpace]
+		// No target at all is not a request for "/": nothing names the
+		// resource, and routing it would mean picking one for the client.
+		if url == "" {
+			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+			return
+		}
 
 		var contentLen int64
 		var isChunked bool
