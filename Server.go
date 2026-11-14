@@ -1206,7 +1206,23 @@ func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) 
 //  2. s.StaticFiles("/css/", "assets/css", 1)
 //  3. s.StaticFiles("/.well-known/", "/", 0)
 func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
-	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, false, nil)
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, false, StaticOptions{}, nil)
+}
+
+// StaticFilesWithOptions is StaticFiles with StaticOptions: a Cache-Control
+// header, an index file for directories, and a fallback file for a
+// single-page app. The zero StaticOptions is StaticFiles exactly.
+//
+//	s.StaticFilesWithOptions("/", "dist", 0, rweb.StaticOptions{
+//		Index:        "index.html",
+//		SPAFallback:  "index.html",
+//		CacheControl: "no-cache",
+//	})
+//	s.StaticFilesWithOptions("/assets/", "dist/assets", 1, rweb.StaticOptions{
+//		CacheControl: "public, max-age=31536000, immutable",
+//	})
+func (s *Server) StaticFilesWithOptions(reqDir string, targetDir string, nbrOfTokensToStrip int, opts StaticOptions) {
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, false, opts, nil)
 }
 
 // StaticFilesAbs is StaticFiles for a directory named by its absolute
@@ -1227,17 +1243,24 @@ func (s *Server) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 //	s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)
 //	// GET /editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
 func (s *Server) StaticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int) {
-	s.staticFilesAbs(reqDir, targetDir, nbrOfTokensToStrip, nil)
+	s.staticFilesAbs(reqDir, targetDir, nbrOfTokensToStrip, StaticOptions{}, nil)
 }
 
-// staticFilesAbs is StaticFilesAbs with the optional handler wrap of
-// staticFiles, so Group.StaticFilesAbs shares the absolute-path check.
-func (s *Server) staticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int, wrap func(Handler) Handler) {
+// StaticFilesAbsWithOptions is StaticFilesAbs with StaticOptions (see
+// StaticFilesWithOptions).
+func (s *Server) StaticFilesAbsWithOptions(reqDir string, targetDir string, nbrOfTokensToStrip int, opts StaticOptions) {
+	s.staticFilesAbs(reqDir, targetDir, nbrOfTokensToStrip, opts, nil)
+}
+
+// staticFilesAbs is StaticFilesAbs with the options and optional handler
+// wrap of staticFiles, so Group.StaticFilesAbs shares the absolute-path
+// check.
+func (s *Server) staticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int, opts StaticOptions, wrap func(Handler) Handler) {
 	if !filepath.IsAbs(targetDir) {
 		fmt.Printf("StaticFilesAbs target dir %q is not an absolute path -- not handling\n", targetDir)
 		return
 	}
-	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, true, wrap)
+	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, true, opts, wrap)
 }
 
 // staticFiles is the shared implementation. absTarget selects how targetDir
@@ -1249,15 +1272,41 @@ func (s *Server) staticFilesAbs(reqDir string, targetDir string, nbrOfTokensToSt
 // A Group passes its middleware chain (Group.wrap), which is what puts static
 // files mounted on a group behind the group's middleware; the Server's own
 // methods pass nil.
-func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int, absTarget bool, wrap func(Handler) Handler) {
-	if len(reqDir) < 2 {
-		fmt.Println("StaticFiles request dir is too short -- not handling")
+//
+// opts carries StaticOptions; its zero value is plain StaticFiles.
+func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int, absTarget bool, opts StaticOptions, wrap func(Handler) Handler) {
+	// "/" is allowed, mounting the directory at the site root: the route is
+	// then the catch-all "/*path". It used to be refused along with ""
+	// (the check was len < 2), which left a site or single-page app served
+	// from the root no way in. A root mount answers every GET no other
+	// route takes, so its 404s are its own: the not-found hook does not see
+	// them, and a POST to an unknown path gets 405 (Allow: GET, HEAD).
+	if reqDir == "" {
+		fmt.Println("StaticFiles request dir is empty -- not handling")
+		return
+	}
+
+	// Index must name a file in the requested directory, nothing more: a
+	// separator or ".." would let it reach elsewhere under (or, joined
+	// before the containment check, outside) the root.
+	if opts.Index != "" && (strings.ContainsAny(opts.Index, `/\`) || opts.Index == "." || opts.Index == "..") {
+		fmt.Printf("StaticFiles index %q is not a plain file name -- not handling\n", opts.Index)
+		return
+	}
+	// SPAFallback may name a file in a subdirectory, but must stay under the
+	// served directory: filepath.IsLocal refuses "", absolute paths, ".."
+	// and (on Windows) reserved names.
+	if opts.SPAFallback != "" && !filepath.IsLocal(filepath.FromSlash(opts.SPAFallback)) {
+		fmt.Printf("StaticFiles SPA fallback %q is not a path under the served directory -- not handling\n", opts.SPAFallback)
 		return
 	}
 
 	// Build wildcard route (URL path — always forward slashes, hence path.Join
 	// rather than filepath.Join, which would use backslashes on Windows)
 	route := path.Join("/", reqDir, "*path")
+	// The prefix alone ("/pub", or "/" for a root mount), registered too
+	// when there is an index or a fallback to serve there (see the end).
+	prefixRoute := path.Join("/", reqDir)
 	if s.options.Debug {
 		fmt.Println("**-> static route:", route)
 	}
@@ -1344,6 +1393,46 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		fmt.Printf("**-> static root: %q, base: %q\n", rootAbs, baseAbs)
 	}
 
+	// The SPA fallback file, worked out once like the root: absolute, and
+	// relative to rootAbs for openContained. IsLocal (checked above) keeps
+	// it under baseAbs, and so under rootAbs.
+	var fallbackAbs, fallbackRel string
+	if opts.SPAFallback != "" {
+		fallbackAbs = filepath.Join(baseAbs, filepath.FromSlash(opts.SPAFallback))
+		fallbackRel, _ = filepath.Rel(rootAbs, fallbackAbs)
+	}
+
+	// openFile opens the file at abs (rel is the same path relative to
+	// rootAbs) as this route opens every file, and Stats the open file.
+	// Open first and Stat the open file, rather than Stat the path and
+	// open it afterwards: the size, mod time and directory check then
+	// describe the very file whose bytes are sent, not whatever the path
+	// pointed at a moment earlier.
+	//
+	// With StaticContainSymlinks the file is opened through an os.Root on
+	// the served directory, so the containment check and the open are one
+	// operation and a link swapped in between them has nothing to slip
+	// past. See openContained for how links that stay inside the root are
+	// served.
+	openFile := func(abs, rel string) (*os.File, os.FileInfo, error) {
+		var f *os.File
+		var err error
+		if s.options.StaticContainSymlinks {
+			f, err = openContained(rootAbs, rel)
+		} else {
+			f, err = os.Open(abs)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, nil, err
+		}
+		return f, info, nil
+	}
+
 	// We use the wildcard parameter in the route here
 	var fileHandler Handler = func(ctx Context) error {
 		// Build the actual filepath now. The param is already percent-decoded
@@ -1402,57 +1491,75 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		}
 
 		// The check above is lexical: it proves the *name* is under the root,
-		// not the file the name resolves to. With StaticContainSymlinks the
-		// file is opened through an os.Root on the served directory, so the
-		// containment check and the open are one operation and a link
-		// swapped in between them has nothing to slip past. See
-		// openContained for how links that stay inside the root are served.
+		// not the file the name resolves to. With StaticContainSymlinks,
+		// openFile opens through an os.Root, which closes that gap.
 		//
-		// Open first and Stat the open file, rather than Stat the path and
-		// open it afterwards: the size, mod time and directory check then
-		// describe the very file whose bytes are sent, not whatever the path
-		// pointed at a moment earlier.
-		var f *os.File
-		var openErr error
-		if s.options.StaticContainSymlinks {
-			f, openErr = openContained(rootAbs, rel)
-		} else {
-			f, openErr = os.Open(candAbs)
+		// What is served, in order:
+		//
+		//	the named file ── a directory ──► its Index file (when set)
+		//	      │                                 │
+		//	      └── missing (or dir, no index) ◄──┘ missing
+		//	                 │
+		//	                 ▼
+		//	      SPAFallback (when set) ── missing ──► 404
+		//
+		// servedName is the name the file is served as: it picks the
+		// Content-Type and the offered download name. It is the requested
+		// name, not the name a symlink resolves to.
+		f, info, openErr := openFile(candAbs, rel)
+		servedName := filepath.Base(candAbs)
+		if openErr == nil && info.IsDir() {
+			_ = f.Close()
+			f, info, openErr = nil, nil, errIsDir
+			if opts.Index != "" {
+				f, info, openErr = openFile(filepath.Join(candAbs, opts.Index), filepath.Join(rel, opts.Index))
+				servedName = opts.Index
+				if openErr == nil && info.IsDir() {
+					_ = f.Close()
+					f, info, openErr = nil, nil, errIsDir
+				}
+			}
 		}
 		if openErr != nil {
-			ctx.SetStatus(consts.StatusNotFound)
-			return nil
+			// A link leading out of the root is a refusal, like ".." above,
+			// so it is a 404 whatever the options; every other failure is a
+			// miss, which the SPA fallback answers when there is one.
+			if fallbackAbs == "" || errors.Is(openErr, errStaticEscape) {
+				ctx.SetStatus(consts.StatusNotFound)
+				return nil
+			}
+			f, info, openErr = openFile(fallbackAbs, fallbackRel)
+			if openErr != nil || info.IsDir() {
+				if openErr == nil {
+					_ = f.Close()
+				}
+				ctx.SetStatus(consts.StatusNotFound)
+				return nil
+			}
+			servedName = filepath.Base(fallbackAbs)
 		}
-		info, statErr := f.Stat()
-		if statErr != nil || info.IsDir() {
-			_ = f.Close()
-			ctx.SetStatus(consts.StatusNotFound)
-			return nil
-		}
-		modTime := info.ModTime()
 
-		// Honor If-Modified-Since: reply 304 without reading or resending
-		// the file when the client's cached copy is still current.
-		if notModifiedSince(ctx, modTime) {
-			_ = f.Close()
-			ctx.SetStatus(consts.StatusNotModified)
-			return nil
-		}
-
-		// Sets Content-Type, Last-Modified (so clients can revalidate with
-		// If-Modified-Since) and the download headers where they apply.
-		setFileHeaders(ctx, filepath.Base(candAbs), modTime)
-
-		// Stream the file rather than read it into memory: the response
-		// takes ownership of f and writeResponse copies it to the conn (see
-		// response.bodyStream).
-		return Stream(ctx, f, info.Size())
+		// Validators (ETag, Last-Modified), conditional requests (304,
+		// 412), byte ranges (206, 416), the file headers, and the stream:
+		// the response takes ownership of f and writeResponse copies it to
+		// the conn (see response.bodyStream).
+		return serveFile(ctx, f, info, servedName, opts.CacheControl)
 	}
 
 	if wrap != nil {
 		fileHandler = wrap(fileHandler)
 	}
 	s.Get(route, fileHandler)
+
+	// The wildcard needs at least one character after the prefix, and the
+	// request parser drops a trailing slash, so neither "/docs/" nor
+	// "/docs" reaches the route above. With an index or a fallback there
+	// is something to serve there, so the prefix itself is registered too
+	// (the router answers it with or without the slash). Its wildcard
+	// param is empty, which names the top directory.
+	if opts.Index != "" || opts.SPAFallback != "" {
+		s.Get(prefixRoute, fileHandler)
+	}
 }
 
 // Request performs a synthetic request and returns the response.

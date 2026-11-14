@@ -24,19 +24,21 @@ const ( // HTTP status codes
 	StatusTemporaryRedirect = 307
 	StatusPermanentRedirect = 308
 
-	StatusBadRequest        = 400
-	StatusUnauthorized      = 401
-	StatusPaymentRequired   = 402
-	StatusForbidden         = 403
-	StatusNotFound          = 404
-	StatusMethodNotAllowed  = 405
-	StatusNotAcceptable     = 406
-	StatusProxyAuthRequired = 407
-	StatusRequestTimeout    = 408
-	StatusConflict          = 409
-	StatusGone              = 410
-	StatusExpectationFailed = 417
-	StatusUpgradeRequired   = 426
+	StatusBadRequest          = 400
+	StatusUnauthorized        = 401
+	StatusPaymentRequired     = 402
+	StatusForbidden           = 403
+	StatusNotFound            = 404
+	StatusMethodNotAllowed    = 405
+	StatusNotAcceptable       = 406
+	StatusProxyAuthRequired   = 407
+	StatusRequestTimeout      = 408
+	StatusConflict            = 409
+	StatusGone                = 410
+	StatusPreconditionFailed  = 412
+	StatusRangeNotSatisfiable = 416
+	StatusExpectationFailed   = 417
+	StatusUpgradeRequired     = 426
 
 	StatusRequestHeaderFieldsTooLarge = 431
 
@@ -71,19 +73,21 @@ var StatusTextFromCode = map[int]string{
 	StatusTemporaryRedirect: "Temporary Redirect",
 	StatusPermanentRedirect: "Permanent Redirect",
 
-	StatusBadRequest:        "Bad Request",
-	StatusUnauthorized:      "Unauthorized",
-	StatusPaymentRequired:   "Payment Required",
-	StatusForbidden:         "Forbidden",
-	StatusNotFound:          "Not Found",
-	StatusMethodNotAllowed:  "Method Not Allowed",
-	StatusNotAcceptable:     "Not Acceptable",
-	StatusProxyAuthRequired: "Proxy Authentication Required",
-	StatusRequestTimeout:    "Request Timeout",
-	StatusConflict:          "Conflict",
-	StatusGone:              "Gone",
-	StatusExpectationFailed: "Expectation Failed",
-	StatusUpgradeRequired:   "Upgrade Required",
+	StatusBadRequest:          "Bad Request",
+	StatusUnauthorized:        "Unauthorized",
+	StatusPaymentRequired:     "Payment Required",
+	StatusForbidden:           "Forbidden",
+	StatusNotFound:            "Not Found",
+	StatusMethodNotAllowed:    "Method Not Allowed",
+	StatusNotAcceptable:       "Not Acceptable",
+	StatusProxyAuthRequired:   "Proxy Authentication Required",
+	StatusRequestTimeout:      "Request Timeout",
+	StatusConflict:            "Conflict",
+	StatusGone:                "Gone",
+	StatusPreconditionFailed:  "Precondition Failed",
+	StatusRangeNotSatisfiable: "Range Not Satisfiable", // RFC 9110 name; Go's http.StatusText says "Requested Range Not Satisfiable"
+	StatusExpectationFailed:   "Expectation Failed",
+	StatusUpgradeRequired:     "Upgrade Required",
 
 	StatusRequestHeaderFieldsTooLarge: "Request Header Fields Too Large",
 

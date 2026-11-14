@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,10 +183,23 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 	case ".otf":
 		mimeType = "font/otf"
 
-	// Default to binary
+	// Anything else: ask the mime package, which knows Go's built-in table
+	// and, on Unix, the system's mime.types files (/etc/mime.types and
+	// friends), before falling back to a forced download. A type it knows
+	// is served inline, and the browser decides whether to show or save it
+	// (it saves what it cannot show). The type is used as returned: Go adds
+	// "; charset=utf-8" to the text types of its own table, and a system
+	// file's text type comes without one, as the file's encoding is not
+	// known. The answer can differ between machines, a slim container image
+	// often having no mime.types at all; a type an app depends on belongs
+	// in the switch above, or in a mime.AddExtensionType call at startup.
 	default:
-		mimeType = consts.MIMEOctetStream
-		isDownloadable = true
+		if t := mime.TypeByExtension(ext); t != "" && !strings.HasPrefix(t, consts.MIMEOctetStream) {
+			mimeType = t
+		} else {
+			mimeType = consts.MIMEOctetStream
+			isDownloadable = true
+		}
 	}
 
 	// Set Content-Type header with charset for text-based content
@@ -212,11 +225,12 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 		ctx.Response().SetHeader(consts.HeaderLastModified, modTime.UTC().Format(http.TimeFormat))
 	}
 
-	// For downloadable files, add additional headers to prompt download
+	// For downloadable files, add additional headers to prompt download.
+	// The name is encoded for each header's reader: see contentDisposition
+	// and headerFileName (file_serve.go).
 	if isDownloadable {
-		ctx.Response().SetHeader(consts.HeaderContentDisposition,
-			"attachment; filename="+url.QueryEscape(filename))
-		ctx.Response().SetHeader("x-filename", url.QueryEscape(filename))
+		ctx.Response().SetHeader(consts.HeaderContentDisposition, contentDisposition(filename))
+		ctx.Response().SetHeader("x-filename", headerFileName(filename))
 		// These headers help ensure proper download behavior across browsers
 		ctx.Response().SetHeader("Content-Description", "File Transfer")
 		ctx.Response().SetHeader("Content-Transfer-Encoding", "binary")
@@ -315,11 +329,19 @@ func Stream(ctx Context, r io.Reader, size int64) error {
 }
 
 // SendFile streams the file at path as the response, with headers chosen
-// by its extension as in File, Last-Modified from the file, and a 304 for
-// a client whose cached copy is still current. The file is never read
-// into memory: it is copied to the connection after the handler returns,
-// by sendfile(2) on plain TCP (see Stream). Downloadable types are offered
-// under the file's base name; use SendFileAs to choose another.
+// by its extension as in File, and Last-Modified and an ETag from the
+// file. It answers conditional and range requests as a static file route
+// does: 304 for a client whose cached copy is still current
+// (If-None-Match, If-Modified-Since), 412 for a failed If-Match or
+// If-Unmodified-Since, and 206 with one span of the file for a GET with a
+// single byte range (416 when the range starts past the end), so a video
+// can be seeked and a download resumed. See serveFile (file_serve.go).
+//
+// The file is never read into memory: it is copied to the connection
+// after the handler returns, by sendfile(2) on plain TCP (see Stream).
+// Downloadable types are offered under the file's base name; use
+// SendFileAs to choose another. To add a Cache-Control header, set it
+// after the call: download types get "must-revalidate" from SendFile.
 //
 // A missing file, or a directory, is returned as an error that matches
 // os.ErrNotExist, for the handler to turn into a 404 if it likes.
@@ -349,14 +371,8 @@ func SendFileAs(ctx Context, path, name string) error {
 		return &os.PathError{Op: "send", Path: path, Err: errIsDir}
 	}
 
-	if notModifiedSince(ctx, info.ModTime()) {
-		_ = f.Close()
-		ctx.SetStatus(consts.StatusNotModified)
-		return nil
-	}
-
-	setFileHeaders(ctx, name, info.ModTime())
-	return Stream(ctx, f, info.Size())
+	// Validators, conditional requests and ranges, then the stream.
+	return serveFile(ctx, f, info, name, "")
 }
 
 // errIsDir is what SendFile reports for a directory. It wraps

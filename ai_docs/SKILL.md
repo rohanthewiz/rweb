@@ -296,6 +296,7 @@ rweb.CSS(ctx, "body { color: red; }")
 rweb.File(ctx, "filename.txt", fileBytes)
 
 // Large file from disk -- streamed, never read into memory
+// (ETag, 304/412, and single byte ranges -> 206/416, as static files; see Static Files)
 rweb.SendFile(ctx, "/data/report.pdf")
 rweb.SendFileAs(ctx, "/tmp/dump-8341.bin", "db.dump") // choose the download name
 
@@ -568,7 +569,22 @@ routes bare, without the group's middleware.
 - The directory does not have to exist at registration: requests 404 until the files
   appear, then are served with no restart.
 - Both methods apply global middleware, reject `..` (plain or percent-encoded) and NUL,
-  refuse directories, and honor `If-Modified-Since` with a 304.
+  and refuse directories (unless `StaticOptions.Index` is set, below).
+- Caching and ranges (v0.2.1+), shared with `SendFile`/`SendFileAs`: every file response
+  carries `ETag` (strong, from mod time and size), `Last-Modified` and
+  `Accept-Ranges: bytes`. `If-None-Match` (ahead of `If-Modified-Since`) gives 304,
+  `If-Match`/`If-Unmodified-Since` give 412, and a GET with one byte range
+  (`bytes=a-b`, `a-`, `-n`) gives 206 with `Content-Range`, or 416 when it starts past the
+  end; `If-Range` with a stale validator gets the whole file. A list of ranges, another
+  unit or a malformed range is ignored (200, whole file). Spans still go out by sendfile.
+- Middleware that rewrites a file's body should leave a 206 alone and weaken or drop the
+  file's `ETag` (as `middleware/critical` does): the tag describes the file on disk.
+- Types: an extension not in rweb's own table is looked up with `mime.TypeByExtension`
+  (Go's table plus the system's `mime.types`) before falling back to an
+  `application/octet-stream` download, so the answer can differ between machines.
+- Download names are encoded properly (v0.2.1+): `attachment; filename="Q3 report.zip"`,
+  and a non-ASCII name also as `filename*=utf-8''...`. `x-filename` is
+  `encodeURIComponent`-style (`%20` for a space, not `+`).
 - Files are streamed from disk, not read into memory (`sendfile` on plain TCP), and a HEAD
   never reads the file. Middleware that calls `ctx.Response().Body()`, `SetBody` or writes
   after `ctx.Next()` still sees the file's bytes: touching the body loads it, for that
@@ -584,6 +600,41 @@ routes bare, without the group's middleware.
 s := rweb.NewServer(rweb.ServerOptions{Address: ":8080", StaticContainSymlinks: true})
 // or: rweb.NewServerWithOptions(rweb.WithAddress(":8080"), rweb.WithStaticContainSymlinks())
 ```
+
+### Static Options: Cache-Control, Index, SPA Fallback (v0.2.1+)
+
+`StaticFilesWithOptions` and `StaticFilesAbsWithOptions` (on `Server` and `Group`) take a
+`StaticOptions`; its zero value is plain `StaticFiles`.
+
+```go
+// A single-page app at the site root ("/" can be mounted since v0.2.1) ...
+s.StaticFilesWithOptions("/", "dist", 0, rweb.StaticOptions{
+    Index:        "index.html", // served for a directory, and for "/" itself
+    SPAFallback:  "index.html", // served (200) for any path that names no file
+    CacheControl: "no-cache",   // revalidate the shell page on each visit (cheap: ETag)
+})
+// ... with fingerprinted assets on their own route, cached for a year. The more
+// specific route wins, and a missing asset there is a real 404.
+s.StaticFilesWithOptions("/assets/", "dist/assets", 1, rweb.StaticOptions{
+    CacheControl: "public, max-age=31536000, immutable",
+})
+```
+
+- `CacheControl` is sent on 200, 206 and 304, replacing the `must-revalidate` download
+  types otherwise get.
+- `Index` must be a plain file name. With `Index` or `SPAFallback` set, the route's prefix
+  itself is registered too (`/docs` and `/docs/` serve the top directory's index); a route
+  of yours at exactly that path, registered later, replaces it.
+- No redirect adds a trailing slash to a directory URL: rweb drops trailing slashes from
+  request paths (unless `URLOptions.KeepTrailingSlashes`), so `/docs/guide` and
+  `/docs/guide/` look the same to the server. Use root-relative links in index pages.
+- `SPAFallback` is a path relative to the directory the route serves. Every miss gets it,
+  a missing `logo.png` included; requests refused for safety (`..`, a bad escape, a link
+  out of the root under `StaticContainSymlinks`) still 404.
+- A root mount is a GET catch-all: its 404s are its own (the not-found hook does not see
+  them), and a POST to an unknown path gets 405.
+- An invalid `Index` or `SPAFallback` is refused at registration (a message is printed and
+  no route is added).
 
 ## File Uploads
 

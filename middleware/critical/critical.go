@@ -16,7 +16,8 @@
 //	}))
 //
 // Handlers just render full HTML pages (element pairs naturally); responses
-// whose Content-Type is not text/html, or with a non-2xx status, pass
+// whose Content-Type is not text/html, with a non-2xx status, or a 206 (a
+// byte range of a static file, which has no <head> to inline into) pass
 // through untouched. Names that only appear after client-side script runs
 // (toggled classes, htmx swaps) must be listed in Options.Safelist or their
 // rules are pruned away.
@@ -42,7 +43,7 @@ func Middleware(opts stylcrit.Options) func(rweb.Context) error {
 			return err
 		}
 		res := ctx.Response()
-		if st := res.Status(); st < 200 || st > 299 {
+		if st := res.Status(); st < 200 || st > 299 || st == 206 {
 			return nil
 		}
 		if !strings.Contains(res.Header("Content-Type"), "text/html") {
@@ -57,6 +58,22 @@ func Middleware(opts stylcrit.Options) func(rweb.Context) error {
 			return serr.Wrap(err, "critical CSS middleware")
 		}
 		res.SetBody([]byte(out))
+
+		// A static file (StaticFiles, SendFile) arrives with a strong ETag
+		// and Accept-Ranges: bytes, both describing the file on disk, not
+		// this rewritten page. Left as they are, a client resuming a
+		// download with If-Range would get a span of the file to splice
+		// onto bytes of the page. A weak tag never satisfies If-Range, yet
+		// still lets If-None-Match revalidate (as Last-Modified already
+		// did: a page whose stylesheet changed but whose file did not is
+		// then served stale from cache, as before); and "none" tells the
+		// client not to ask for ranges.
+		if et := res.Header("ETag"); et != "" && !strings.HasPrefix(et, "W/") {
+			res.SetHeader("ETag", "W/"+et)
+		}
+		if res.Header("Accept-Ranges") != "" {
+			res.SetHeader("Accept-Ranges", "none")
+		}
 		return nil
 	}
 }

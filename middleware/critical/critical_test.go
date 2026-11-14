@@ -2,6 +2,8 @@ package critical
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -126,5 +128,35 @@ func TestCompileErrorFailsLoudly(t *testing.T) {
 	res := s.Request(http.MethodGet, "/", nil, nil)
 	if res.Status() != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 (body %q)", res.Status(), res.Body())
+	}
+}
+
+// A static HTML file: the whole page is rewritten and its file validators
+// adjusted, while a byte range of it (206) passes through untouched, since
+// a fragment has no <head> to inline into.
+func TestStaticFileRangeAndValidators(t *testing.T) {
+	dir := t.TempDir()
+	page := renderPage()
+	if err := os.WriteFile(filepath.Join(dir, "page.html"), []byte(page), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := rweb.NewServer(rweb.ServerOptions{Address: ":0"})
+	s.Use(Middleware(stylcrit.Options{Path: "app.styl", FS: testFS}))
+	s.StaticFilesAbs("/s/", dir, 1)
+
+	full := s.Request(http.MethodGet, "/s/page.html", nil, nil)
+	if !strings.Contains(string(full.Body()), "<style>") {
+		t.Fatalf("whole page not rewritten:\n%s", full.Body())
+	}
+	if et := full.Header("ETag"); !strings.HasPrefix(et, `W/"`) {
+		t.Errorf("rewritten page ETag = %q, want the file's tag made weak", et)
+	}
+	if ar := full.Header("Accept-Ranges"); ar != "none" {
+		t.Errorf("rewritten page Accept-Ranges = %q, want none", ar)
+	}
+
+	part := s.Request(http.MethodGet, "/s/page.html", []rweb.Header{{Key: "Range", Value: "bytes=0-9"}}, nil)
+	if part.Status() != http.StatusPartialContent || string(part.Body()) != page[:10] {
+		t.Errorf("range = %d %q, want 206 %q untouched", part.Status(), part.Body(), page[:10])
 	}
 }

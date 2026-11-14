@@ -124,7 +124,8 @@ func main() {
 
 	// Large files and generated downloads are streamed, never held in memory.
 	// SendFile/SendFileAs stream a file from disk (sendfile(2) on plain TCP) with
-	// headers by extension, Last-Modified and If-Modified-Since -> 304.
+	// headers by extension, ETag and Last-Modified (If-None-Match / If-Modified-Since -> 304),
+	// and single byte ranges (Range -> 206), so downloads resume and videos seek.
 	s.Get("/backup", func(ctx rweb.Context) error {
 		return rweb.SendFileAs(ctx, "/var/backups/tmp-8341.dump", "db.dump")
 	})
@@ -156,6 +157,15 @@ func main() {
 	// To serve a directory by its absolute path, e.g. one under the user's home, use StaticFilesAbs.
 	// e.g. http://localhost:8080/editor/vs/loader.js -> /Users/me/.cache/app/editor/vs/loader.js
 	s.StaticFilesAbs("/editor/", "/Users/me/.cache/app/editor", 1)
+
+	// Static routes answer ETag/Last-Modified revalidation (304) and byte ranges (206).
+	// StaticFilesWithOptions adds a Cache-Control header, an index file for directories,
+	// and a fallback file for a single-page app's client-side routes. "/" mounts at the root.
+	s.StaticFilesWithOptions("/app/", "dist", 1, rweb.StaticOptions{
+		Index:        "index.html",
+		SPAFallback:  "index.html", // /app/users/42 -> dist/index.html (200)
+		CacheControl: "no-cache",
+	})
 
 	// File upload
 	s.Post("/upload", func(c rweb.Context) error {

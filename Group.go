@@ -98,14 +98,28 @@ func (g *Group) Trace(path string, handler Handler) {
 // nbrOfTokensToStrip removes URL path segments when mapping to filesystem paths.
 func (g *Group) StaticFiles(reqDir string, targetDir string, nbrOfTokensToStrip int) {
 	fullPath := path.Join(g.prefix, reqDir)
-	g.server.staticFiles(fullPath, targetDir, nbrOfTokensToStrip, false, g.wrap)
+	g.server.staticFiles(fullPath, targetDir, nbrOfTokensToStrip, false, StaticOptions{}, g.wrap)
+}
+
+// StaticFilesWithOptions is StaticFiles with StaticOptions (Cache-Control,
+// an index file, an SPA fallback). See Server.StaticFilesWithOptions.
+func (g *Group) StaticFilesWithOptions(reqDir string, targetDir string, nbrOfTokensToStrip int, opts StaticOptions) {
+	fullPath := path.Join(g.prefix, reqDir)
+	g.server.staticFiles(fullPath, targetDir, nbrOfTokensToStrip, false, opts, g.wrap)
 }
 
 // StaticFilesAbs is StaticFiles for a targetDir given as an absolute
 // filesystem path. See Server.StaticFilesAbs for why it is a separate method.
 func (g *Group) StaticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int) {
 	fullPath := path.Join(g.prefix, reqDir)
-	g.server.staticFilesAbs(fullPath, targetDir, nbrOfTokensToStrip, g.wrap)
+	g.server.staticFilesAbs(fullPath, targetDir, nbrOfTokensToStrip, StaticOptions{}, g.wrap)
+}
+
+// StaticFilesAbsWithOptions is StaticFilesAbs with StaticOptions. See
+// Server.StaticFilesWithOptions.
+func (g *Group) StaticFilesAbsWithOptions(reqDir string, targetDir string, nbrOfTokensToStrip int, opts StaticOptions) {
+	fullPath := path.Join(g.prefix, reqDir)
+	g.server.staticFilesAbs(fullPath, targetDir, nbrOfTokensToStrip, opts, g.wrap)
 }
 
 // Proxy sets up a reverse proxy with the group prefix.
