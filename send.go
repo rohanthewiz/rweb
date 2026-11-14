@@ -14,21 +14,27 @@ import (
 	"github.com/rohanthewiz/rweb/consts"
 )
 
-// CSS sends the body with the content type set to `text/css`.
+// The text helpers below (CSS, CSV, HTML, JS, Text) state charset=utf-8, as
+// setFileHeaders does for the same types served from disk: the body is a Go
+// string, so UTF-8, and a text/* type without a charset leaves the client to
+// guess (see consts.MIMEHTMLUTF8). JSON and XML stay bare; consts/mime.go
+// says why.
+
+// CSS sends the body with the content type set to `text/css; charset=utf-8`.
 func CSS(ctx Context, body string) error {
-	ctx.Response().SetHeader("Content-Type", "text/css")
+	ctx.Response().SetHeader("Content-Type", consts.MIMECSSUTF8)
 	return ctx.WriteString(body)
 }
 
-// CSV sends the body with the content type set to `text/csv`.
+// CSV sends the body with the content type set to `text/csv; charset=utf-8`.
 func CSV(ctx Context, body string) error {
-	ctx.Response().SetHeader("Content-Type", "text/csv")
+	ctx.Response().SetHeader("Content-Type", consts.MIMECSVUTF8)
 	return ctx.WriteString(body)
 }
 
-// HTML sends the body with the content type set to `text/html`.
+// HTML sends the body with the content type set to `text/html; charset=utf-8`.
 func HTML(ctx Context, body string) error {
-	ctx.Response().SetHeader("Content-Type", "text/html")
+	ctx.Response().SetHeader("Content-Type", consts.MIMEHTMLUTF8)
 	return ctx.WriteString(body)
 }
 
@@ -50,11 +56,11 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 		mimeType = consts.MIMEHTML
 		isTextBased = true
 	case ".css":
-		mimeType = "text/css"
+		mimeType = consts.MIMECSS
 		isTextBased = true
 	case ".js", ".mjs":
 		// .mjs is the standard extension for ES modules; both share the JS MIME type per RFC 9239
-		mimeType = "text/javascript"
+		mimeType = consts.MIMEJavaScript
 		isTextBased = true
 	case ".json":
 		mimeType = consts.MIMEJSON
@@ -78,7 +84,7 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 		mimeType = consts.MIMETextPlain
 		isTextBased = true
 	case ".csv":
-		mimeType = "text/csv"
+		mimeType = consts.MIMECSV
 		isTextBased = true
 
 	// Image formats (viewable in browser)
@@ -185,7 +191,7 @@ func setFileHeaders(ctx Context, filename string, modTime time.Time) {
 
 	// Set Content-Type header with charset for text-based content
 	if isTextBased {
-		ctx.Response().SetHeader(consts.HeaderContentType, mimeType+"; charset=utf-8")
+		ctx.Response().SetHeader(consts.HeaderContentType, mimeType+"; "+consts.CharsetUTF8)
 	} else {
 		ctx.Response().SetHeader(consts.HeaderContentType, mimeType)
 	}
@@ -373,9 +379,9 @@ func notModifiedSince(ctx Context, modTime time.Time) bool {
 	return err == nil && !modTime.Truncate(time.Second).After(t)
 }
 
-// JS sends the body with the content type set to `text/javascript`.
+// JS sends the body with the content type set to `text/javascript; charset=utf-8`.
 func JS(ctx Context, body string) error {
-	ctx.Response().SetHeader("Content-Type", "text/javascript")
+	ctx.Response().SetHeader("Content-Type", consts.MIMEJavaScriptUTF8)
 	return ctx.WriteString(body)
 }
 
@@ -385,9 +391,9 @@ func JSON(ctx Context, object any) error {
 	return json.NewEncoder(ctx.Response()).Encode(object)
 }
 
-// Text sends the body with the content type set to `text/plain`.
+// Text sends the body with the content type set to `text/plain; charset=utf-8`.
 func Text(ctx Context, body string) error {
-	ctx.Response().SetHeader("Content-Type", "text/plain")
+	ctx.Response().SetHeader("Content-Type", consts.MIMETextPlainUTF8)
 	return ctx.WriteString(body)
 }
 

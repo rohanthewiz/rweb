@@ -70,19 +70,19 @@ type Context interface {
 	WriteJSON(interface{}) error
 
 	// WriteHTML writes HTML content to the response with
-	// the text/html content-type header.
+	// the "text/html; charset=utf-8" content-type header.
 	WriteHTML(string) error
 
 	// WriteText writes plain text to the response with
-	// the text/plain content-type header.
+	// the "text/plain; charset=utf-8" content-type header.
 	WriteText(string) error
 
 	// WriteHTMLBytes writes HTML content from bytes to the response with
-	// the text/html content-type header.
+	// the "text/html; charset=utf-8" content-type header.
 	WriteHTMLBytes([]byte) error
 
 	// WriteTextBytes writes plain text from bytes to the response with
-	// the text/plain content-type header.
+	// the "text/plain; charset=utf-8" content-type header.
 	WriteTextBytes([]byte) error
 
 	// SetSSE configures Server-Sent Events for real-time data streaming.

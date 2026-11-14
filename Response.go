@@ -297,27 +297,36 @@ func (res *response) WriteJSON(obj any) (int, error) {
 }
 
 // WriteHTML writes the given HTML to the response body
-// also setting the content type to text/html.
+// also setting the content type to "text/html; charset=utf-8".
+//
+// The charset is stated because a Go string holds UTF-8, and without it a
+// browser guesses (see consts.MIMEHTMLUTF8). A handler sending another
+// encoding sets Content-Type itself and writes with Write or WriteString,
+// which leave the header alone; calling WriteHTML after such a SetHeader
+// would replace it.
 func (res *response) WriteHTML(body string) (int, error) {
-	return res.writeResponse(body, consts.MIMEHTML)
+	return res.writeResponse(body, consts.MIMEHTMLUTF8)
 }
 
 // WriteText writes the given text to the response body
-// also setting the content type to text/plain.
+// also setting the content type to "text/plain; charset=utf-8".
+// See WriteHTML for why the charset is sent and how to send another.
 func (res *response) WriteText(body string) (int, error) {
-	return res.writeResponse(body, consts.MIMETextPlain)
+	return res.writeResponse(body, consts.MIMETextPlainUTF8)
 }
 
 // WriteHTMLBytes writes the given HTML bytes to the response body
-// also setting the content type to text/html.
+// also setting the content type to "text/html; charset=utf-8".
+// The bytes are taken to be UTF-8; see WriteHTML for other encodings.
 func (res *response) WriteHTMLBytes(body []byte) (int, error) {
-	return res.writeResponseBytes(body, consts.MIMEHTML)
+	return res.writeResponseBytes(body, consts.MIMEHTMLUTF8)
 }
 
 // WriteTextBytes writes the given text bytes to the response body
-// also setting the content type to text/plain.
+// also setting the content type to "text/plain; charset=utf-8".
+// The bytes are taken to be UTF-8; see WriteHTML for other encodings.
 func (res *response) WriteTextBytes(body []byte) (int, error) {
-	return res.writeResponseBytes(body, consts.MIMETextPlain)
+	return res.writeResponseBytes(body, consts.MIMETextPlainUTF8)
 }
 
 // writeResponse writes the given body and sets the content type header

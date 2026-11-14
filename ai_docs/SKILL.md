@@ -329,6 +329,15 @@ of sending a second line. `SetHeader` replaces every value under the name (inclu
 added with `AddHeader`, in any case) and the name is sent as spelled in the last `SetHeader`.
 `AddHeader` still appends, for headers that repeat, like `Set-Cookie`.
 
+The text helpers state UTF-8 (v0.2.1+): `WriteHTML`/`WriteHTMLBytes` and `rweb.HTML` send
+`text/html; charset=utf-8`, `WriteText`/`WriteTextBytes` and `rweb.Text` send
+`text/plain; charset=utf-8`, and `rweb.CSS`, `rweb.JS` and `rweb.CSV` do the same for their
+types (constants `consts.MIMEHTMLUTF8`, `MIMETextPlainUTF8`, ...). The header outranks a
+`<meta charset>` in the page. `WriteJSON`, `rweb.JSON` and `rweb.XML` stay bare (JSON is UTF-8
+by definition; XML declares its own encoding). To send another encoding, set `Content-Type`
+yourself and write with `WriteString`/`Write`, which leave it alone; a later `WriteHTML`
+would replace it. Compare a Content-Type with `mime.ParseMediaType`, not `==`.
+
 A 1xx, 204 or 304 response is sent as its status line and headers only: no
 `Content-Length`, no `Transfer-Encoding`, and no body. Anything the handler
 wrote, or a pending `rweb.Stream`, is dropped (the stream is closed unread), and

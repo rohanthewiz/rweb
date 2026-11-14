@@ -106,7 +106,7 @@ func main() {
 	})
 
 	// HTML response example
-	// WriteHTML automatically sets Content-Type: text/html
+	// WriteHTML automatically sets Content-Type: text/html; charset=utf-8
 	// Test with: curl http://localhost:8080/home
 	s.Get("/home", func(ctx rweb.Context) error {
 		return ctx.WriteHTML("<h1>Welcome home</h1>")

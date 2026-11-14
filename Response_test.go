@@ -109,7 +109,7 @@ func TestWriteHTMLBytes(t *testing.T) {
 
 	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
-	assert.Equal(t, response.Header("Content-Type"), consts.MIMEHTML)
+	assert.Equal(t, response.Header("Content-Type"), consts.MIMEHTMLUTF8)
 	assert.Equal(t, string(response.Body()), "<h1>Hello</h1>")
 }
 
@@ -122,6 +122,6 @@ func TestWriteTextBytes(t *testing.T) {
 
 	response := s.Request(consts.MethodGet, "/", nil, nil)
 	assert.Equal(t, response.Status(), 200)
-	assert.Equal(t, response.Header("Content-Type"), consts.MIMETextPlain)
+	assert.Equal(t, response.Header("Content-Type"), consts.MIMETextPlainUTF8)
 	assert.Equal(t, string(response.Body()), "Hello, World!")
 }
