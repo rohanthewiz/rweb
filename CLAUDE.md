@@ -57,7 +57,7 @@ curl http://localhost:8080/some-json
 1. **Handler Signature**: All handlers follow `func(ctx rweb.Context) error`
 2. **Middleware Pattern**: Use `ctx.Next()` to pass control to next middleware
 3. **Context Interface**: Central abstraction for request/response operations
-4. **Route Parameters**: Access via `ctx.Request().Param("name")`
+4. **Route Parameters**: Access via `ctx.Request().Param("name")`. Values are percent-decoded exactly once, in `request.addParameter` (bad escapes kept raw); the router matches the raw path and `Path()` stays raw. Never decode a param again (StaticFiles relies on this: it validates the raw path for bad escapes and runs its traversal checks on the decoded param)
 5. **Context Data Storage**: Store request-scoped data via `ctx.Set()`, `ctx.Get()`, `ctx.Has()`, `ctx.Delete()`
 
 ### Important Features

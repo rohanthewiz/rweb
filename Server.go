@@ -1346,16 +1346,32 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 
 	// We use the wildcard parameter in the route here
 	var fileHandler Handler = func(ctx Context) error {
-		// Build the actual filepath now
-		wildcardPath := ctx.Request().Param("path")
+		// Build the actual filepath now. The param is already percent-decoded
+		// (request.addParameter); it must not be decoded again here, or
+		// "%2520" would name the file "a b" rather than "a%20b", and
+		// "%252e%252e" would become "..".
+		decoded := ctx.Request().Param("path")
 
-		// Defensive: percent-decode and reject any traversal-bearing input before
-		// touching the filesystem. `filepath.Join` *normalizes* `..` segments
-		// rather than rejecting them, so a request like /static/../../etc/passwd
+		// addParameter keeps a value that does not decode raw. This handler
+		// has always refused such a path (404), and a raw "%zz" must not be
+		// served as a file literally named that, so check the request path,
+		// which is undecoded. Only paths holding a "%" pay for the check.
+		// The whole path rather than just the wildcard part: the rest is the
+		// route's literal prefix, so the two fail alike.
+		if rawPath := ctx.Request().Path(); strings.IndexByte(rawPath, '%') >= 0 {
+			if _, err := url.PathUnescape(rawPath); err != nil {
+				ctx.SetStatus(consts.StatusNotFound)
+				return nil
+			}
+		}
+
+		// Defensive: reject any traversal-bearing input before touching the
+		// filesystem. The checks run on the decoded value, so "%2e%2e" is
+		// caught as "..". `filepath.Join` *normalizes* `..` segments rather
+		// than rejecting them, so a request like /static/../../etc/passwd
 		// would otherwise resolve outside `targetDir`. We refuse such requests
 		// with 404 (rather than 403) so we don't leak whether off-root targets exist.
-		decoded, decErr := url.PathUnescape(wildcardPath)
-		if decErr != nil || strings.ContainsRune(decoded, 0) ||
+		if strings.ContainsRune(decoded, 0) ||
 			slices.Contains(strings.Split(decoded, "/"), "..") {
 			ctx.SetStatus(consts.StatusNotFound)
 			return nil

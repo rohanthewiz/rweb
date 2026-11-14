@@ -410,6 +410,13 @@ func TestStaticFilesPathTraversal(t *testing.T) {
 		// Absolute-path injection (rare but possible if a router decoded the
 		// wildcard into a path that begins with `/`).
 		"/static/%2fetc/passwd",
+		// Double encoding: path params are decoded exactly once, so these
+		// reach the handler as the literal "%2e%2e" (no such directory),
+		// never as "..".
+		"/static/%252e%252e/secret.txt",
+		"/static/%252E%252E%252Fsecret.txt",
+		// An escape that does not decode is refused, not served raw.
+		"/static/%zz/../secret.txt",
 	}
 	for _, url := range traversals {
 		r := s.Request(consts.MethodGet, url, nil, nil)

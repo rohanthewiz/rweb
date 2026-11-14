@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"mime"
 	"mime/multipart"
+	"net/url"
 	"strings"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -305,8 +306,31 @@ func (req *request) Scheme() string {
 	return req.scheme
 }
 
-// addParameter adds a new parameter to the request.
+// addParameter adds a new parameter to the request, percent-decoded.
+//
+// The router matches on the raw path (Request().Path() stays undecoded), so
+// a value arrives here as it was on the wire: "/greet/John%20Doe" gives
+// "John%20Doe". It is decoded here, once, so Param returns "John Doe", as
+// QueryParam already returns decoded values. This is the only place a param
+// is decoded: StaticFiles, which used to decode its *path itself, now takes
+// the value as given, so "%2520" reaches it as "%20" and never as " ".
+//
+// url.PathUnescape, not QueryUnescape: "+" means a space only in a query, and
+// stays "+" in a path. Decoding happens per segment value, after matching, so
+// "%2F" in a :param gives a "/" in the value without changing which route
+// matched; likewise "%2e%2e" gives "..". Handlers that build file paths from
+// a param must check the decoded value for both, as StaticFiles does.
+//
+// A value that does not decode (a stray "%", "%zz") is kept raw rather than
+// failing the request: it matched a route, and the handler can still see
+// exactly what was sent. The IndexByte check keeps the common case, a value
+// with no escapes, free of the decode call and its allocation.
 func (req *request) addParameter(key string, value string) {
+	if strings.IndexByte(value, '%') >= 0 {
+		if decoded, err := url.PathUnescape(value); err == nil {
+			value = decoded
+		}
+	}
 	req.params = append(req.params, rtr.Parameter{
 		Key:   key,
 		Value: value,

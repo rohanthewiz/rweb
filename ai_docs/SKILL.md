@@ -207,6 +207,14 @@ s.Get("/orgs/:org/repos/:repo", func(ctx rweb.Context) error {
 })
 ```
 
+Parameter values are percent-decoded, once: `/greet/John%20Doe` gives
+`"John Doe"`, `%2520` gives `"%20"`, and `+` stays `+` (it means a space
+only in a query). A value with a bad escape (`50%`, `%zz`) is kept as sent.
+`ctx.Request().Path()` stays undecoded. Don't decode a param again yourself:
+v0.2.0 and earlier did not decode them, so code that did must drop its own
+`url.PathUnescape`. A decoded value can contain `/` (from `%2F`) and `..`
+(from `%2e%2e`), so check it before building a file path from it.
+
 ### Fixed vs Parameterized Routes
 
 Fixed routes take precedence over parameterized ones when there's an exact match:
