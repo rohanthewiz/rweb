@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"slices"
+	"strings"
 
 	"github.com/rohanthewiz/rweb/consts"
 )
@@ -16,7 +17,11 @@ type Response interface {
 	io.Writer
 	io.StringWriter
 	Body() []byte
+	// Header returns the first value set for the header name, matched
+	// case-insensitively ("content-type" finds "Content-Type").
 	Header(string) string
+	// SetHeader sets a header, replacing every value already set under the
+	// same name, matched case-insensitively.
 	SetHeader(key string, value string)
 	// AddHeader appends a header without replacing existing values for the
 	// same key — required for headers that legally repeat, like Set-Cookie.
@@ -145,14 +150,27 @@ func streamName(r io.Reader) string {
 	return fmt.Sprintf("%T", r)
 }
 
-// Header returns the header value for the given key.
+// Header returns the value of the first header named key, compared
+// case-insensitively, as header names are (RFC 9110 §5.1).
 func (res *response) Header(key string) (value string) {
 	for _, header := range res.headers {
-		if header.Key == key {
+		if headerKeyEqual(header.Key, key) {
 			return header.Value
 		}
 	}
 	return
+}
+
+// headerKeyEqual reports whether two header names are the same name.
+//
+// Names are compared case-insensitively. The length check comes first: a
+// stored name is an RFC 9110 token (acceptHeaderKey), so pure ASCII, and two
+// ASCII names that differ in length cannot be equal. It also rejects most
+// mismatches before EqualFold's per-byte loop, and stops EqualFold's Unicode
+// folding from matching a non-ASCII lookup key to an ASCII name (the Kelvin
+// sign U+212A folds to "k", but is three bytes long).
+func headerKeyEqual(a, b string) bool {
+	return len(a) == len(b) && strings.EqualFold(a, b)
 }
 
 // SetHeader sets a header
@@ -170,18 +188,46 @@ func (res *response) Header(key string) (value string) {
 //   - A key that is not an RFC 9110 token is dropped, with a log line. A bad
 //     key is a programming error rather than client input, but there is no
 //     safe way to send it, and no error result to report it through.
+//
+// Names match case-insensitively (headerKeyEqual), so
+// SetHeader("content-type", ...) after WriteJSON replaces the Content-Type
+// WriteJSON set rather than sending a second one. The replaced entry takes
+// the new call's spelling of the name, so the last writer decides how it
+// is sent, as it decides the value.
+//
+// "Set" replaces every value under the name, as net/http's Header.Set does:
+// after AddHeader("X-A", "1"), AddHeader("x-a", "2"), a SetHeader("X-A", "3")
+// leaves the one line "X-A: 3". The first match keeps its position (header
+// order on the wire stays stable) and later ones are removed in place, with
+// no allocation. Most calls find no match or one, so the compaction loop
+// rarely does any work.
 func (res *response) SetHeader(key string, value string) {
 	if !acceptHeaderKey(key) {
 		return
 	}
 	value = sanitizeHeaderValue(value)
-	for i, header := range res.headers {
-		if header.Key == key {
-			res.headers[i].Value = value
-			return
+
+	found := false
+	kept := res.headers[:0]
+	for _, header := range res.headers {
+		if headerKeyEqual(header.Key, key) {
+			if found {
+				continue // a later duplicate: drop it
+			}
+			found = true
+			header = Header{Key: key, Value: value}
 		}
+		kept = append(kept, header)
 	}
-	res.headers = append(res.headers, Header{Key: key, Value: value})
+	if !found {
+		res.headers = append(res.headers, Header{Key: key, Value: value})
+		return
+	}
+	// Zero the tail left behind by dropped duplicates, so the backing array
+	// does not hold their strings past len (Clean relies on the same). With
+	// a match nothing was appended, so kept is never longer than headers.
+	clear(res.headers[len(kept):])
+	res.headers = kept
 }
 
 // AddHeader adds a header (allows multiple values for the same key, like Set-Cookie)

@@ -323,6 +323,12 @@ is dropped with a log line. `Header()` returns the value as it will be sent. Thi
 `ctx.Redirect(302, ctx.Request().QueryParam("to"))` safe as an open redirect; validate the
 target yourself.
 
+Response header names are case-insensitive (v0.2.1+): `Header("content-type")` finds
+`Content-Type`, and `SetHeader("content-type", ...)` replaces the one `WriteJSON` set instead
+of sending a second line. `SetHeader` replaces every value under the name (including ones
+added with `AddHeader`, in any case) and the name is sent as spelled in the last `SetHeader`.
+`AddHeader` still appends, for headers that repeat, like `Set-Cookie`.
+
 A 1xx, 204 or 304 response is sent as its status line and headers only: no
 `Content-Length`, no `Transfer-Encoding`, and no body. Anything the handler
 wrote, or a pending `rweb.Stream`, is dropped (the stream is closed unread), and
