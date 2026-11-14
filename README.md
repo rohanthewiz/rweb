@@ -204,6 +204,12 @@ func main() {
 	// Non-string payloads are sent as text: numbers/bools via strconv, error and
 	// fmt.Stringer via their method, anything else as JSON. A multi-line payload
 	// becomes one "data:" line per line. Send rweb.SSEClose to end the stream.
+	// rweb.SSEvent{Type: "t", Data: d, ID: "17", Retry: 5 * time.Second} adds
+	// id: and retry: lines (a reconnecting browser sends Last-Event-ID).
+	// Every client of this route shares eventsChan, so each event reaches one
+	// client; rweb.SSEHub sends every event to every client.
+	// Streams send no Access-Control-Allow-Origin unless the server lists the
+	// origins allowed to read them: rweb.WithSSEAllowedOrigins(...) / SSECfg.AllowedOrigins.
 
 	s.Get("/events", s.SSEHandler(eventsChan))
 

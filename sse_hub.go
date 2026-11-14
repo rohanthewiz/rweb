@@ -260,10 +260,14 @@ func (h *SSEHub) Broadcast(event SSEvent) {
 		return
 	}
 
-	// Wrap in a standard "message" SSE event so JS clients can use onmessage
+	// Wrap in a standard "message" SSE event so JS clients can use onmessage.
+	// ID and Retry are fields of the event, not of its payload, so they stay
+	// on the wrapper rather than going into the JSON.
 	wrappedEvent := SSEvent{
-		Type: "message",
-		Data: string(bytPayload),
+		Type:  "message",
+		Data:  string(bytPayload),
+		ID:    event.ID,
+		Retry: event.Retry,
 	}
 
 	h.broadcastToClients(wrappedEvent)

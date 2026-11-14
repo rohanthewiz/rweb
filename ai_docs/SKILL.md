@@ -712,6 +712,55 @@ To end a stream send `rweb.SSEClose`. The bare string `"close"` also ends it
 `rweb.SSEvent{Type: "message", Data: "close"}`. Closing the channel ends every
 stream reading from it.
 
+**One channel, one receiver per event.** Every client of an `SSEHandler` /
+`SetupSSE` route reads from the same channel, and Go delivers each value to a
+single receiver: with two browsers open, each event reaches one of them. Use
+it for one client per route; for every event to every client, use `SSEHub`
+(below), which gives each client its own channel.
+
+#### Event IDs and reconnect delay
+
+```go
+eventsChan <- rweb.SSEvent{Type: "order", Data: order, ID: "1042"}       // id: 1042
+eventsChan <- rweb.SSEvent{Type: "tick", Data: n, Retry: 5 * time.Second} // retry: 5000
+```
+
+`ID` sets the browser's last event ID; after a dropped connection EventSource
+reconnects with it in the `Last-Event-ID` header, so the handler can resume:
+
+```go
+s.Get("/orders", func(ctx rweb.Context) error {
+    since := ctx.Request().Header(consts.HeaderLastEventID) // "" on first connect
+    ch := ordersAfter(ctx.Request().Context(), since)        // your producer
+    return ctx.SetSSE(ch, "order")
+})
+```
+
+`Retry` sets EventSource's reconnect delay (sent in whole ms, rounded up).
+Empty / zero fields are not written. CR, LF and NUL are removed from an ID.
+`SSEHub.Broadcast` keeps both on the event (they are not put in the JSON).
+
+#### Cross-origin streams (CORS)
+
+A stream sends **no** `Access-Control-Allow-Origin` by default (it was `*`
+before N-054), so only the server's own pages can read it. To let other
+origins' pages read streams:
+
+```go
+s := rweb.NewServerWithOptions(
+    rweb.WithSSEAllowedOrigins("https://app.example.com", "admin.example.com:8443"),
+)
+// or ServerOptions{SSECfg: rweb.SSECfg{AllowedOrigins: []string{"*"}}}
+```
+
+Entries follow `WSOptions.AllowedOrigins`: `"*"` (any origin, sent as `*`), a
+full origin (exact scheme/host/port, case-insensitive), a bare `host[:port]`
+(any scheme) or `"null"`. A listed origin is echoed back with `Vary: Origin`.
+With no list, a header the app set itself (middleware, before `SetSSE`) is
+kept. `EventSource` with `withCredentials: true` also needs
+`Access-Control-Allow-Credentials: true`, which rweb leaves to the app
+(middleware), and browsers refuse it alongside `*`.
+
 ### SSE Hub (Multi-Client Broadcast)
 
 SSEHub provides a fan-out pattern for broadcasting events to all connected clients.

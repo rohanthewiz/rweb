@@ -82,6 +82,33 @@ func TestSSEHubBroadcast(t *testing.T) {
 	hub.Unregister(ch2)
 }
 
+// TestSSEHubBroadcastKeepsIDAndRetry: Broadcast puts Type and Data into the
+// JSON payload of a "message" event, but ID and Retry are fields of the event
+// itself (id: and retry: lines), so they stay on the wrapper (N-054).
+func TestSSEHubBroadcastKeepsIDAndRetry(t *testing.T) {
+	hub := NewSSEHub()
+	defer hub.Close()
+	ch := make(chan any, 8)
+	hub.Register(ch)
+	defer hub.Unregister(ch)
+
+	hub.Broadcast(SSEvent{Type: "update", Data: "hello", ID: "17", Retry: 3 * time.Second})
+	hub.BroadcastRaw(SSEvent{Type: "raw", Data: "x", ID: "18", Retry: time.Second})
+
+	evt := (<-ch).(SSEvent)
+	assert.Equal(t, "message", evt.Type)
+	assert.Equal(t, "17", evt.ID)
+	assert.Equal(t, 3*time.Second, evt.Retry)
+	var payload map[string]any
+	assert.Nil(t, json.Unmarshal([]byte(evt.Data.(string)), &payload))
+	_, leaked := payload["id"]
+	assert.Equal(t, false, leaked)
+
+	evt = (<-ch).(SSEvent)
+	assert.Equal(t, "18", evt.ID)
+	assert.Equal(t, time.Second, evt.Retry)
+}
+
 // TestSSEHubBroadcastRaw verifies that BroadcastRaw sends the SSEvent as-is
 // without JSON wrapping.
 func TestSSEHubBroadcastRaw(t *testing.T) {

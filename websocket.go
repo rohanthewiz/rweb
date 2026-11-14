@@ -495,28 +495,57 @@ func originAllowed(ctx Context, opts WSOptions) bool {
 
 	// An opaque origin ("null": sandboxed iframes, file: pages) parses to no
 	// host, matches no Host, and so is refused unless listed verbatim.
-	var originHost string
-	if u, err := url.Parse(origin); err == nil {
-		originHost = u.Host
-	}
+	originHost := originHostOf(origin)
 	if originHost != "" && strings.EqualFold(originHost, ctx.Request().Host()) {
 		return true
 	}
 
-	for _, allowed := range opts.AllowedOrigins {
-		allowed = strings.TrimSuffix(strings.TrimSpace(allowed), "/")
+	listed, _ := originListed(origin, originHost, opts.AllowedOrigins)
+	return listed
+}
+
+// originHostOf returns the host[:port] of an Origin header value, or "" for
+// an opaque origin ("null") or one that does not parse.
+func originHostOf(origin string) string {
+	if origin == "" {
+		return ""
+	}
+	if u, err := url.Parse(origin); err == nil {
+		return u.Host
+	}
+	return ""
+}
+
+// originListed reports whether an allow-list admits origin (originHost being
+// originHostOf(origin)), and whether it did so through "*". It holds the
+// matching rules WSOptions.AllowedOrigins and SSECfg.AllowedOrigins share:
+//
+//	"*"                    -> every origin, an empty one included (wildcard)
+//	contains "://"         -> that origin exactly, case-insensitively
+//	"null"                 -> the opaque origin, verbatim
+//	anything else          -> a bare host[:port], matched against originHost,
+//	                          so under any scheme
+//
+// Entries are trimmed of spaces and one trailing slash, since an origin
+// copied from a URL bar often carries one and an Origin header never does.
+// The scan stops at the first entry that admits the origin, so with both an
+// exact entry and "*" listed, the earlier one decides whether wildcard is
+// reported; either way the origin is admitted.
+func originListed(origin, originHost string, allowed []string) (listed, wildcard bool) {
+	for _, a := range allowed {
+		a = strings.TrimSuffix(strings.TrimSpace(a), "/")
 		switch {
-		case allowed == "*":
-			return true
-		case strings.Contains(allowed, "://") || allowed == "null":
-			if strings.EqualFold(allowed, origin) {
-				return true
+		case a == "*":
+			return true, true
+		case strings.Contains(a, "://") || a == "null":
+			if origin != "" && strings.EqualFold(a, origin) {
+				return true, false
 			}
-		case originHost != "" && strings.EqualFold(allowed, originHost):
-			return true
+		case originHost != "" && strings.EqualFold(a, originHost):
+			return true, false
 		}
 	}
-	return false
+	return false, false
 }
 
 // performHandshake performs the WebSocket handshake on the server side

@@ -368,7 +368,43 @@ func (ctx *context) SetSSE(ch <-chan any, eventName string) error {
 	ctx.sseEventName = eventName
 	// SetSSEHeaders() sets Content-Type, Cache-Control, and Connection headers
 	ctx.SetSSEHeaders()
+	ctx.setSSECORS()
 	return nil
+}
+
+// setSSECORS adds Access-Control-Allow-Origin to an event stream when the
+// server's SSECfg.AllowedOrigins admits the request's origin:
+//
+//	list empty (default)          -> nothing (a header the app set stays)
+//	"*" listed                    -> Access-Control-Allow-Origin: *
+//	Origin header names a listed  -> Access-Control-Allow-Origin: <Origin>
+//	  origin or host                 Vary: Origin
+//	otherwise                     -> Vary: Origin only
+//
+// Echoing the one matching origin, rather than sending the whole list, is the
+// only form CORS has for more than one origin: the header holds a single
+// origin or "*". Vary: Origin goes on every response the list decides for, so
+// a cache never hands one origin's answer to another. A request with no
+// Origin is same-origin or not from a browser, and needs no header.
+func (ctx *context) setSSECORS() {
+	if ctx.server == nil {
+		return // a context built outside NewServer (tests)
+	}
+	allowed := ctx.server.options.SSECfg.AllowedOrigins
+	if len(allowed) == 0 {
+		return
+	}
+
+	origin := ctx.request.Header(consts.HeaderOrigin)
+	listed, wildcard := originListed(origin, originHostOf(origin), allowed)
+	switch {
+	case wildcard:
+		ctx.response.SetHeader(consts.HeaderAccessControlAllowOrigin, "*")
+		return
+	case listed:
+		ctx.response.SetHeader(consts.HeaderAccessControlAllowOrigin, origin)
+	}
+	ctx.response.AddHeader(consts.HeaderVary, consts.HeaderOrigin)
 }
 
 // Server returns the server instance associated with this context.

@@ -375,10 +375,14 @@ func (res *response) writeResponseBytes(body []byte, contentType string) (int, e
 // a real browser connected and then delivered nothing. Hence the header
 // assertion in TestSSEHeadersCarryNoContentEncoding: no Go client behaviour
 // can catch a regression here, only the header itself.
+//
+// Also absent since N-054: Access-Control-Allow-Origin, once "*" on every
+// stream. Whether other origins may read a stream is the server's setting
+// (SSECfg.AllowedOrigins), applied by context.SetSSE, which can see both
+// that setting and the request's Origin; a response sees neither.
 func (res *response) SetSSEHeaders() {
 	res.SetHeader(consts.HeaderContentType, consts.MIMETextEventStream+"; charset=utf-8")
 	res.SetHeader(consts.HeaderCacheControl, consts.HeaderNoCache)
 	res.SetHeader(consts.HeaderConnection, consts.HeaderKeepAlive)
 	res.SetHeader(consts.HeaderXAccelBuffering, "no")
-	res.SetHeader(consts.HeaderAccessControlAllowOrigin, "*")
 }

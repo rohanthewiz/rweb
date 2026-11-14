@@ -167,6 +167,28 @@ type SSECfg struct {
 	// ServerOptions.WriteTimeout is set, since an event stream has no end of
 	// its own to bound it. Zero selects the default (30 s); negative disables.
 	WriteTimeout time.Duration
+
+	// AllowedOrigins lists the other origins whose pages may read an event
+	// stream (CORS). Empty, the default, sends no Access-Control-Allow-Origin,
+	// so only the server's own pages can read a stream; an app that sets the
+	// header itself (in middleware, before SetSSE) keeps its own value.
+	//
+	//	"*"                        -> Access-Control-Allow-Origin: *
+	//	"https://app.example.com"  -> that origin exactly (scheme, host, port)
+	//	"app.example.com[:port]"   -> that host under any scheme
+	//	"null"                     -> the opaque origin (sandboxed frames, file:)
+	//
+	// A listed origin is echoed back with Vary: Origin. The rules are those
+	// of WSOptions.AllowedOrigins. EventSource sends no preflight, so nothing
+	// else is needed for a stream read without credentials; one opened with
+	// withCredentials also needs Access-Control-Allow-Credentials: true, which
+	// is left to the app (middleware) since it exposes cookie-authenticated
+	// data, and browsers refuse it alongside "*".
+	//
+	// This was "*" on every stream before: any website could then read a
+	// stream through its visitor's browser, which reaches localhost and the
+	// intranet as well as the internet.
+	AllowedOrigins []string
 }
 
 type URLOptions struct {
@@ -359,6 +381,14 @@ func WithSSEWriteTimeout(d time.Duration) ServerOption {
 	}
 }
 
+// WithSSEAllowedOrigins lets pages on the given origins read event streams;
+// see SSECfg.AllowedOrigins. "*" allows every origin.
+func WithSSEAllowedOrigins(origins ...string) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.SSECfg.AllowedOrigins = slices.Clone(origins)
+	}
+}
+
 // WithProxyResponseHeaderTimeout bounds the wait of a Proxy route for the
 // upstream's response headers; past it the client gets a 504. 0 selects the
 // default (60 s); a negative value disables it.
@@ -399,9 +429,31 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 
 // SSEvent when received from a source channel will set the Type into the event return to the client,
 // otherwise the Type will be set from whatever is in the context, set by SetupSSE() or SSEHandler()
+//
+// On the wire (fields left empty are not written):
+//
+//	event: <Type>
+//	id: <ID>
+//	retry: <Retry in whole milliseconds>
+//	data: <Data's text, one data: line per line>
+//	<blank line>
 type SSEvent struct {
 	Type string // or event name
 	Data interface{}
+
+	// ID sets the browser's last event ID. After a dropped connection,
+	// EventSource reconnects with it in the Last-Event-ID request header
+	// (consts.HeaderLastEventID), so the handler can resume from there. CR,
+	// LF and NUL are removed: a line break would start a forged field, and a
+	// browser ignores an id containing NUL. Empty: no id: line, and the
+	// browser keeps the last ID it had.
+	ID string
+
+	// Retry sets how long EventSource waits before reconnecting after the
+	// stream drops. Sent in whole milliseconds, rounded up; zero or
+	// negative: no retry: line, and the browser keeps its delay (a few
+	// seconds by default).
+	Retry time.Duration
 }
 
 // sseKeepalive is a sentinel type sent by SSEHub's heartbeat goroutine.
@@ -934,6 +986,14 @@ func (s *Server) SetupSSE(ctx Context, eventChan <-chan any, eventTypeOption ...
 // The eventsChan parameter is the channel from which events will be sourced.
 // The optional eventType parameter specifies the event type (defaults to "message").
 // Usage: s.Get("/events", s.SSEHandler(eventsChan, "update"))
+//
+// Every client of the route reads from the same eventsChan, and a value
+// received from a channel goes to one receiver only: with several clients
+// connected, each event reaches one of them, whichever stream's goroutine
+// takes it, not all of them. That suits one client per route (or a work
+// queue). To send every event to every connected client, use SSEHub, which
+// gives each client its own channel and copies each broadcast into all of
+// them.
 func (s *Server) SSEHandler(eventsChan <-chan any, eventType ...string) Handler {
 	// Default to "message" event type if not specified
 	name := "message" // default event name
@@ -3123,10 +3183,10 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 				// without triggering EventSource's onmessage handler
 				_, err = fmt.Fprint(rw, ":keepalive\n\n")
 				_ = v // use v to satisfy the compiler
-			case SSEvent: // get the eventName from the data (rweb.SSEvent) received
-				err = writeSSEEvent(rw, v.Type, v.Data)
+			case SSEvent: // get the eventName (and any id / retry) from the rweb.SSEvent received
+				err = writeSSEEvent(rw, v)
 			default: // a bare payload (string, []byte, number, struct...) under the stream's event name
-				err = writeSSEEvent(rw, ctx.sseEventName, v)
+				err = writeSSEEvent(rw, SSEvent{Type: ctx.sseEventName, Data: v})
 			}
 
 			if err != nil {
@@ -3170,10 +3230,17 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 // writeSSEEvent writes one server-sent event to w:
 //
 //	event: <name>\n
+//	id: <ev.ID>\n            <- only when ev.ID is set
+//	retry: <ms>\n            <- only when ev.Retry > 0
 //	data: <line 1 of the payload's text>\n
 //	data: <line 2>\n
 //	...
 //	\n                       <- the blank line dispatches the event
+//
+// Field order does not matter to a browser: id and retry are applied when
+// their lines are read and the event is dispatched at the blank line. The
+// optional fields go after event: so that a stream without them is byte for
+// byte what it was before they existed.
 //
 // The event stream format (WHATWG HTML §9.2) is line-based. A browser ends a
 // field at CR, LF or CRLF, and drops a line that has no "field:" prefix, so a
@@ -3183,33 +3250,46 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 // payload (with any CR or CRLF normalised to LF). A trailing line break
 // becomes a last, empty data: line, so it survives too.
 //
-// Line breaks are removed from the event name rather than split on: a name
-// cannot span lines, and a break in it would let the rest of the name start
-// a field of its own (a forged data: or id: line).
+// Line breaks are removed from the event name and the id rather than split
+// on: neither can span lines, and a break in one would let the rest of it
+// start a field of its own (a forged data: or id: line). The id also loses
+// any NUL, since a browser ignores an id field that contains one.
 //
 // The payload's text is computed before anything is written, so a payload
 // that cannot be rendered (see sseDataText) leaves w untouched and the event
 // is skipped. Write errors are sticky in a bufio.Writer, so checking the last
 // write covers all of them.
-func writeSSEEvent(w *bufio.Writer, name string, data any) error {
-	text, err := sseDataText(data)
+func writeSSEEvent(w *bufio.Writer, ev SSEvent) error {
+	text, err := sseDataText(ev.Data)
 	if err != nil {
 		return err
 	}
 
-	// Event names are almost always clean, so test before rebuilding.
-	if strings.ContainsAny(name, "\r\n") {
-		name = strings.Map(func(r rune) rune {
-			if r == '\r' || r == '\n' {
-				return -1 // drop
-			}
-			return r
-		}, name)
+	_, _ = w.WriteString("event: ")
+	_, _ = w.WriteString(sseFieldValue(ev.Type, "\r\n"))
+	_ = w.WriteByte('\n')
+
+	if ev.ID != "" {
+		_, _ = w.WriteString("id: ")
+		_, _ = w.WriteString(sseFieldValue(ev.ID, "\r\n\x00"))
+		_ = w.WriteByte('\n')
 	}
 
-	_, _ = w.WriteString("event: ")
-	_, _ = w.WriteString(name)
-	_ = w.WriteByte('\n')
+	if ev.Retry > 0 {
+		// The field takes ASCII digits only (a browser ignores anything
+		// else), in milliseconds. Rounded up so that a sub-millisecond
+		// Retry does not become 0, which would mean "reconnect at once".
+		// Divide, then add one for a remainder, rather than adding 999 µs
+		// first, which would overflow for a Retry near the maximum.
+		ms := ev.Retry / time.Millisecond
+		if ev.Retry%time.Millisecond != 0 {
+			ms++
+		}
+		_, _ = w.WriteString("retry: ")
+		var num [20]byte // an int64 has at most 19 digits
+		_, _ = w.Write(strconv.AppendInt(num[:0], int64(ms), 10))
+		_ = w.WriteByte('\n')
+	}
 
 	// One data: line per line of text, splitting on CRLF, CR or LF without
 	// building a slice of lines. An empty payload still gets one (empty)
@@ -3232,6 +3312,23 @@ func writeSSEEvent(w *bufio.Writer, name string, data any) error {
 
 	_, err = w.WriteString("\n")
 	return err
+}
+
+// sseFieldValue returns s without any of the bytes in drop, for a field
+// written on a single line. Names and ids are almost always clean, so the
+// test comes first and the common case returns s without allocating. The
+// bytes in drop are all ASCII, which in UTF-8 never occur inside a multi-byte
+// sequence, so removing them leaves the rest of s intact.
+func sseFieldValue(s, drop string) string {
+	if !strings.ContainsAny(s, drop) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(drop, r) {
+			return -1 // drop
+		}
+		return r
+	}, s)
 }
 
 // sseDataText renders an event payload as text for writeSSEEvent.
