@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -104,9 +103,7 @@ func TestProxy(t *testing.T) {
 	}
 
 	go func() {
-		defer func() {
-			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-		}()
+		defer stopRun(pxy, usTgt, euTgt)
 
 		<-pxyReadyChan // wait for proxy
 
@@ -249,9 +246,7 @@ func TestProxySkewed(t *testing.T) {
 	})
 
 	go func() {
-		defer func() {
-			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-		}()
+		defer stopRun(pxy, usTgt, euTgt)
 
 		<-pxyReadyChan // wait for proxy
 

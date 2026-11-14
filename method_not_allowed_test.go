@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -80,7 +79,7 @@ func TestMethodNotAllowedOverWire(t *testing.T) {
 	s.Get("/only-get", okHandler)
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		url := fmt.Sprintf("http://127.0.0.1:%s/only-get", s.GetListenPort())

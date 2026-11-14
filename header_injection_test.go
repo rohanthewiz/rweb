@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -31,7 +30,7 @@ func TestHeaderInjectionOverWire(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())

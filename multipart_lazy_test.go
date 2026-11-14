@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -123,7 +122,7 @@ func TestMultipartLazyParseCleanedUp(t *testing.T) {
 	})
 
 	go func() {
-		defer func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) }()
+		defer stopRun(s)
 		<-readyChan
 
 		body, ct := multipartUpload(t)

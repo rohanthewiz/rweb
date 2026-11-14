@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"net/http"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -82,7 +81,7 @@ func TestTLSConfigDynamicCert(t *testing.T) {
 	}
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 

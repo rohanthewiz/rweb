@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -35,7 +34,7 @@ func TestSSEHandler(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 
@@ -135,7 +134,7 @@ func TestSSESenderGoroutineExitsOnChannelClose(t *testing.T) {
 		close(serverDone)
 	}()
 	defer func() {
-		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		stopRun(s)
 		<-serverDone
 	}()
 
@@ -224,7 +223,7 @@ func TestSSESenderGoroutineExitsOnCloseSentinel(t *testing.T) {
 		close(serverDone)
 	}()
 	defer func() {
-		syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		stopRun(s)
 		<-serverDone
 	}()
 
@@ -333,7 +332,7 @@ func TestSSEClientDisconnect(t *testing.T) {
 	}
 
 	// Shutdown the server
-	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	stopRun(s)
 
 	select {
 	case <-serverDone:
@@ -369,9 +368,9 @@ func TestSSEHeadersCarryNoContentEncoding(t *testing.T) {
 		close(serverDone)
 	}()
 	defer func() {
-		// Run installs its own SIGTERM handler and returns when one arrives;
-		// wait for that return so the listener is closed before the test exits.
-		_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		// Shutdown makes Run return (see stopRun); wait for that return so
+		// the listener is closed before the test exits.
+		stopRun(s)
 		<-serverDone
 	}()
 
@@ -466,7 +465,7 @@ func TestSSEEventFormatting(t *testing.T) {
 	s.Get("/events", s.SSEHandler(events, "fmt"))
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		body := readSSEBody(t, s, "/events")
@@ -507,7 +506,7 @@ func TestSSECloseSentinel(t *testing.T) {
 	s.Get("/events", s.SSEHandler(events, "x"))
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		assert.Equal(t, "event: x\ndata: closed\n\n", readSSEBody(t, s, "/events"))

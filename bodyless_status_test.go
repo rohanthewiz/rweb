@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -99,7 +98,7 @@ func TestBodylessStatusesOverWire(t *testing.T) {
 	s.StaticFilesAbs("/static/", dir, 1) // same 304 path as StaticFiles; the temp dir is absolute
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
@@ -193,7 +192,7 @@ func TestSSEOnBodylessStatusSendsNoStream(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())

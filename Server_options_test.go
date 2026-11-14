@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -28,7 +27,7 @@ func TestWithAddress(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 
@@ -154,7 +153,7 @@ func TestWithOptions(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 

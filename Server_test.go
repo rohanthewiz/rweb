@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -45,7 +44,7 @@ func TestHeaderEdgeCases(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		addr := "127.0.0.1:" + s.GetListenPort()
@@ -84,7 +83,7 @@ func TestGet(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 
@@ -109,7 +108,7 @@ func TestNoRoutes(t *testing.T) {
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 
@@ -133,9 +132,7 @@ func TestPost(t *testing.T) {
 	s.ListRoutes()
 
 	go func() {
-		defer func() {
-			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-		}()
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 
@@ -183,9 +180,7 @@ func TestMultipleRequests(t *testing.T) {
 	s.ListRoutes()
 
 	go func() {
-		defer func() {
-			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-		}()
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 
@@ -240,7 +235,7 @@ func TestBadRequest(t *testing.T) {
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 		addr := fmt.Sprintf(":%s", s.GetListenPort())
@@ -274,7 +269,7 @@ func TestBadRequestHeader(t *testing.T) {
 	s.ListRoutes()
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, fmt.Sprintf(":%s", s.GetListenPort()))
@@ -297,7 +292,7 @@ func TestBadRequestMethod(t *testing.T) {
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan, Address: "localhost:"})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, fmt.Sprintf(":%s", s.GetListenPort()))
@@ -324,7 +319,7 @@ func TestBadRequestProtocol(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, fmt.Sprintf(":%s", s.GetListenPort()))
@@ -348,7 +343,7 @@ func TestEarlyClose(t *testing.T) {
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, ReadyChan: readyChan})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 
 		<-readyChan // wait for server
 		conn, err := net.Dial(consts.ProtocolTCP, fmt.Sprintf(":%s", s.GetListenPort()))

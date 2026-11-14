@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -43,7 +42,7 @@ func TestRequestSchemePlainAndKeepAliveConn(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
@@ -82,7 +81,7 @@ func TestRequestSchemeTLS(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		client := &http.Client{Transport: &http.Transport{
@@ -123,7 +122,7 @@ func TestHostHeaderValidation(t *testing.T) {
 	}
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		for _, c := range cases {
@@ -216,7 +215,7 @@ func TestQuerySchemeDoesNotRouteOverWire(t *testing.T) {
 	}
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())

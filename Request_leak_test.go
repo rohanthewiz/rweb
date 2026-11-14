@@ -21,7 +21,6 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -94,7 +93,7 @@ func TestMultipartDoesNotLeakIntoFollowingGet(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) }()
+		defer stopRun(s)
 		<-readyChan
 
 		client, tr := keepAliveClient()
@@ -173,7 +172,7 @@ func TestMultipartDoesNotLeakIntoFollowingMultipart(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) }()
+		defer stopRun(s)
 		<-readyChan
 
 		client, tr := keepAliveClient()
@@ -278,7 +277,7 @@ func TestPostArgsDoNotLeakIntoFollowingNonFormPost(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) }()
+		defer stopRun(s)
 		<-readyChan
 
 		client, tr := keepAliveClient()
@@ -354,7 +353,7 @@ func TestMalformedMultipartSurfacesParseError(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) }()
+		defer stopRun(s)
 		<-readyChan
 
 		// Hand-crafted HTTP/1.0 request: Content-Type declares multipart
@@ -450,7 +449,7 @@ func TestContentTypeDoesNotLeakAcrossRequests(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer func() { _ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM) }()
+		defer stopRun(s)
 		<-readyChan
 
 		client, tr := keepAliveClient()

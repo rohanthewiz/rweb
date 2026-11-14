@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 
 	"github.com/rohanthewiz/assert"
@@ -166,7 +165,7 @@ func TestGetFormFiles(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		// Build a real multipart body: two attachments under the same key,
@@ -241,7 +240,7 @@ func TestGetFormFilesNotPresent(t *testing.T) {
 
 	go func() {
 		defer close(clientDone)
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		var buf bytes.Buffer

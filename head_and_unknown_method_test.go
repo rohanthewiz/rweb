@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -48,7 +47,7 @@ func TestUnknownMethodOverWire(t *testing.T) {
 	s.Get("/x", okHandler)
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		req, _ := http.NewRequest("PROPFIND", fmt.Sprintf("http://127.0.0.1:%s/x", s.GetListenPort()), nil)
@@ -130,7 +129,7 @@ func TestHeadOverWire(t *testing.T) {
 	s.Get("/hello", func(ctx rweb.Context) error { return ctx.WriteString("hello world") })
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
@@ -168,7 +167,7 @@ func TestHeadToSSERouteSendsNoStream(t *testing.T) {
 	s.Get("/events", s.SSEHandler(events, "update"))
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
@@ -202,7 +201,7 @@ func TestHeadToWebSocketRouteDoesNotUpgrade(t *testing.T) {
 	})
 
 	go func() {
-		defer syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+		defer stopRun(s)
 		<-readyChan
 
 		conn, err := net.Dial("tcp", "127.0.0.1:"+s.GetListenPort())
