@@ -38,8 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-059** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
-  No lingering close after an early 431 or 413: the server answers and closes while the client may still be sending, so on Linux the client can get a reset before it reads the response (reliable on macOS loopback). Read a bounded amount, or half-close and wait briefly, before closing (`Server.go`, `headFailed` and the 413 paths). From the N-035 report; not reproduced.
 - **N-060** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   Request header values containing control characters (other than the line's own CRLF) are accepted and handed to handlers. RFC 9110 §5.5 allows refusing them; decide between 400 and stripping. From the N-036 report.
 - **N-064** · raised `2026-1111-1143-phase-3-performance` · value low
@@ -95,6 +93,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-059** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14 (`6774799`)
+  Every refusal `serveConn` writes before a handler runs (400, 408, 413, 417, 431, 501; 16 sites) now goes through `refuse`, which writes the canned response and calls `lingerClose` (`conn_limits.go`): `CloseWrite` (FIN; close_notify on TLS), then read and discard for up to `lingerTimeout` (1 s, time-bounded only; net/http pauses 500 ms without reading, nginx lingers up to 30 s), then the deferred `Close`. A client that stops sending sees EOF at once and ends the drain by closing. A conn without `CloseWrite` or a TLS conn before its handshake closes at once, as before. The conn stays active in the registry meanwhile, so a `Shutdown` may wait up to 1 s longer for it. Tests: `linger_close_test.go` (tcp and tls): 4 MB written after a 413 gets through and the client reads the 413 and EOF (broken pipe without the change); EOF right after a 400, before the drain ends; an endless sender is cut off after about 1 s (89 µs without the change). Documented in CLAUDE.md (conn_limits.go) and SKILL.md (Connection limits).
 - **N-062** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14 (validated, no code change)
   Checked on a scratch server (rweb on :18081, a second rweb origin on :18082, and a Go `httputil.ReverseProxy` on :18083 that rewrites `Host` to `backend.internal:18081`) with headless Chrome (four instances) and `wscat` 6.0.1. Chrome: same-origin page opens and echoes; a page on the other origin gets 403 (browser: error, close 1006); through the Host-rewriting proxy `/ws` gets 403 and a route with `AllowedOrigins: ["http://127.0.0.1:18083"]` gets 101 and echoes; over 75 s idle both sockets got the 30 s pings and Chrome's pongs reached the pong handler twice each; `Shutdown` sent 1001, Chrome logged `close code=1001 clean=true`, both handlers got the `CloseMessage` and returned, and `Shutdown` returned nil 0.2 s after it was called. wscat: no Origin → connects (direct and through the proxy), `-o http://evil.example` → 403, the proxy's origin → 403 on `/ws` and 101 on the listed route. Not checkable from a browser or wscat: the write timeout (needs a peer that stops reading); the Go-client tests cover it. Raised N-076 (a `ReadMessage` after the shutdown close reply waits out the 2 s handshake deadline).
 - **N-073** · raised `2026-1113-2331-n048-n049-n050-hooks-param-decode-header-case` · closed 2026-11-14, 2026-1114-1648-n073-response-framing-headers (`ac411b1`)
