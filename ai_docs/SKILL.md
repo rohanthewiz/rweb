@@ -1153,11 +1153,15 @@ func (h *Hub) Run() {
 
         case client := <-h.unregister:
             h.mu.Lock()
-            if _, ok := h.clients[client]; ok {
-                delete(h.clients, client)
-                client.Close(1000, "Disconnected")
-            }
+            _, ok := h.clients[client]
+            delete(h.clients, client)
             h.mu.Unlock()
+            // Close outside the lock and off this loop: it waits up to 2 s
+            // for the peer's close reply, which a vanished client never
+            // sends, and every broadcast would wait with it.
+            if ok {
+                go client.Close(1000, "Disconnected")
+            }
 
         case message := <-h.broadcast:
             h.mu.RLock()

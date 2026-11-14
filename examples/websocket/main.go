@@ -67,45 +67,61 @@ func (h *Hub) Run() {
 			data, _ := json.Marshal(welcome)
 			client.WriteMessage(rweb.TextMessage, data)
 
-			// Notify other clients about the new connection
-			h.broadcast <- Message{
+			// Notify other clients about the new connection. fanOut is
+			// called directly, not through h.broadcast: Run is that
+			// channel's only reader, so a send from here would block
+			// forever once its buffer (100) was full.
+			h.fanOut(Message{
 				Type:      "system",
 				Content:   fmt.Sprintf("A new user joined. Total users: %d", len(h.clients)),
 				Sender:    "Server",
 				Timestamp: time.Now(),
-			}
+			})
 
 		case client := <-h.unregister:
+			// Only the map change happens under the lock. Close sends a
+			// close frame and waits up to 2 s for the peer's reply, which a
+			// client that is already gone never sends; called here under
+			// the lock, it held up ClientCount and, since this loop does
+			// every broadcast, all chat traffic for those 2 s. On its own
+			// goroutine it holds up nothing (it is safe alongside the
+			// handler's ReadMessage, and on a socket already closing).
 			h.mu.Lock()
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				client.Close(1000, "Client disconnected")
-				h.mu.Unlock()
-
-				h.broadcast <- Message{
-					Type:      "system",
-					Content:   fmt.Sprintf("A user left. Total users: %d", len(h.clients)),
-					Sender:    "Server",
-					Timestamp: time.Now(),
-				}
-			} else {
-				h.mu.Unlock()
+			_, ok := h.clients[client]
+			delete(h.clients, client)
+			h.mu.Unlock()
+			if !ok {
+				break
 			}
+			go client.Close(1000, "Client disconnected")
+
+			h.fanOut(Message{
+				Type:      "system",
+				Content:   fmt.Sprintf("A user left. Total users: %d", len(h.clients)),
+				Sender:    "Server",
+				Timestamp: time.Now(),
+			})
 
 		case message := <-h.broadcast:
-			// Fan out the message to all connected clients
-			h.mu.RLock()
-			data, _ := json.Marshal(message)
-			for client := range h.clients {
-				err := client.WriteMessage(rweb.TextMessage, data)
-				if err != nil {
-					// Schedule removal of failed client outside the read lock
-					go func(c *rweb.WSConn) {
-						h.unregister <- c
-					}(client)
-				}
-			}
-			h.mu.RUnlock()
+			h.fanOut(message)
+		}
+	}
+}
+
+// fanOut sends message to every connected client. It runs on the Run
+// goroutine only, which is also the only writer of h.clients, so the read
+// lock here only keeps ClientCount's readers consistent.
+func (h *Hub) fanOut(message Message) {
+	data, _ := json.Marshal(message)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for client := range h.clients {
+		if err := client.WriteMessage(rweb.TextMessage, data); err != nil {
+			// Schedule removal of the failed client: unregister is read by
+			// this same goroutine, so it is sent from another one.
+			go func(c *rweb.WSConn) {
+				h.unregister <- c
+			}(client)
 		}
 	}
 }
