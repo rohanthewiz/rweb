@@ -38,8 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-048** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
-  No setter for the error handler and no not-found / method-not-allowed hooks; `ListRoutes` omits param routes. Plan: `PLAN_ONCE_OVER_2026-1109.md`. Also (from the N-047 report): the default error page always reads "%d Internal Server Error" (`NewServer`, `errorHandler`), so the proxy's 502 and 504 pages say "502 Internal Server Error"; use the status text.
 - **N-049** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Path params are not percent-decoded (`/greet/John%20Doe` → `John%20Doe`). Reproduced. Needs decision D7. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-050** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
@@ -106,6 +104,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-048** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13 (`a2315f6`)
+  `SetErrorHandler`, `SetNotFoundHandler`, `SetMethodNotAllowedHandler`; nil restores each default. The 404/405 hooks run in the default dispatch handler (after middleware) with the status, and `Allow` for 405, already set; a hook's error goes to the error handler; a route's own 404 (StaticFiles) does not reach the hook. The default error page moved to `defaultErrorHandler` and uses `http.StatusText` (not `consts.StatusTextFromCode`, which lacks most codes), so the proxy's pages read "502 Bad Gateway" / "504 Gateway Timeout"; unknown codes read "Error". `AddMethod` records radix routes (`Server.radixRoutes`, re-add replaces); new `Routes()` returns all routes sorted by path then method, and `ListRoutes` prints it. Tests: `error_hooks_test.go`. Documented in SKILL.md ("Error, not-found and 405 hooks") and CLAUDE.md.
 - **N-071** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-13, 2026-1113-2302-n071-stoprun-windows-tests (`d746e23`, `9bd8452`)
   The package's tests now build for Windows. The note named only `graceful_shutdown_test.go`, but 42 more calls in 13 test files stopped a `Run` server with `syscall.Kill(…SIGTERM)` (the earlier count of 43 was off by one); `go vet` reports only the first failing file, which hid them. The user chose option (a). `d746e23` moved Run's genuine signal tests to `graceful_shutdown_signal_test.go` under `//go:build unix` and moved `TestClientIPRemoteAddrFallback` to `Serve`/`Shutdown`. `9bd8452` replaced the 42 signals with `stopRun(s, ...)` (`run_stop_test.go`), which calls `Shutdown` on each server; the proxy test passes its two upstreams too. One change in timing: `Run` now returns once the listener closes, and `stopRun` finishes the draining. CLAUDE.md says to stop `Run` this way. Checks: `go vet` passes for darwin, linux and windows; `GOOS=windows go test -c` builds; `-race` passes, and the root package passed 5 repeated runs.
 - **N-063** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-11, 2026-1111-1814-n063-n069-n067-n071-hardening (`5cb62b0`)
