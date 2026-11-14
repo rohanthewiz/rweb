@@ -1,18 +1,21 @@
 package rweb
 
 import (
-	"fmt"
 	"time"
 )
 
-// RequestInfo is a middleware giving basic request / response stats
+// RequestInfo is a middleware giving basic request / response stats: one
+// info-level line per request, through the server's Logger (method, path,
+// status, duration). The logger stamps the time, so the line carries none
+// of its own. It is logged whatever ServerOptions.Verbose says: adding the
+// middleware is the request for it.
 func RequestInfo(ctx Context) error {
 	start := time.Now()
 
 	defer func() {
-		fmt.Printf("%sZ %s %q -> %d [%s]\n",
-			time.Now().UTC().Format("20060102T150405"),
-			ctx.Request().Method(), ctx.Request().Path(), ctx.Response().Status(), time.Since(start))
+		ctxLogger(ctx).Info("rweb: request served", "method", ctx.Request().Method(),
+			"path", ctx.Request().Path(), "status", ctx.Response().Status(),
+			"duration", time.Since(start).String())
 	}()
 
 	return ctx.Next()

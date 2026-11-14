@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -37,10 +36,20 @@ type ServerOptions struct {
 	// Address is the non-TLS  listen address. When UseTLS is true,
 	// this is the address for the HTTP server which will redirect to the HTTPS server.
 	// TCP addresses can be port only or address only in which case a high port is chosen. See: https://pkg.go.dev/net#Listen
-	Address             string
-	TLS                 TLSCfg
-	Verbose             bool
-	Debug               bool
+	Address string
+	TLS     TLSCfg
+	// Verbose has the server log, at info level, what it sets up and
+	// serves: its listening address, proxy routes and targets, and SSE
+	// streams starting and ending. See Logger for the full policy.
+	Verbose bool
+	// Debug has the server log, at debug level, a trace of each request
+	// (routing decisions, bodies) and the failures that are the client's
+	// doing (it left mid-response, a stream was cut short). The logger's own
+	// level must let debug through as well: with the default logger, call
+	// logger.InitLog (its default level is debug) or logger.SetLogLevel.
+	Debug bool
+	// DebugRequestContext logs each request's whole context (%#v) at debug
+	// level after it is handled. Very verbose; for working on rweb itself.
 	DebugRequestContext bool
 	URLOptions          URLOptions
 	// ReadyChan is a channel signalling that the server is about to enter its listen loop -- effectively running.
@@ -134,6 +143,13 @@ type ServerOptions struct {
 	// proxy_read_timeout); a negative value waits as long as the client
 	// stays connected.
 	ProxyResponseHeaderTimeout time.Duration
+
+	// Logger receives the server's own log lines. Nil selects the default,
+	// which writes through github.com/rohanthewiz/logger (configure it with
+	// logger.InitLog). A *slog.Logger fits as it is. Errors and warnings
+	// are always logged; info and debug lines only with Verbose and Debug.
+	// See the Logger type for which line goes out at which level.
+	Logger Logger
 }
 
 // defaultMaxRequestBodySize is the request-body cap used when
@@ -202,6 +218,15 @@ func WithVerbose() ServerOption {
 func WithDebug() ServerOption {
 	return func(opts *ServerOptions) {
 		opts.Debug = true
+	}
+}
+
+// WithLogger sets the Logger the server writes its own log lines to. nil
+// keeps the default (github.com/rohanthewiz/logger).
+// Example: WithLogger(slog.Default())
+func WithLogger(l Logger) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.Logger = l
 	}
 }
 
@@ -368,6 +393,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.WriteTimeout = serverOpts.WriteTimeout
 		opts.ShutdownTimeout = serverOpts.ShutdownTimeout
 		opts.ProxyResponseHeaderTimeout = serverOpts.ProxyResponseHeaderTimeout
+		opts.Logger = serverOpts.Logger
 	}
 }
 
@@ -424,6 +450,11 @@ type Server struct {
 	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
 	options      ServerOptions
+
+	// log is options.Logger, or the default when that is nil, resolved once
+	// in NewServer so every call site can use it without a nil check. See
+	// logging.go for which lines go out at which level.
+	log Logger
 
 	// notFoundHandler and methodNotAllowedHandler, when set, write the
 	// response for a request no route matched (404) or one whose path is
@@ -516,17 +547,22 @@ func NewServer(options ...ServerOptions) *Server {
 		opts = options[0]
 	}
 
-	// Validate ready channel capacity
-	if opts.ReadyChan != nil && cap(opts.ReadyChan) < 1 && opts.Verbose {
-		fmt.Println("Ready channel capacity should be at least 1, or we may hang")
-	}
-
 	s := &Server{
 		radixRouter:  radRtr,
 		hashRouter:   hashRtr,
 		options:      opts,
+		log:          orDefaultLogger(opts.Logger),
 		limits:       resolveConnLimits(opts),
 		errorHandler: defaultErrorHandler,
+	}
+
+	// Validate ready channel capacity. Serve's send on it does not block
+	// (see Serve), so with no buffer the signal is lost unless the caller
+	// is already waiting at that instant, and a caller that waits after
+	// will hang. A misconfiguration, so a warning whatever Verbose says.
+	if opts.ReadyChan != nil && cap(opts.ReadyChan) < 1 {
+		s.log.Warn("rweb: ReadyChan has no buffer; the ready signal may be missed and a waiting caller hang",
+			"capacity", cap(opts.ReadyChan))
 	}
 
 	s.handlers = []Handler{
@@ -535,7 +571,7 @@ func NewServer(options ...ServerOptions) *Server {
 			var hdlr Handler
 
 			if s.options.Debug {
-				fmt.Printf("Request - method: %q, path: %q\n", ctx.request.method, ctx.request.path)
+				s.log.Debug("rweb: routing", "method", ctx.request.method, "path", ctx.request.path)
 			}
 
 			// Try exact match first
@@ -547,13 +583,13 @@ func NewServer(options ...ServerOptions) *Server {
 				// hash-miss path only, so exact-route hits pay nothing.
 				if !isValidRequestMethod(ctx.request.method) {
 					if s.options.Debug {
-						fmt.Printf("Unknown method %q -- returning 501\n", ctx.request.method)
+						s.log.Debug("rweb: unknown method, returning 501", "method", ctx.request.method)
 					}
 					ctx.SetStatus(consts.StatusNotImplemented)
 					return nil
 				}
 				if s.options.Debug {
-					fmt.Println("Route not found in hash router (it could be a dynamic route)  -- trying radix router")
+					s.log.Debug("rweb: no exact route, trying the radix router", "path", ctx.request.path)
 				}
 				hdlr = radRtr.LookupNoAlloc(ctx.request.method, ctx.request.path, ctx.request.addParameter)
 			}
@@ -575,7 +611,8 @@ func NewServer(options ...ServerOptions) *Server {
 				// requests pay nothing for it.
 				if allow := s.allowedMethods(ctx.request.path); allow != "" {
 					if s.options.Debug {
-						fmt.Printf("Path routed for %s only -- returning 405\n", allow)
+						s.log.Debug("rweb: path routed for other methods only, returning 405",
+							"path", ctx.request.path, "allow", allow)
 					}
 					ctx.response.SetHeader(consts.HeaderAllow, allow)
 					ctx.SetStatus(consts.StatusMethodNotAllowed)
@@ -588,7 +625,7 @@ func NewServer(options ...ServerOptions) *Server {
 					return nil
 				}
 				if s.options.Debug {
-					fmt.Println("Route not found in radix router either -- returning 404")
+					s.log.Debug("rweb: no route, returning 404", "path", ctx.request.path)
 				}
 				ctx.SetStatus(consts.StatusNotFound)
 				// As for 405: status first, so a body-only hook is enough.
@@ -607,7 +644,8 @@ func NewServer(options ...ServerOptions) *Server {
 	// returned by every cookie set/get, so it cannot go unnoticed.
 	s.cookieAEAD, s.cookieAEADErr = newCookieAEAD(opts.Cookie.EncryptionKey)
 	if s.cookieAEADErr != nil {
-		log.Printf("[ERR] %v; cookie operations will fail until it is fixed\n", s.cookieAEADErr)
+		s.log.Error("rweb: bad cookie encryption key; cookie operations will fail until it is fixed",
+			"error", s.cookieAEADErr)
 	}
 
 	s.baseCtx, s.baseCancel = stdctx.WithCancel(stdctx.Background())
@@ -629,7 +667,9 @@ func NewServer(options ...ServerOptions) *Server {
 // only the statuses rweb itself sends, and a handler may pick any.
 func defaultErrorHandler(ctx Context, err error) {
 	errCode := GenRandString(8, true)
-	log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
+	// The code is the key that joins this line to the page the client got.
+	ctxLogger(ctx).Error("rweb: request failed", "code", errCode,
+		"method", ctx.Request().Method(), "path", ctx.Request().Path(), "error", err)
 
 	if ctx.Response().Status() == 0 || ctx.Response().Status() == consts.StatusOK {
 		ctx.SetStatus(consts.StatusInternalServerError)
@@ -929,7 +969,11 @@ func (s *Server) WebSocket(path string, handler WebSocketHandler) {
 			return nil
 		}
 		if err != nil {
-			fmt.Printf("Failed to upgrade connection to WebSocket: %v\n", err)
+			// The error goes on to the error handler, which logs it (the
+			// default one at error level), so here it is only a trace.
+			if s.options.Debug {
+				s.log.Debug("rweb: WebSocket upgrade failed", "path", ctx.Request().Path(), "error", err)
+			}
 			// If upgrade fails, return error (will send appropriate HTTP error response)
 			return err
 		}
@@ -960,7 +1004,9 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 			return nil // the 403 is set; see WebSocket
 		}
 		if err != nil {
-			fmt.Printf("Failed to upgrade connection to WebSocket: %v\n", err)
+			if s.options.Debug { // logged by the error handler; see WebSocket
+				s.log.Debug("rweb: WebSocket upgrade failed", "path", ctx.Request().Path(), "error", err)
+			}
 			return err
 		}
 		return handler(ws)
@@ -1040,7 +1086,7 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		}
 
 		if s.options.Verbose {
-			fmt.Printf("PROXY %q -> %q\n", ctxReq.Path(), proxyURL)
+			s.log.Info("rweb: proxy", "path", ctxReq.Path(), "target", proxyURL)
 		}
 
 		var req *http.Request
@@ -1173,7 +1219,7 @@ func clientGone(ctx Context) error {
 
 func (s *Server) setMethodProxyHandler(proxyPath string, hdlr func(ctx Context) (err error)) {
 	if s.options.Verbose {
-		fmt.Println("Setting up proxy handlers to route:", proxyPath)
+		s.log.Info("rweb: proxy route", "path", proxyPath)
 	}
 
 	s.Get(proxyPath, hdlr)
@@ -1257,7 +1303,8 @@ func (s *Server) StaticFilesAbsWithOptions(reqDir string, targetDir string, nbrO
 // check.
 func (s *Server) staticFilesAbs(reqDir string, targetDir string, nbrOfTokensToStrip int, opts StaticOptions, wrap func(Handler) Handler) {
 	if !filepath.IsAbs(targetDir) {
-		fmt.Printf("StaticFilesAbs target dir %q is not an absolute path -- not handling\n", targetDir)
+		s.log.Error("rweb: StaticFilesAbs target dir is not an absolute path; route not registered",
+			"prefix", reqDir, "dir", targetDir)
 		return
 	}
 	s.staticFiles(reqDir, targetDir, nbrOfTokensToStrip, true, opts, wrap)
@@ -1282,7 +1329,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 	// route takes, so its 404s are its own: the not-found hook does not see
 	// them, and a POST to an unknown path gets 405 (Allow: GET, HEAD).
 	if reqDir == "" {
-		fmt.Println("StaticFiles request dir is empty -- not handling")
+		s.log.Error("rweb: StaticFiles URL prefix is empty; route not registered", "dir", targetDir)
 		return
 	}
 
@@ -1290,14 +1337,16 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 	// separator or ".." would let it reach elsewhere under (or, joined
 	// before the containment check, outside) the root.
 	if opts.Index != "" && (strings.ContainsAny(opts.Index, `/\`) || opts.Index == "." || opts.Index == "..") {
-		fmt.Printf("StaticFiles index %q is not a plain file name -- not handling\n", opts.Index)
+		s.log.Error("rweb: StaticFiles index is not a plain file name; route not registered",
+			"prefix", reqDir, "index", opts.Index)
 		return
 	}
 	// SPAFallback may name a file in a subdirectory, but must stay under the
 	// served directory: filepath.IsLocal refuses "", absolute paths, ".."
 	// and (on Windows) reserved names.
 	if opts.SPAFallback != "" && !filepath.IsLocal(filepath.FromSlash(opts.SPAFallback)) {
-		fmt.Printf("StaticFiles SPA fallback %q is not a path under the served directory -- not handling\n", opts.SPAFallback)
+		s.log.Error("rweb: StaticFiles SPA fallback is not a path under the served directory; route not registered",
+			"prefix", reqDir, "spaFallback", opts.SPAFallback)
 		return
 	}
 
@@ -1308,7 +1357,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 	// when there is an index or a fallback to serve there (see the end).
 	prefixRoute := path.Join("/", reqDir)
 	if s.options.Debug {
-		fmt.Println("**-> static route:", route)
+		s.log.Debug("rweb: static route", "route", route)
 	}
 
 	// Remove any leading "/" so we can properly split below
@@ -1345,12 +1394,12 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 	// a Root held from registration would pin the directory it first opened.
 	var rhTokens []string
 	if s.options.Debug {
-		fmt.Printf("**-> reqPath: %q\n", reqDir)
+		s.log.Debug("rweb: static prefix", "prefix", reqDir)
 	}
 
 	tokens := strings.Split(reqDir, "/")
 	if s.options.Debug {
-		fmt.Printf("**-> tokens: %q", tokens)
+		s.log.Debug("rweb: static prefix tokens", "tokens", fmt.Sprintf("%q", tokens))
 	}
 
 	// Remove unwanted tokens from the request path.
@@ -1360,7 +1409,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		rhTokens = tokens[nbrOfTokensToStrip:]
 	}
 	if s.options.Debug {
-		fmt.Printf("**-> rhTokens: %q\n", rhTokens)
+		s.log.Debug("rweb: static prefix tokens kept", "tokens", fmt.Sprintf("%q", rhTokens))
 	}
 	// tail is the part of the route prefix that survives stripping, as a
 	// path under the root ("" when everything was stripped).
@@ -1382,7 +1431,8 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 			// say). Requests would have 404'd on the same failure before
 			// (the handler resolved the root per request), so the route is
 			// not registered, as for StaticFilesAbs with a relative dir.
-			fmt.Printf("StaticFiles cannot resolve target dir %q: %v -- not handling\n", targetDir, err)
+			s.log.Error("rweb: StaticFiles cannot resolve target dir; route not registered",
+				"prefix", reqDir, "dir", targetDir, "error", err)
 			return
 		}
 	}
@@ -1390,7 +1440,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 	// route serves is decoded-wildcard-path under it.
 	baseAbs := filepath.Join(rootAbs, tail)
 	if s.options.Debug {
-		fmt.Printf("**-> static root: %q, base: %q\n", rootAbs, baseAbs)
+		s.log.Debug("rweb: static root", "root", rootAbs, "base", baseAbs)
 	}
 
 	// The SPA fallback file, worked out once like the root: absolute, and
@@ -1474,7 +1524,7 @@ func (s *Server) staticFiles(reqDir string, targetDir string, nbrOfTokensToStrip
 		// mangle it), as the absolute mode always did.
 		candAbs := filepath.Join(baseAbs, decoded)
 		if s.options.Debug {
-			fmt.Println("**-> fileFullPath", candAbs)
+			s.log.Debug("rweb: static file", "path", candAbs)
 		}
 
 		// Belt-and-suspenders containment check: even with `..` rejected above,
@@ -1584,7 +1634,7 @@ func (s *Server) Request(method string, url string, headers []Header, body io.Re
 	if body != nil {
 		b, err := io.ReadAll(body)
 		if err != nil {
-			log.Printf("rweb: error reading synthetic request body: %v", err)
+			s.log.Error("rweb: reading synthetic request body", "error", err)
 		}
 		ctx.request.body = append(ctx.request.body, b...)
 	}
@@ -1796,6 +1846,9 @@ func (s *Server) Routes() []rtr.RouteList {
 }
 
 // ListRoutes prints all server routes (Routes) in tabular format.
+// It writes to stdout rather than the server's Logger: printing the table
+// is what the caller asked for, and a table split into log records would be
+// unreadable. Use Routes for the data.
 func (s *Server) ListRoutes() {
 	fmt.Println("\n---- Routes ----")
 	routesList := s.Routes()
@@ -1890,8 +1943,8 @@ func (s *Server) serveConn(tc *trackedConn) {
 	// cleanup defers above so they still run (LIFO) once we've recovered.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("rweb: recovered panic serving connection from %s: %v\n%s",
-				conn.RemoteAddr(), r, debug.Stack())
+			s.log.Error("rweb: recovered panic serving connection",
+				"remote", conn.RemoteAddr().String(), "panic", r, "stack", string(debug.Stack()))
 			_, _ = io.WriteString(conn, consts.HTTPInternalError)
 		}
 	}()
@@ -1915,7 +1968,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 		case isTimeout(err):
 			_, _ = io.WriteString(conn, consts.HTTPRequestTimeout)
 		case s.options.Debug && !errors.Is(err, io.EOF):
-			fmt.Println("Error reading request:", err)
+			s.log.Debug("rweb: reading request", "remote", conn.RemoteAddr().String(), "error", err)
 		}
 	}
 
@@ -1946,7 +1999,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 			// the client closed, went idle too long, never finished its
 			// handshake, or Shutdown woke the read with a past deadline.
 			if s.options.Debug && !errors.Is(err, io.EOF) && !isTimeout(err) {
-				fmt.Println("Error reading connection:", err)
+				s.log.Debug("rweb: reading connection", "remote", conn.RemoteAddr().String(), "error", err)
 			}
 			return
 		}
@@ -1987,10 +2040,6 @@ func (s *Server) serveConn(tc *trackedConn) {
 		if !isValidRequestMethod(method) {
 			_, _ = io.WriteString(conn, consts.HTTPNotImplemented)
 			return
-		}
-
-		if s.options.Verbose {
-			fmt.Println(strings.Repeat("-", 64))
 		}
 
 		// Work on the line without its ending. readLine stops at the first
@@ -2243,8 +2292,8 @@ func (s *Server) serveConn(tc *trackedConn) {
 				ctx.request.body = slices.Grow(ctx.request.body, int(contentLen))[:start+int(contentLen)]
 				_, err = io.ReadFull(ctx.reader, ctx.request.body[start:])
 				if err != nil {
-					if s.options.Verbose {
-						fmt.Println("Error reading request body:", err)
+					if s.options.Debug { // the client's doing: it stopped sending
+						s.log.Debug("rweb: reading request body", "path", ctx.request.path, "error", err)
 					}
 					headFailed(err)
 					return
@@ -2280,13 +2329,13 @@ func (s *Server) serveConn(tc *trackedConn) {
 		rd.set(0)
 
 		if s.options.Debug && len(ctx.request.body) > 0 {
-			fmt.Printf("** ctx.request.body: %q\n", string(ctx.request.body))
+			s.log.Debug("rweb: request body", "path", ctx.request.path, "body", string(ctx.request.body))
 		}
 
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
 		if s.options.DebugRequestContext {
-			fmt.Printf("** ctx -> %#v\n\n", ctx)
+			s.log.Debug("rweb: request context", "context", fmt.Sprintf("%#v", ctx))
 		}
 
 		// If the connection was upgraded to WebSocket, exit the HTTP loop
@@ -2387,8 +2436,9 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		}
 	}
 	if s.options.Debug {
-		fmt.Printf(" %s - ContentType: %q, Request Body Length: %d, Scheme: %q, Host: %q, Path: %q, Query: %q\n",
-			method, string(ctx.ContentType), len(ctx.request.body), ctx.scheme, ctx.host, ctx.path, ctx.query)
+		s.log.Debug("rweb: handling request", "method", method, "contentType", string(ctx.ContentType),
+			"bodyLength", len(ctx.request.body), "scheme", ctx.scheme, "host", ctx.host,
+			"path", ctx.path, "query", ctx.query)
 	}
 
 	// Parse Post Args.
@@ -2409,7 +2459,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		if hasContentTypePrefix(ctx.ContentType, consts.BytFormData) {
 			ctx.request.parsePostArgs()
 			if s.options.Debug {
-				fmt.Println("** Post Args -->", ctx.request.postArgs.String())
+				s.log.Debug("rweb: form args", "path", ctx.path, "args", ctx.request.postArgs.String())
 			}
 		}
 	}
@@ -2436,7 +2486,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		// read loop's error). Most such errors are just the peer leaving;
 		// log only the ones that say something more (isWebSocketSessionEnd).
 		if !isWebSocketSessionEnd(err) {
-			log.Printf("[ERR] websocket %q - error: %s\n", ctx.path, err)
+			s.log.Error("rweb: WebSocket handler failed", "path", ctx.path, "error", err)
 		}
 	case err != nil:
 		// An error response replaces a stream the handler attached before
@@ -2672,7 +2722,9 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// Write the header block (and the coalesced body) to the response writer
 	_, err := respWriter.Write(tmp.Bytes())
 	if err != nil {
-		fmt.Println("Error writing headers: ", err)
+		if s.options.Debug { // the client's doing: it left, or stopped reading
+			s.log.Debug("rweb: writing response", "path", ctx.request.path, "error", err)
+		}
 		// A failed write (the client went away, or stalled past the write
 		// timeout) leaves part of a response on the wire, so this connection
 		// can carry nothing more. Closing it makes every later write fail
@@ -2729,8 +2781,8 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	} else {
 		// fmt.Println("RWEB: SSE events channel is set -- sending events")
 		err = s.sendSSE(ctx, respWriter)
-		if err != nil {
-			fmt.Println("Error sending SSE events: ", err)
+		if err != nil && s.options.Debug { // a write to a client that left or stalled
+			s.log.Debug("rweb: SSE stream ended on a write error", "path", ctx.request.path, "error", err)
 		}
 	}
 }
@@ -2752,7 +2804,7 @@ func (s *Server) writeUnframedBody(ctx *context, respWriter io.Writer) {
 	}
 	if _, err := io.Copy(respWriter, r); err != nil {
 		if s.options.Debug {
-			fmt.Printf("rweb: unframed body stream %s: %v\n", streamName(r), err)
+			s.log.Debug("rweb: unframed body stream failed", "stream", streamName(r), "error", err)
 		}
 		closeConn(ctx)
 	}
@@ -2823,7 +2875,8 @@ func (s *Server) writeBodyStream(ctx *context, respWriter io.Writer) {
 	}
 	if n < size {
 		if s.options.Debug {
-			fmt.Printf("rweb: body stream %s cut short at %d of %d bytes: %v\n", streamName(r), n, size, err)
+			s.log.Debug("rweb: body stream cut short", "stream", streamName(r),
+				"sent", n, "size", size, "error", err)
 		}
 		if ctx.conn != nil {
 			_ = ctx.conn.Close()
@@ -2881,7 +2934,7 @@ func (s *Server) writeChunkedBody(ctx *context, respWriter io.Writer) {
 	}
 	fail := func(what string, err error) {
 		if s.options.Debug {
-			fmt.Printf("rweb: chunked body stream %s: %s: %v\n", streamName(r), what, err)
+			s.log.Debug("rweb: chunked body stream failed", "stream", streamName(r), "step", what, "error", err)
 		}
 		if ctx.conn != nil {
 			_ = ctx.conn.Close()
@@ -2976,8 +3029,8 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 	// Send a connect event -- not required per SSE standard, but may be helpful
 	if s.options.SSECfg.SendConnectedEvent {
 		_, err = fmt.Fprint(respWriter, "event: message\ndata: Connected\n\n")
-		if err != nil {
-			fmt.Println("Error writing connect message: ", err)
+		if err != nil && s.options.Debug {
+			s.log.Debug("rweb: SSE writing connect message", "path", ctx.request.path, "error", err)
 			// carry on anyway
 		}
 	}
@@ -2989,8 +3042,8 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 	}
 
 	if s.options.Verbose {
-		fmt.Printf("RWEB Serving SSE %q events from channel: %v...\tStatus code: %d\n",
-			ctx.sseEventName, ctx.sseEventsChan, ctx.status)
+		s.log.Info("rweb: SSE stream started", "path", ctx.request.path, "event", ctx.sseEventName,
+			"channel", fmt.Sprintf("%v", ctx.sseEventsChan), "status", ctx.status)
 	}
 
 	// The server shutting down ends the stream too. An event stream has no
@@ -3011,7 +3064,8 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 		case <-connGone:
 			// Client disconnected — clean exit
 			if s.options.Verbose {
-				fmt.Printf("RWEB SSE client disconnected (conn closed), cleaning up channel: %v\n", ctx.sseEventsChan)
+				s.log.Info("rweb: SSE stream ended, client disconnected", "path", ctx.request.path,
+					"channel", fmt.Sprintf("%v", ctx.sseEventsChan))
 			}
 			_ = rw.Flush()
 			return nil
@@ -3020,14 +3074,18 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 			// Flush what was written, return (the deferred cleanup runs and
 			// the connection loop closes the conn), as for SSEClose.
 			if s.options.Verbose {
-				fmt.Printf("RWEB SSE stream ended by server shutdown, channel: %v\n", ctx.sseEventsChan)
+				s.log.Info("rweb: SSE stream ended by server shutdown", "path", ctx.request.path,
+					"channel", fmt.Sprintf("%v", ctx.sseEventsChan))
 			}
 			_ = rw.Flush()
 			return nil
 
 		case event, ok := <-ctx.sseEventsChan:
 			if !ok {
-				fmt.Println("SSE Channel closed and drained, let's clean up and exit...")
+				if s.options.Verbose {
+					s.log.Info("rweb: SSE stream ended, channel closed", "path", ctx.request.path,
+						"channel", fmt.Sprintf("%v", ctx.sseEventsChan))
+				}
 				_ = rw.Flush()
 				return
 			}
@@ -3048,8 +3106,10 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 			// any value comparison is tried. An SSEvent whose Data is "close"
 			// is not a sentinel and is sent like any other event.
 			if event == SSEClose || event == "close" {
-				fmt.Printf("RWEB Received close event, shutting down SSE %q events from channel: %v...\n",
-					ctx.sseEventName, ctx.sseEventsChan)
+				if s.options.Verbose {
+					s.log.Info("rweb: SSE stream ended by close event", "path", ctx.request.path,
+						"event", ctx.sseEventName, "channel", fmt.Sprintf("%v", ctx.sseEventsChan))
+				}
 				rw.Flush()
 				return
 			}
@@ -3079,22 +3139,28 @@ func (s *Server) sendSSE(ctx *context, respWriter io.Writer) (err error) {
 				// stream must end. Continuing would retry every later event
 				// against a dead conn for as long as the producer runs.
 				if fErr := rw.Flush(); fErr != nil {
-					fmt.Printf("Error writing SSE event from channel %v: %v\n", ctx.sseEventsChan, fErr)
+					// The conn failed: returned to writeResponse, which logs it
+					// at debug level.
 					return fErr
 				}
-				fmt.Printf("Error writing SSE event from channel %v: %v\n", ctx.sseEventsChan, err)
+				// Only the event failed (its payload could not be encoded;
+				// see writeSSEEvent): the producer's bug, not the client's,
+				// and the stream goes on without it.
+				s.log.Warn("rweb: SSE event not sent", "path", ctx.request.path,
+					"channel", fmt.Sprintf("%v", ctx.sseEventsChan), "error", err)
 				continue
 			}
 
 			err = rw.Flush() // Flush the buffer to send data immediately
 			if err != nil {
-				fmt.Printf("Error flushing SSE output from channel %v: %v\n", ctx.sseEventsChan, err)
+				// Returned to writeResponse, which logs it at debug level.
 				rw.Reset(respWriter) // Reset the buffer for the next event
 				return err
 			}
 
 			if s.options.Verbose {
-				fmt.Printf("RWEB Sent (from channel: %v) event: %v\n", ctx.sseEventsChan, event)
+				s.log.Info("rweb: SSE event sent", "path", ctx.request.path,
+					"channel", fmt.Sprintf("%v", ctx.sseEventsChan), "event", event)
 			}
 		}
 	}
@@ -3238,6 +3304,7 @@ func (s *Server) newContext() *context {
 			body:    make([]byte, 0, 1024),
 			headers: make([]Header, 0, 8),
 			status:  200,
+			log:     s.log,
 		},
 		data: make(map[string]any),
 	}

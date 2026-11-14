@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -616,34 +615,6 @@ func TestWebSocketAppReadDeadlineCleared(t *testing.T) {
 
 // --- the WebSocket handler's error -------------------------------------------
 
-// syncBuffer is a bytes.Buffer safe for the log package writing from server
-// goroutines while the test reads it.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
-}
-
-// captureLog sends the standard logger's output to a buffer for the test.
-func captureLog(t *testing.T) *syncBuffer {
-	buf := &syncBuffer{}
-	prevOut, prevFlags := log.Writer(), log.Flags()
-	log.SetOutput(buf)
-	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
-	return buf
-}
-
 // After the upgrade the connection speaks WebSocket, so the error handler's
 // HTML page could never be sent; and the error a read loop most often
 // returns is the peer leaving. Neither reaches the error handler, and only
@@ -679,8 +650,8 @@ func TestWebSocketHandlerErrorAfterUpgrade(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			logs := captureLog(t)
-			s := NewServer()
+			logs := &captureLogger{} // logging_test.go
+			s := NewServer(ServerOptions{Logger: logs})
 			handlerErrs := make(chan error, 1)
 			s.errorHandler = func(_ Context, err error) { handlerErrs <- err }
 			returned := make(chan error, 1)

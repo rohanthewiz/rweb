@@ -234,6 +234,40 @@ func main() {
 }
 ```
 
+## Logging
+
+The server writes its own log lines (errors it cannot return to anyone,
+warnings about misuse, and traces when asked for) through
+`ServerOptions.Logger`. Left nil, it writes through
+[github.com/rohanthewiz/logger](https://github.com/rohanthewiz/logger), so
+the app configures format, level and hooks once with `logger.InitLog`. A
+handler error built with [serr](https://github.com/rohanthewiz/serr)
+(`serr.Wrap(err, "userId", id)`) is logged through `logger.LogErr`, so its
+attributes and wrap locations become log fields:
+
+```go
+logger.InitLog(logger.LogConfig{Formatter: "json", LogLevel: "info"})
+defer logger.CloseLog()
+
+s := rweb.NewServer(rweb.ServerOptions{Address: ":8080"})
+```
+
+Any value with `Debug`, `Info`, `Warn` and `Error(msg string, keyVals ...any)`
+methods can take its place; a `*slog.Logger` fits as it is:
+
+```go
+s := rweb.NewServer(rweb.ServerOptions{Logger: slog.Default()})
+// or: rweb.NewServerWithOptions(rweb.WithLogger(slog.Default()))
+```
+
+Errors and warnings are always logged. Info lines (listening address, proxy
+targets, SSE streams starting and ending) need `Verbose`; debug lines
+(routing trace, request bodies, clients that left mid-response) need
+`Debug`, and the logger's own level must let debug through as well (with the
+default logger, `logger.InitLog`'s default level is debug; without `InitLog`
+it is info). The `rweb.RequestInfo` middleware logs one info line per
+request. `SSEHub` has no server and takes its own `SSEHubOptions.Logger`.
+
 ## Connection Limits and Timeouts
 
 Connections are bounded by default. Each limit is a `ServerOptions` field with a matching

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -59,6 +59,19 @@ type response struct {
 	// closes the stream (when it is an io.Closer); Clean is the backstop.
 	bodyStream     io.Reader
 	bodyStreamSize int64
+
+	// log is the server's Logger, set once when the pooled context is
+	// built (newContext) and never cleared, as it is config, not request
+	// state. Kept here rather than reached through the context because
+	// response methods (SetHeader, materializeBody) have no way back to it.
+	// Nil for a response built outside NewServer; logger() covers that.
+	log Logger
+}
+
+// logger returns the server's Logger, or the default for a response not
+// built by a server.
+func (res *response) logger() Logger {
+	return orDefaultLogger(res.log)
 }
 
 // Body returns the response body.
@@ -120,7 +133,10 @@ func (res *response) materializeBody() {
 		res.body = res.body[:n+read]
 	}
 	if err != nil {
-		log.Printf("rweb: reading response body stream %s: %v", streamName(r), err)
+		// The body is now short of what the stream promised and nothing
+		// returns an error from here, so the line is the only trace.
+		res.logger().Error("rweb: reading response body stream; body is short",
+			"stream", streamName(r), "error", err)
 	}
 }
 
@@ -202,7 +218,7 @@ func headerKeyEqual(a, b string) bool {
 // no allocation. Most calls find no match or one, so the compaction loop
 // rarely does any work.
 func (res *response) SetHeader(key string, value string) {
-	if !acceptHeaderKey(key) {
+	if !res.acceptHeaderKey(key) {
 		return
 	}
 	value = sanitizeHeaderValue(value)
@@ -233,22 +249,22 @@ func (res *response) SetHeader(key string, value string) {
 // AddHeader adds a header (allows multiple values for the same key, like Set-Cookie)
 // The key and value are checked as in SetHeader.
 func (res *response) AddHeader(key string, value string) {
-	if !acceptHeaderKey(key) {
+	if !res.acceptHeaderKey(key) {
 		return
 	}
 	res.headers = append(res.headers, Header{Key: key, Value: sanitizeHeaderValue(value)})
 }
 
 // acceptHeaderKey reports whether key may be stored as a response header,
-// logging the ones refused. The log is unconditional because the response
-// has no reference to the server's Debug option, and a dropped header is
-// a bug in the caller that should not pass silently. %q keeps a key with
-// CR or LF in it on one log line.
-func acceptHeaderKey(key string) bool {
+// logging the ones refused. A dropped header is a bug in the caller that
+// should not pass silently, so it is a warning, logged whatever the Debug
+// option says. The key is quoted (%q) so one with CR or LF in it stays on
+// one line in a text log and cannot forge a line of its own.
+func (res *response) acceptHeaderKey(key string) bool {
 	if isValidHeaderKey(key) {
 		return true
 	}
-	log.Printf("rweb: dropping response header with invalid name %q", key)
+	res.logger().Warn("rweb: dropping response header with invalid name", "name", strconv.Quote(key))
 	return false
 }
 

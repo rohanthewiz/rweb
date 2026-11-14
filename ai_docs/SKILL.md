@@ -22,8 +22,9 @@ import (
 func main() {
     s := rweb.NewServer(rweb.ServerOptions{
         Address: ":8080",  // Use ":port" format for Docker compatibility
-        Verbose: true,     // Enable request logging
-        Debug:   false,    // Debug mode
+        Verbose: true,     // Info lines: listening address, proxy targets, SSE streams
+        Debug:   false,    // Debug lines: routing trace, request bodies, client disconnects
+        // Logger: slog.Default(), // nil (default) logs through github.com/rohanthewiz/logger
     })
 
     s.Get("/", func(ctx rweb.Context) error {
@@ -362,7 +363,9 @@ s.Use(func(ctx rweb.Context) error {
     return ctx.Next()
 })
 
-// Built-in request info logger -- highly recommended
+// Built-in request info logger -- highly recommended.
+// One info line per request (method, path, status, duration) through the
+// server's Logger (ServerOptions.Logger; default github.com/rohanthewiz/logger).
 s.Use(rweb.RequestInfo)
 ```
 

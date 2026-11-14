@@ -2,7 +2,6 @@ package rweb
 
 import (
 	"encoding/json"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +35,12 @@ type SSEHubOptions struct {
 	// may call back into the hub (ClientCount, Broadcast, Register). Keep it
 	// short: an eviction callback delays the Broadcast that triggered it.
 	OnDisconnect func()
+
+	// Logger receives the hub's log lines (a Broadcast whose event cannot
+	// be encoded). The hub is not tied to a server, so it does not use
+	// ServerOptions.Logger; nil selects the same default, which writes
+	// through github.com/rohanthewiz/logger.
+	Logger Logger
 }
 
 // hubClient tracks per-client state within the hub.
@@ -248,7 +253,10 @@ func (h *SSEHub) Broadcast(event SSEvent) {
 
 	bytPayload, err := json.Marshal(payload)
 	if err != nil {
-		fmt.Printf("SSEHub: failed to marshal broadcast event: %v\n", err)
+		// The caller's bug (Data holds something JSON cannot encode), with
+		// no error return to report it through.
+		orDefaultLogger(h.opts.Logger).Error("rweb: SSEHub broadcast event not sent; cannot encode it as JSON",
+			"type", event.Type, "error", err)
 		return
 	}
 

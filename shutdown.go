@@ -3,7 +3,6 @@ package rweb
 import (
 	stdctx "context"
 	"errors"
-	"fmt"
 	"net"
 	"sync/atomic"
 	"time"
@@ -212,7 +211,7 @@ func (s *Server) serve(l net.Listener) error {
 		if s.options.TLS.UseTLS {
 			protocol = consts.HTTPS
 		}
-		fmt.Printf("Serving at %s://%s\n", protocol, l.Addr())
+		s.log.Info("rweb: serving", "address", protocol+"://"+l.Addr().String())
 	}
 
 	if s.options.ReadyChan != nil { // remember to nil check!
@@ -239,9 +238,12 @@ func (s *Server) serve(l net.Listener) error {
 			// Anything else (EMFILE, ECONNABORTED, a TLS listener's
 			// failure) may pass: retry, but back off rather than spin.
 			delay = nextAcceptDelay(delay)
-			if s.options.Debug {
-				fmt.Printf("Error accepting connection: %v; retrying in %v\n", err, delay)
-			}
+			// Not gated by Debug: an accept error (fd exhaustion, say)
+			// stops new clients being served, which the operator needs to
+			// see. The backoff caps it at one line a second, and net/http
+			// logs the same case the same way.
+			s.log.Warn("rweb: accepting connection failed; retrying",
+				"error", err, "retryIn", delay.String())
 			time.Sleep(delay)
 			continue
 		}
