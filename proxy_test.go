@@ -462,8 +462,13 @@ func TestProxyStripsHopByHopHeaders(t *testing.T) {
 
 // The upstream learns who asked: X-Forwarded-For gains the immediate peer
 // (after whatever earlier proxies put there), X-Forwarded-Proto and
-// X-Forwarded-Host describe this hop and replace client-sent values, and the
-// Host the upstream sees is still the target's own.
+// X-Forwarded-Host describe this hop and replace values sent by an untrusted
+// peer, and the Host the upstream sees is still the target's own.
+//
+// The test client connects from 127.0.0.1, which the default TrustedProxies
+// trusts, so this server is set to trust none, which makes the client an
+// untrusted peer; TestProxyPassesTrustedForwardedProtoHost covers the
+// trusted case.
 func TestProxySetsForwardedHeaders(t *testing.T) {
 	type seen struct {
 		host string
@@ -476,7 +481,7 @@ func TestProxySetsForwardedHeaders(t *testing.T) {
 	t.Cleanup(up.Close)
 	upHost := strings.TrimPrefix(up.URL, "http://")
 
-	s := rweb.NewServer()
+	s := rweb.NewServer(rweb.ServerOptions{TrustedProxies: rweb.NoTrustedProxies()})
 	assert.Nil(t, s.Proxy("/up", up.URL, 1))
 	c, br := dialProxyTest(t, serveProxyTest(t, s))
 
@@ -500,6 +505,39 @@ func TestProxySetsForwardedHeaders(t *testing.T) {
 	assert.Equal(t, "198.51.100.1, 203.0.113.9, 127.0.0.1", strings.Join(g.h.Values("X-Forwarded-For"), "|"))
 	assert.Equal(t, "http", strings.Join(g.h.Values("X-Forwarded-Proto"), "|"))
 	assert.Equal(t, "front.test:8443", strings.Join(g.h.Values("X-Forwarded-Host"), "|"))
+}
+
+// From a trusted peer (here 127.0.0.1, under the default TrustedProxies) the
+// X-Forwarded-Proto and X-Forwarded-Host it sent pass through: it is the
+// front of the chain, a TLS-terminating balancer say, and knows the scheme
+// and host the client used, where this hop would report http. When it sent
+// none, this hop's values are set as before. X-Forwarded-For is appended to
+// either way.
+func TestProxyPassesTrustedForwardedProtoHost(t *testing.T) {
+	got := make(chan http.Header, 4)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+	}))
+	t.Cleanup(up.Close)
+
+	s := rweb.NewServer() // default TrustedProxies: loopback is trusted
+	assert.Nil(t, s.Proxy("/up", up.URL, 1))
+	c, br := dialProxyTest(t, serveProxyTest(t, s))
+
+	proxyRoundTrip(t, c, br, "GET", "GET /up/a HTTP/1.1\r\nHost: backend.internal\r\n"+
+		"X-Forwarded-For: 198.51.100.1\r\n"+
+		"X-Forwarded-Proto: https\r\n"+
+		"X-Forwarded-Host: www.example.com\r\n\r\n")
+	h := <-got
+	assert.Equal(t, "198.51.100.1, 127.0.0.1", strings.Join(h.Values("X-Forwarded-For"), "|"))
+	assert.Equal(t, "https", strings.Join(h.Values("X-Forwarded-Proto"), "|"))
+	assert.Equal(t, "www.example.com", strings.Join(h.Values("X-Forwarded-Host"), "|"))
+
+	// A trusted peer that sent none: this hop's values.
+	proxyRoundTrip(t, c, br, "GET", "GET /up/b HTTP/1.1\r\nHost: backend.internal\r\n\r\n")
+	h = <-got
+	assert.Equal(t, "http", h.Get("X-Forwarded-Proto"))
+	assert.Equal(t, "backend.internal", h.Get("X-Forwarded-Host"))
 }
 
 // The response body is streamed, not read into memory first: the client

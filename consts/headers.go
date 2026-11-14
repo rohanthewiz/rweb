@@ -85,6 +85,7 @@ const (
 	HeaderXForwardedFor   = "X-Forwarded-For"
 	HeaderXForwardedHost  = "X-Forwarded-Host"
 	HeaderXForwardedProto = "X-Forwarded-Proto"
+	HeaderXRealIP         = "X-Real-IP"
 
 	// Redirects.
 	HeaderLocation = "Location"

@@ -168,12 +168,15 @@ func removeHopByHop(h http.Header) {
 //   - X-Forwarded-Proto: the scheme the client used to reach this server.
 //   - X-Forwarded-Host: the host the client asked this server for.
 //
-// Proto and Host replace any value the client sent. They describe this
+// Proto and Host from an untrusted peer are replaced. They describe this
 // hop, which this server knows first-hand; a client-sent value is unchecked
 // and would let anyone claim https, or a host name the upstream builds
-// links or redirects from. The cost is behind another proxy that already
-// set them (a TLS-terminating load balancer), whose values are replaced
-// with this hop's; honouring them needs a list of trusted proxies.
+// links or redirects from. From a trusted peer (ServerOptions.TrustedProxies,
+// since N-055), a value it sent is passed on as it is: that peer is the
+// front of the chain (a TLS-terminating load balancer, say), and knows the
+// scheme and host the client really used, where this hop would only report
+// its own (http from the balancer). A trusted peer that sent none gets this
+// hop's values, as before.
 func setForwardedHeaders(h http.Header, ctx Context) {
 	if ip := peerIP(ctx); ip != "" {
 		if prior := h.Values(consts.HeaderXForwardedFor); len(prior) > 0 {
@@ -181,10 +184,15 @@ func setForwardedHeaders(h http.Header, ctx Context) {
 		}
 		h.Set(consts.HeaderXForwardedFor, ip)
 	}
-	if scheme := ctx.Request().Scheme(); scheme != "" {
+
+	trusted := false
+	if c, ok := ctx.(*context); ok {
+		trusted = c.forwardedTrusted()
+	}
+	if scheme := ctx.Request().Scheme(); scheme != "" && !(trusted && h.Get(consts.HeaderXForwardedProto) != "") {
 		h.Set(consts.HeaderXForwardedProto, scheme)
 	}
-	if host := ctx.Request().Host(); host != "" {
+	if host := ctx.Request().Host(); host != "" && !(trusted && h.Get(consts.HeaderXForwardedHost) != "") {
 		h.Set(consts.HeaderXForwardedHost, host)
 	}
 }

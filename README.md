@@ -220,7 +220,8 @@ func main() {
 	// 		- This will proxy to http://localhost:8081/usa/proxy-incoming/status
 	// The upstream's response is streamed to the client as it arrives, 3xx redirects are passed
 	// through rather than followed, hop-by-hop headers are dropped both ways, and X-Forwarded-For,
-	// -Proto and -Host are set. An upstream with no response headers within
+	// -Proto and -Host are set (a trusted peer's -Proto and -Host, see TrustedProxies below, are
+	// passed on). An upstream with no response headers within
 	// ProxyResponseHeaderTimeout (WithProxyResponseHeaderTimeout; default 60s) gets a 504, an
 	// unreachable one a 502.
 	err := s.Proxy("/via-proxy/usa", "http://localhost:8081/proxy-incoming", 1)
@@ -310,6 +311,30 @@ Keep-alive follows RFC 9112: an HTTP/1.1 connection stays open unless the reques
 handler's response) says `Connection: close`, and an HTTP/1.0 connection closes after each
 response unless the client asks for `Connection: keep-alive`. An HTTP/1.0 client is never sent
 chunked encoding: a body of unknown length goes to it unframed and the connection closes after.
+
+## Client IP Behind Proxies
+
+`ctx.ClientIP()` reads `X-Forwarded-For` and `X-Real-IP` only when the connection's peer is a
+trusted proxy; from any other peer it returns the peer's own address, so a client cannot choose
+the IP your rate limits and logs see. `X-Forwarded-For` is read right to left, past the trusted
+proxies, so an entry a client forged ahead of them is never the answer.
+
+| `ServerOptions.TrustedProxies` | Trusted peers |
+|--------------------------------|---------------|
+| `nil` (default) | loopback and private ranges (`127.0.0.0/8`, `::1`, `10/8`, `172.16/12`, `192.168/16`, `fc00::/7`): nginx on the host, Docker, a VPC load balancer |
+| `rweb.NoTrustedProxies()` | none |
+| `rweb.TrustAllProxies()` | all: the leftmost `X-Forwarded-For` entry, as before v0.2.1 |
+| your own `[]netip.Prefix` | those, e.g. `append(rweb.DefaultTrustedProxies(), netip.MustParsePrefix("203.0.113.0/24"))` |
+
+```go
+s := rweb.NewServerWithOptions(
+	rweb.WithAddress(":8080"),
+	rweb.WithTrustedProxies(netip.MustParsePrefix("10.20.0.0/16")), // only the load balancer's subnet
+)
+```
+
+The same list decides whether a `Proxy` route passes a peer's `X-Forwarded-Proto` and
+`X-Forwarded-Host` on to the upstream (trusted) or replaces them with its own (untrusted).
 
 ## Request Context and Cancellation
 

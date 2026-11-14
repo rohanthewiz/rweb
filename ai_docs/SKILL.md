@@ -1226,8 +1226,10 @@ From v0.2.1:
   answered `100 Continue`). So WebSocket upgrades cannot be proxied. Repeated request headers
   keep every line (they used to collapse to the last one).
 - **`X-Forwarded-*` is set**: `X-Forwarded-For` gets the peer's IP appended (`"client, proxy1,
-  peer"`), `X-Forwarded-Proto` and `X-Forwarded-Host` are set to what this server saw,
-  replacing client-sent values. The upstream's `Host` is still the target's host.
+  peer"`). `X-Forwarded-Proto` and `X-Forwarded-Host` are set to what this server saw,
+  replacing values sent by an untrusted peer; a **trusted** peer's values (see
+  `TrustedProxies` under Client IP, below; v0.2.1+) are passed on, so a TLS-terminating load
+  balancer's `https` reaches the upstream. The upstream's `Host` is still the target's host.
 - **Upstream failures**: no response headers within `ProxyResponseHeaderTimeout` → **504**;
   unreachable, refused or a bad response → **502** (was 500). Both still go to the error
   handler, which logs them and keeps the status. The timeout covers only the wait for the
@@ -1293,6 +1295,38 @@ s.Use(func(ctx rweb.Context) error {
     return ctx.Next()
 })
 ```
+
+### Client IP and Trusted Proxies (v0.2.1+)
+
+`ctx.ClientIP()` is the client's address. `X-Forwarded-For` and `X-Real-IP` are read **only
+when the connection's peer is a trusted proxy**; from anyone else they are ignored and the
+answer is the peer's address. Before v0.2.1 the leftmost `X-Forwarded-For` entry was
+returned from any peer, so any client could pick its own "IP" (rate limits, audit logs).
+
+`ServerOptions.TrustedProxies []netip.Prefix`:
+
+| Value | Trusted peers |
+|-------|---------------|
+| `nil` (default) | loopback and private ranges: `127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` (nginx/Caddy on the host, Docker, a VPC load balancer) |
+| `rweb.NoTrustedProxies()` / `rweb.WithTrustedProxies()` | none: always the peer's address |
+| `rweb.TrustAllProxies()` | every peer: leftmost entry, the old behaviour (only when every path in goes through a proxy that overwrites the header) |
+| your list | e.g. `append(rweb.DefaultTrustedProxies(), netip.MustParsePrefix("203.0.113.0/24"))` |
+
+```go
+s := rweb.NewServerWithOptions(
+    rweb.WithTrustedProxies(netip.MustParsePrefix("10.20.0.0/16")), // only the LB subnet
+)
+```
+
+From a trusted peer, `X-Forwarded-For` is walked **right to left** (across all its header
+lines), skipping trusted addresses; the first untrusted one is the client. So with a trusted
+nginx at `10.0.0.5` and a trusted LB as the peer, `X-Forwarded-For: 1.2.3.4, 203.0.113.7,
+10.0.0.5` gives `203.0.113.7`; `1.2.3.4` (forged by the client before nginx appended) is never
+used. All trusted → the leftmost entry. An entry that is not an IP (`unknown`) stops the walk at
+the last valid one. No answer from the header → `X-Real-IP` (if an IP) → the peer. Addresses
+from headers come back canonical (`[2001:db8::1]:4711` → `2001:db8::1`, `::ffff:1.2.3.4` →
+`1.2.3.4`). A synthetic `s.Request()` has no peer and reads the headers, unless no proxy is
+trusted. The same list decides whether a `Proxy` route passes on `X-Forwarded-Proto`/`-Host`.
 
 ### Request Context (v0.2.0+)
 

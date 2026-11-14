@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -150,6 +151,27 @@ type ServerOptions struct {
 	// are always logged; info and debug lines only with Verbose and Debug.
 	// See the Logger type for which line goes out at which level.
 	Logger Logger
+
+	// TrustedProxies lists the peers (by address prefix) whose forwarding
+	// headers are believed: ClientIP reads X-Forwarded-For and X-Real-IP
+	// only from them, and a Proxy route passes on their X-Forwarded-Proto
+	// and X-Forwarded-Host instead of replacing them with this hop's.
+	//
+	//	nil (default)        DefaultTrustedProxies(): loopback and private
+	//	                     ranges, so nginx on the host or a Docker/VPC
+	//	                     network works unconfigured
+	//	NoTrustedProxies()   none: ClientIP is always the peer's address
+	//	TrustAllProxies()    every peer: ClientIP as before N-055 (leftmost
+	//	                     X-Forwarded-For entry); only safe when every
+	//	                     path to the server goes through proxies that
+	//	                     overwrite the header
+	//	your own list        e.g. append(rweb.DefaultTrustedProxies(),
+	//	                     netip.MustParsePrefix("203.0.113.0/24"))
+	//
+	// A single address is a full-length prefix ("203.0.113.7/32"). The
+	// list is copied when the server is created. See client_ip.go for how
+	// X-Forwarded-For is walked.
+	TrustedProxies []netip.Prefix
 }
 
 // defaultMaxRequestBodySize is the request-body cap used when
@@ -389,6 +411,16 @@ func WithSSEAllowedOrigins(origins ...string) ServerOption {
 	}
 }
 
+// WithTrustedProxies sets the peers whose forwarding headers are believed;
+// see ServerOptions.TrustedProxies. With no arguments no peer is trusted
+// (the empty list, not the default): the list is always non-nil here, since
+// a nil one would select DefaultTrustedProxies.
+func WithTrustedProxies(prefixes ...netip.Prefix) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.TrustedProxies = append([]netip.Prefix{}, prefixes...)
+	}
+}
+
 // WithProxyResponseHeaderTimeout bounds the wait of a Proxy route for the
 // upstream's response headers; past it the client gets a 504. 0 selects the
 // default (60 s); a negative value disables it.
@@ -424,6 +456,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.ShutdownTimeout = serverOpts.ShutdownTimeout
 		opts.ProxyResponseHeaderTimeout = serverOpts.ProxyResponseHeaderTimeout
 		opts.Logger = serverOpts.Logger
+		opts.TrustedProxies = serverOpts.TrustedProxies
 	}
 }
 
@@ -507,6 +540,11 @@ type Server struct {
 	// in NewServer so every call site can use it without a nil check. See
 	// logging.go for which lines go out at which level.
 	log Logger
+
+	// trustedProxies is options.TrustedProxies resolved once in NewServer
+	// (nil → the default list; otherwise a masked copy). Never nil-vs-empty
+	// ambiguous after that: empty means no peer is trusted. See client_ip.go.
+	trustedProxies []netip.Prefix
 
 	// notFoundHandler and methodNotAllowedHandler, when set, write the
 	// response for a request no route matched (404) or one whose path is
@@ -607,6 +645,9 @@ func NewServer(options ...ServerOptions) *Server {
 		limits:       resolveConnLimits(opts),
 		errorHandler: defaultErrorHandler,
 	}
+
+	// After s.log, which reports an invalid entry.
+	s.trustedProxies = resolveTrustedProxies(opts.TrustedProxies, s.log)
 
 	// Validate ready channel capacity. Serve's send on it does not block
 	// (see Serve), so with no buffer the signal is lost unless the caller

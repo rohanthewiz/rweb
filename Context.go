@@ -163,13 +163,13 @@ type Context interface {
 	// set, since 204 responses MUST NOT carry a body per RFC 7230.
 	NoContent() error
 
-	// ClientIP returns the best-guess client IP for this request, applying
-	// the resolution order most production setups want behind a reverse
-	// proxy: X-Forwarded-For (first hop) → X-Real-IP → RemoteAddr.
-	// Returns an empty string only if all three are unavailable.
-	// SECURITY NOTE: X-Forwarded-For is trivially spoofable by clients
-	// when no proxy strips it. Treat the result as untrusted unless your
-	// edge proxy is configured to overwrite these headers.
+	// ClientIP returns the client's IP address. When the connection's peer
+	// is a trusted proxy (ServerOptions.TrustedProxies; by default loopback
+	// and the private ranges), it is read from X-Forwarded-For, right to
+	// left past the trusted proxies, then X-Real-IP; otherwise, or when
+	// those give none, it is the peer's address without the port. A peer
+	// outside the list cannot choose the answer by sending the headers.
+	// Returns "" only for a synthetic request with no usable header.
 	ClientIP() string
 
 	// BasicAuth parses the Authorization header for HTTP Basic credentials
@@ -929,39 +929,7 @@ func (ctx *context) NoContent() error {
 	return nil
 }
 
-// ClientIP resolves the client IP using the order most reverse-proxied
-// deployments want:
-//  1. X-Forwarded-For — first comma-separated entry (the original client).
-//  2. X-Real-IP — single value set by some proxies (nginx default).
-//  3. The conn's RemoteAddr, with the port stripped.
-//
-// We deliberately do NOT trust XFF/X-Real-IP unconditionally — see the
-// security note on the interface declaration. The header lookup uses the
-// case-insensitive Header() helper.
-func (ctx *context) ClientIP() string {
-	if xff := ctx.request.Header("X-Forwarded-For"); xff != "" {
-		// XFF is "client, proxy1, proxy2"; the leftmost entry is the
-		// original client (assuming the chain is honest).
-		if comma := strings.IndexByte(xff, ','); comma >= 0 {
-			xff = xff[:comma]
-		}
-		if ip := strings.TrimSpace(xff); ip != "" {
-			return ip
-		}
-	}
-	if xri := strings.TrimSpace(ctx.request.Header("X-Real-IP")); xri != "" {
-		return xri
-	}
-	if ctx.conn != nil {
-		addr := ctx.conn.RemoteAddr().String()
-		// RemoteAddr is "host:port" (or "[v6]:port"); strip the port if we can.
-		if host, _, err := net.SplitHostPort(addr); err == nil {
-			return host
-		}
-		return addr
-	}
-	return ""
-}
+// ClientIP is in client_ip.go, with the trusted-proxy rules it applies.
 
 // BasicAuth parses an `Authorization: Basic <b64>` header per RFC 7617.
 // Returns ok=true only when the header is present, well-formed, decodes
