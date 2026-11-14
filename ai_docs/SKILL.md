@@ -275,8 +275,11 @@ A HEAD with no HEAD route is served by the GET handler: it runs as for GET
 (`ctx.Request().Method()` reports `"HEAD"`), and the response carries GET's
 headers, `Content-Length` included, without the body. `Allow` lists HEAD
 wherever GET is routed. An explicit `s.Head(...)` route still takes precedence,
-e.g. to skip expensive body work. A HEAD to an SSE route gets the stream's
-headers and no events; a HEAD never upgrades a WebSocket route.
+e.g. to skip expensive body work. Such a route can state the length GET would
+send with `ctx.Response().SetHeader("Content-Length", "1234")` and write no
+body; that length is sent (an invalid one gives `Content-Length: 0`). A HEAD to
+an SSE route gets the stream's headers and no events; a HEAD never upgrades a
+WebSocket route.
 
 ## Response Types
 
@@ -344,6 +347,14 @@ A 1xx, 204 or 304 response is sent as its status line and headers only: no
 `Content-Length`, no `Transfer-Encoding`, and no body. Anything the handler
 wrote, or a pending `rweb.Stream`, is dropped (the stream is closed unread), and
 an SSE stream on such a status is not started.
+
+The server frames every body itself (v0.2.1+), so don't set `Content-Length` or
+`Transfer-Encoding`: a copy you set is not sent, since a second framing header
+next to the server's makes the response ambiguous to a proxy in front. The
+length sent is always that of the body written (or the `rweb.Stream` size), and
+a length you set that differs from it is logged as a warning. To send a body
+of unknown length, use `rweb.Stream(ctx, r, -1)`, which is chunked. The one
+place your `Content-Length` is used is a HEAD reply with no body (see HEAD).
 
 ## Middleware
 

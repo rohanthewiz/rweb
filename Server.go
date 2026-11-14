@@ -2631,8 +2631,14 @@ func (s *Server) writeWebSocketUpgradeResponse(ctx *context, respWriter io.Write
 	}
 	tmp.WriteString(consts.CRLF)
 
-	// Write headers
+	// Write headers. A 101 has no body and may carry no framing header
+	// (RFC 9110 §8.6, RFC 9112 §6.1), so a Content-Length or
+	// Transfer-Encoding a handler or middleware set before upgrading is
+	// left out, as writeResponse leaves it out of every other response.
 	for _, header := range ctx.response.headers {
+		if isFramingHeader(header.Key) {
+			continue
+		}
 		tmp.WriteString(header.Key)
 		tmp.WriteString(consts.ColonSpace)
 		tmp.WriteString(header.Value)
@@ -2739,15 +2745,46 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		ctx.request.connClose = true
 	}
 
+	// The framing headers are the server's. They are written here and
+	// nowhere else: a Content-Length or Transfer-Encoding the handler set
+	// is left out of the header loop below (isFramingHeader). Sent next to
+	// the server's own, a differing second length, or a length beside
+	// chunked, makes the response ambiguous (RFC 9112 §6.3), and a proxy
+	// in front that believes a different one than the client does splits
+	// the stream in a different place:
+	//
+	//	handler: SetHeader("Content-Length", "999"); WriteString("hi")
+	//	before:  Content-Length: 2  +  Content-Length: 999   (two framings)
+	//	now:     Content-Length: 2                           (one; a warning is logged)
+	//
+	// The one case where the handler knows the length better is a HEAD
+	// reply with nothing to send: an explicit s.Head route that skips the
+	// body work and states the length GET would send. With no in-memory
+	// body and no pending stream, a valid Content-Length the handler set is
+	// the one sent (headLen). A HEAD served by a GET handler has the body
+	// (or a sized stream) to measure, and that measure wins, as it does
+	// for GET.
+	//
+	// sentLen is the Content-Length written, or -1 when there is none
+	// (chunked, unframed, an event stream, a bodyless status). The header
+	// loop compares a dropped handler length against it to decide whether
+	// the drop is worth a warning.
+	sentLen := int64(-1)
 	if ctx.sseEventsChan == nil && !bodyless && !unframed {
 		if chunked {
 			tmp.WriteString(consts.HeaderTransferEncoding)
 			tmp.WriteString(consts.ColonSpace)
 			tmp.WriteString("chunked")
 		} else {
+			sentLen = int64(len(ctx.response.body)) + max(ctx.response.bodyStreamSize, 0)
+			if ctx.request.method == consts.MethodHead && len(ctx.response.body) == 0 && ctx.response.bodyStream == nil {
+				if headLen := ctx.response.declaredContentLength(); headLen >= 0 {
+					sentLen = headLen
+				}
+			}
 			tmp.WriteString(consts.HeaderContentLength)
 			tmp.WriteString(consts.ColonSpace)
-			tmp.WriteString(strconv.FormatInt(int64(len(ctx.response.body))+max(ctx.response.bodyStreamSize, 0), 10))
+			tmp.WriteString(strconv.FormatInt(sentLen, 10))
 		}
 		tmp.WriteString(consts.CRLF)
 	}
@@ -2758,6 +2795,12 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// used to skip, leaving the client and server each waiting on the other.
 	handlerConnHeader := false
 	for _, header := range ctx.response.headers {
+		// Framing is the server's alone (see sentLen above); the handler's
+		// framing headers are never copied to the wire.
+		if isFramingHeader(header.Key) {
+			s.dropFramingHeader(ctx, header, sentLen)
+			continue
+		}
 		if strings.EqualFold(header.Key, consts.HeaderConnection) {
 			handlerConnHeader = true
 			if hasToken(header.Value, consts.ConnectionClose) {
@@ -2928,6 +2971,55 @@ func closeConn(ctx *context) {
 // UpgradeWebSocket writes its own response and writeResponse returns early.
 func statusHasNoBody(status uint16) bool {
 	return status < 200 || status == 204 || status == 304
+}
+
+// isFramingHeader reports whether name is one of the two headers that frame
+// a response body, Content-Length or Transfer-Encoding (RFC 9112 §6).
+// writeResponse writes these itself from what is actually sent, so the
+// handler's copies are never put on the wire, and neither are they on a
+// WebSocket's 101 (RFC 9110 §8.6 and RFC 9112 §6.1 forbid both on a 1xx).
+//
+// headerKeyEqual's length check settles almost every other header name
+// before any byte is compared, so the two calls cost little per header.
+func isFramingHeader(name string) bool {
+	return headerKeyEqual(name, consts.HeaderContentLength) ||
+		headerKeyEqual(name, consts.HeaderTransferEncoding)
+}
+
+// dropFramingHeader reports a Content-Length or Transfer-Encoding the
+// handler set, which writeResponse leaves out; sentLen is the
+// Content-Length the server wrote instead, or -1 for none.
+//
+// Only a handler length that disagrees with the one sent is a warning, as
+// the handler then believed its body to be a size it is not (or set a
+// value that is no length at all): a body cut short or padded out, or a
+// count taken before the body changed. Everything else is expected and
+// shows only under Debug:
+//
+//   - a length equal to the one sent: the net/http habit of setting it by
+//     hand, or the HEAD reply whose length was taken from it;
+//   - any Transfer-Encoding: the server chunks exactly when the length is
+//     unknown, so the handler's request for it adds nothing;
+//   - a length on a response that states none (chunked, an HTTP/1.0
+//     unframed body, an event stream, a 1xx, 204 or 304). On a 304 it may
+//     well be the representation's true length, which RFC 9110 §8.6
+//     allows, but caches do not take Content-Length from a 304 (RFC 9111
+//     §3.2), so leaving it out costs nothing, as net/http does.
+//
+// It runs only for a response that carries such a header, so the hot path
+// pays nothing for it.
+func (s *Server) dropFramingHeader(ctx *context, h Header, sentLen int64) {
+	if sentLen >= 0 && headerKeyEqual(h.Key, consts.HeaderContentLength) {
+		if n, ok := parseContentLength(strings.Trim(h.Value, " \t")); !ok || n != sentLen {
+			s.log.Warn("rweb: handler-set Content-Length does not match the body; sending the body's length",
+				"path", ctx.request.path, "set", h.Value, "sent", sentLen)
+			return
+		}
+	}
+	if s.options.Debug {
+		s.log.Debug("rweb: framing header set by the handler is left to the server",
+			"path", ctx.request.path, "name", h.Key, "value", h.Value)
+	}
 }
 
 // writeBodyStream streams a pending body stream of known size to the

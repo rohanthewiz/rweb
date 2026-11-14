@@ -246,6 +246,28 @@ func (res *response) SetHeader(key string, value string) {
 	res.headers = kept
 }
 
+// declaredContentLength returns the length in the first Content-Length
+// header the handler set, or -1 when there is none or its value is not a
+// valid length (surrounding spaces and tabs are allowed, as optional
+// whitespace around a field value is; RFC 9110 §5.5).
+//
+// writeResponse uses it for a HEAD reply with nothing in the body and no
+// stream, where only the handler can know the length GET would send (an
+// explicit s.Head route). The header itself is never copied to the wire:
+// the server writes Content-Length from this number, so even a value set
+// twice with AddHeader leaves exactly one line.
+func (res *response) declaredContentLength() int64 {
+	for _, h := range res.headers {
+		if headerKeyEqual(h.Key, consts.HeaderContentLength) {
+			if n, ok := parseContentLength(strings.Trim(h.Value, " \t")); ok {
+				return n
+			}
+			return -1
+		}
+	}
+	return -1
+}
+
 // AddHeader adds a header (allows multiple values for the same key, like Set-Cookie)
 // The key and value are checked as in SetHeader.
 func (res *response) AddHeader(key string, value string) {
