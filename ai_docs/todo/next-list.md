@@ -38,8 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-049** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
-  Path params are not percent-decoded (`/greet/John%20Doe` → `John%20Doe`). Reproduced. Needs decision D7. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-050** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   Response header names are matched case-sensitively, so two Content-Type lines can be sent (`Response.go:151`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-051** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
@@ -104,6 +102,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-049** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13 (`6721dfd`)
+  Decision D7: yes, decode, and (user) never twice. `request.addParameter` decodes a value containing `%` with `url.PathUnescape` (`+` stays `+`); a bad escape is kept raw. Routing still uses the raw path and `Path()` stays raw. `StaticFiles` no longer decodes its `*path`; it 404s a bad escape by checking the raw path (only when it holds `%`) and runs its traversal checks on the decoded value as before. `%252e%252e` and a `x%2520y.txt` vs `x y.txt` case prove a single decode. Stylus `*path` is safe (go-styl cleans and rejects `..`). Behaviour change for apps that decoded params themselves; noted in SKILL.md. Tests: `path_param_decode_test.go`, `TestStaticFilesPathTraversal`.
 - **N-048** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13 (`a2315f6`)
   `SetErrorHandler`, `SetNotFoundHandler`, `SetMethodNotAllowedHandler`; nil restores each default. The 404/405 hooks run in the default dispatch handler (after middleware) with the status, and `Allow` for 405, already set; a hook's error goes to the error handler; a route's own 404 (StaticFiles) does not reach the hook. The default error page moved to `defaultErrorHandler` and uses `http.StatusText` (not `consts.StatusTextFromCode`, which lacks most codes), so the proxy's pages read "502 Bad Gateway" / "504 Gateway Timeout"; unknown codes read "Error". `AddMethod` records radix routes (`Server.radixRoutes`, re-add replaces); new `Routes()` returns all routes sorted by path then method, and `ListRoutes` prints it. Tests: `error_hooks_test.go`. Documented in SKILL.md ("Error, not-found and 405 hooks") and CLAUDE.md.
 - **N-071** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-13, 2026-1113-2302-n071-stoprun-windows-tests (`d746e23`, `9bd8452`)
