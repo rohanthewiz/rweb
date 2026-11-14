@@ -369,6 +369,12 @@ a length you set that differs from it is logged as a warning. To send a body
 of unknown length, use `rweb.Stream(ctx, r, -1)`, which is chunked. The one
 place your `Content-Length` is used is a HEAD reply with no body (see HEAD).
 
+Every response carries a `Date` header (v0.2.1+; RFC 9110 requires one), unless
+you set your own, which is then the only one sent. The status line always reads
+`HTTP/1.1 <code> <reason>`, with the reason from Go's `http.StatusText` for codes
+rweb's table lacks (`429 Too Many Requests`), and an empty reason after the space
+for a code nobody names.
+
 ## Middleware
 
 Middleware executes in registration order. Call `ctx.Next()` to continue the chain.

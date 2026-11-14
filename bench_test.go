@@ -6,9 +6,9 @@ package rweb
 // connection that stays open, so the per-request cost is what shows, not
 // connection setup or the TLS handshake.
 //
-//	              hello (5 B text)   JSON (~200 B)      browser-like head    body at coalesceBodyMax
-//	plain TCP     KeepAliveHello     KeepAliveJSON      KeepAliveBrowser     KeepAliveBodyCap
-//	TLS           KeepAliveHelloTLS  KeepAliveJSONTLS   KeepAliveBrowserTLS  KeepAliveBodyCapTLS
+//	              hello (5 B text)   JSON (~200 B)      browser-like head    body at coalesceBodyMax  chunked stream
+//	plain TCP     KeepAliveHello     KeepAliveJSON      KeepAliveBrowser     KeepAliveBodyCap         KeepAliveChunked
+//	TLS           KeepAliveHelloTLS  KeepAliveJSONTLS   KeepAliveBrowserTLS  KeepAliveBodyCapTLS      KeepAliveChunkedTLS
 //
 // The browser-like request carries the eight or so headers a real browser
 // sends (User-Agent, Accept*, Cookie, Referer...), about 700 bytes of head,
@@ -101,6 +101,24 @@ func BenchmarkKeepAliveBodyCap(b *testing.B) {
 
 func BenchmarkKeepAliveBodyCapTLS(b *testing.B) {
 	benchKeepAlive(b, true, benchBodyCapRoutes, "GET /cap HTTP/1.1\r\nHost: bench\r\n\r\n")
+}
+
+// The Chunked variants stream a small body of unknown length (rweb.Stream
+// with size -1), so the response goes out with chunked transfer encoding
+// through writeChunkedBody: the path a proxied response without
+// Content-Length, or an app's own stream, takes.
+func BenchmarkKeepAliveChunked(b *testing.B) {
+	benchKeepAlive(b, false, benchChunkedRoutes, "GET /chunked HTTP/1.1\r\nHost: bench\r\n\r\n")
+}
+
+func BenchmarkKeepAliveChunkedTLS(b *testing.B) {
+	benchKeepAlive(b, true, benchChunkedRoutes, "GET /chunked HTTP/1.1\r\nHost: bench\r\n\r\n")
+}
+
+func benchChunkedRoutes(s *Server) {
+	s.Get("/chunked", func(ctx Context) error {
+		return Stream(ctx, strings.NewReader("hello, chunked world"), -1)
+	})
 }
 
 func benchBodyCapRoutes(s *Server) {
@@ -206,8 +224,8 @@ func benchKeepAlive(b *testing.B, useTLS bool, setup func(*Server), req string) 
 	}
 }
 
-// readFirstResponse reads one Content-Length-framed response off conn and
-// returns its length on the wire. It insists on a 200, so a benchmark
+// readFirstResponse reads one response off conn, framed by Content-Length
+// or chunked, and returns its length on the wire. It insists on a 200, so a benchmark
 // request that the server refuses (a 400 that closes the connection, say)
 // fails loudly rather than timing an error path.
 func readFirstResponse(b *testing.B, conn net.Conn) int {
@@ -221,16 +239,31 @@ func readFirstResponse(b *testing.B, conn net.Conn) int {
 				b.Fatalf("benchmark request not answered 200:\n%s", head)
 			}
 			length := -1
+			chunked := false
 			for _, line := range strings.Split(head, "\r\n")[1:] {
 				k, v, _ := strings.Cut(line, ":")
 				if strings.EqualFold(k, "Content-Length") {
 					length, _ = strconv.Atoi(strings.TrimSpace(v))
 				}
+				if strings.EqualFold(k, "Transfer-Encoding") && strings.TrimSpace(v) == "chunked" {
+					chunked = true
+				}
 			}
-			if length < 0 {
+			if chunked {
+				// The body ends with the last chunk and the empty trailer.
+				if last := bytes.Index(got[end+4:], []byte("0\r\n\r\n")); last >= 0 {
+					total := end + 4 + last + len("0\r\n\r\n")
+					if len(got) > total {
+						b.Fatalf("more than one response arrived (%d bytes, expected %d)", len(got), total)
+					}
+					return total
+				}
+				length = -2 // keep reading
+			}
+			if length == -1 {
 				b.Fatalf("response has no Content-Length:\n%s", head)
 			}
-			if total := end + 4 + length; len(got) >= total {
+			if total := end + 4 + length; length >= 0 && len(got) >= total {
 				if len(got) > total {
 					b.Fatalf("more than one response arrived (%d bytes, expected %d)", len(got), total)
 				}

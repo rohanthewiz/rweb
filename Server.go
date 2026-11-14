@@ -2760,15 +2760,8 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 func (s *Server) writeWebSocketUpgradeResponse(ctx *context, respWriter io.Writer) {
 	tmp := bytes.Buffer{}
 
-	// HTTP1.1 header and status
-	tmp.WriteString(consts.HTTP1)
-	tmp.WriteString(consts.StrSingleSpace)
-	tmp.WriteString(strconv.Itoa(int(ctx.status)))
-	if st, ok := consts.StatusTextFromCode[int(ctx.status)]; ok {
-		tmp.WriteByte(consts.RuneSingleSpace)
-		tmp.WriteString(st)
-	}
-	tmp.WriteString(consts.CRLF)
+	// Status line (appendStatusLine: always "code SP reason").
+	tmp.Write(appendStatusLine(tmp.AvailableBuffer(), int(ctx.status)))
 
 	// Write headers. A 101 has no body and may carry no framing header
 	// (RFC 9110 §8.6, RFC 9112 §6.1), so a Content-Length or
@@ -2841,15 +2834,10 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	tmp := &ctx.respBuf
 	tmp.Reset()
 
-	// HTTP1.1 header and status
-	tmp.WriteString(consts.HTTP1)
-	tmp.WriteString(consts.StrSingleSpace)
-	tmp.WriteString(strconv.Itoa(int(ctx.status)))
-	if st, ok := consts.StatusTextFromCode[int(ctx.status)]; ok {
-		tmp.WriteByte(consts.RuneSingleSpace)
-		tmp.WriteString(st)
-	}
-	tmp.WriteString(consts.CRLF)
+	// Status line: "HTTP/1.1 <code> <reason>" (appendStatusLine), appended
+	// straight into the buffer's spare capacity, which a pooled respBuf has
+	// in steady state, so neither the code nor the line allocates.
+	tmp.Write(appendStatusLine(tmp.AvailableBuffer(), int(ctx.status)))
 
 	// A synthetic request hands its response back in memory, so a pending
 	// body stream (a static file, rweb.Stream) is read into the body here;
@@ -2923,7 +2911,9 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 			}
 			tmp.WriteString(consts.HeaderContentLength)
 			tmp.WriteString(consts.ColonSpace)
-			tmp.WriteString(strconv.FormatInt(sentLen, 10))
+			// AppendInt into spare capacity: FormatInt allocated a string
+			// for every length of 100 or more.
+			tmp.Write(strconv.AppendInt(tmp.AvailableBuffer(), sentLen, 10))
 		}
 		tmp.WriteString(consts.CRLF)
 	}
@@ -2933,12 +2923,16 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 	// connection after the response (RFC 9112 §9.6), which the request loop
 	// used to skip, leaving the client and server each waiting on the other.
 	handlerConnHeader := false
+	handlerDate := false
 	for _, header := range ctx.response.headers {
 		// Framing is the server's alone (see sentLen above); the handler's
 		// framing headers are never copied to the wire.
 		if isFramingHeader(header.Key) {
 			s.dropFramingHeader(ctx, header, sentLen)
 			continue
+		}
+		if !handlerDate && headerKeyEqual(header.Key, consts.HeaderDate) {
+			handlerDate = true
 		}
 		if strings.EqualFold(header.Key, consts.HeaderConnection) {
 			handlerConnHeader = true
@@ -2950,6 +2944,14 @@ func (s *Server) writeResponse(ctx *context, respWriter io.Writer) {
 		tmp.WriteString(consts.ColonSpace)
 		tmp.WriteString(header.Value)
 		tmp.WriteString(consts.CRLF)
+	}
+
+	// Date on every response (RFC 9110 §6.6.1; appendDateLine caches the
+	// line per second), unless the handler set its own: serveFile does on
+	// a 304, and a proxied response may carry the upstream's. One Date
+	// line only, so the handler's wins rather than being doubled.
+	if !handlerDate {
+		tmp.Write(appendDateLine(tmp.AvailableBuffer(), time.Now()))
 	}
 
 	// Otherwise say what happens to the connection when it is not the
@@ -3225,6 +3227,20 @@ const chunkBufSize = 32 << 10
 // line: up to 4 hex digits for chunkBufSize, plus CRLF, with spare.
 const chunkHeadRoom = 10
 
+// chunkBufPool holds writeChunkedBody's buffers (*[]byte of
+// chunkHeadRoom+chunkBufSize+2 bytes), so a chunked response no longer
+// allocates 32 KB of its own: for a small streamed body that buffer was
+// nearly all of the response's memory (41 KB/op in
+// BenchmarkKeepAliveChunked) and garbage the moment the response ended.
+// A pointer goes in the pool, not the slice, so Put itself does not
+// allocate a slice header each time. The buffer is not held past
+// writeChunkedBody: every chunk is written synchronously from it (a TLS
+// conn seals into its own buffer), so it can go back on return.
+var chunkBufPool = sync.Pool{New: func() any {
+	b := make([]byte, chunkHeadRoom+chunkBufSize+2)
+	return &b
+}}
+
 // writeChunkedBody sends the in-memory body and then the pending stream of
 // unknown length with chunked transfer encoding (RFC 9112 §7.1), and
 // releases the stream.
@@ -3252,7 +3268,9 @@ func (s *Server) writeChunkedBody(ctx *context, respWriter io.Writer) {
 	ctx.response.bodyStream, ctx.response.bodyStreamSize = nil, 0
 	defer closeStream(r)
 
-	buf := make([]byte, chunkHeadRoom+chunkBufSize+2)
+	bp := chunkBufPool.Get().(*[]byte)
+	defer chunkBufPool.Put(bp)
+	buf := *bp
 	writeChunk := func(n int) error {
 		start := chunkHeadRoom - len(consts.CRLF)
 		copy(buf[start:], consts.CRLF)

@@ -1,7 +1,11 @@
 package rweb
 
 import (
+	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/rohanthewiz/rweb/consts"
 )
@@ -300,4 +304,78 @@ func isValidHostHeader(v string) bool {
 		}
 	}
 	return true
+}
+
+// statusText is the reason phrase for code: consts.StatusTextFromCode, which
+// keeps RFC 9110's names (416 "Range Not Satisfiable", where net/http still
+// says "Requested Range Not Satisfiable"), then http.StatusText for the many
+// codes that table lacks (413, 422, 429, ...), then "" for a code nobody
+// names (a handler's 299, say).
+func statusText(code int) string {
+	if st, ok := consts.StatusTextFromCode[code]; ok {
+		return st
+	}
+	return http.StatusText(code)
+}
+
+// appendStatusLine appends a response's status line to b:
+//
+//	status-line = HTTP-version SP status-code SP [ reason-phrase ] CRLF   (RFC 9112 §4)
+//
+// The space after the code is there even when the reason is empty: it is
+// part of the grammar, and "HTTP/1.1 299\r\n" (what rweb used to send for a
+// code missing from its table, 429 included) is a malformed line that
+// clients merely tolerate. The code goes in through strconv.AppendInt, so
+// writing it allocates nothing; strconv.Itoa allocated a string for every
+// code of 100 or more, i.e. once per response.
+func appendStatusLine(b []byte, code int) []byte {
+	b = append(b, consts.HTTP1...)
+	b = append(b, ' ')
+	b = strconv.AppendInt(b, int64(code), 10)
+	b = append(b, ' ')
+	b = append(b, statusText(code)...)
+	return append(b, consts.CRLF...)
+}
+
+// dateLine is a complete "Date: <IMF-fixdate>\r\n" header line and the Unix
+// second it was formatted for.
+type dateLine struct {
+	unix int64
+	line []byte
+}
+
+// cachedDateLine is the most recently formatted Date line, shared by every
+// connection (see appendDateLine).
+var cachedDateLine atomic.Pointer[dateLine]
+
+// appendDateLine appends the Date header line for now to b.
+//
+// RFC 9110 §6.6.1: an origin server with a clock MUST send Date on its 2xx,
+// 3xx and 4xx responses (and may on the others); caches use it to compute a
+// response's age. rweb used to send it only on file responses.
+//
+// The value only changes once a second, so formatting it for every response
+// would be wasted work: the line is formatted once per second and the same
+// bytes are copied in for every response in that second. The cache is one
+// atomic pointer to an immutable value, read lock-free on every response;
+// when the second has moved on, whichever goroutine notices formats the new
+// line and swaps it in (two that race both store a correct line, and the
+// later store simply wins). No timer goroutine keeps it fresh: a server
+// with no traffic does no work for it. Costs one time.Now per response and
+// one small allocation per second under load.
+//
+// IMF-fixdate (http.TimeFormat) is fixed-width, so every response's head
+// keeps the same length from one second to the next.
+func appendDateLine(b []byte, now time.Time) []byte {
+	sec := now.Unix()
+	if d := cachedDateLine.Load(); d != nil && d.unix == sec {
+		return append(b, d.line...)
+	}
+	line := make([]byte, 0, len(consts.HeaderDate)+len(consts.ColonSpace)+len(http.TimeFormat)+len(consts.CRLF))
+	line = append(line, consts.HeaderDate...)
+	line = append(line, consts.ColonSpace...)
+	line = now.UTC().AppendFormat(line, http.TimeFormat)
+	line = append(line, consts.CRLF...)
+	cachedDateLine.Store(&dateLine{unix: sec, line: line})
+	return append(b, line...)
 }
