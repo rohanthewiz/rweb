@@ -34,7 +34,7 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-076
+**Next ID:** N-077
 
 ## Open
 
@@ -58,6 +58,8 @@ code at `3169f85`.
   Response head conformance in `writeResponse` (`Server.go`): the status line omits the space before an empty reason phrase, and `consts.StatusTextFromCode` lacks most codes (413, 422, 429, …), so a 429 goes out as `HTTP/1.1 429\r\n` where RFC 9112 §4 requires `HTTP/1.1 429 ` (seen on the wire; clients tolerate it). Fall back to `http.StatusText`, as the default error page does since N-048, and always write the space. Also: ordinary responses carry no `Date` header (only file responses set one), which RFC 9110 §6.6.1 requires of an origin server with a clock; a per-second cached value would keep it cheap. From the N-052 work.
 - **N-075** · raised `2026-1114-1627-phase4-n054-n055-sse-cors-trusted-proxies` · value low
   Now that `TrustedProxies` exists (N-055), two places still describe only this hop when a trusted proxy sits in front: `Request().Scheme()` ignores `X-Forwarded-Proto` (by design, `Server.go`, "Deliberately NOT consulted"), so behind a TLS-terminating proxy it reports `http`; and the WebSocket origin check compares `Origin` with `Host()` (`websocket.go`, `originAllowed`), so a proxy that rewrites `Host` needs `AllowedOrigins` (the N-062 note). Both could take a trusted peer's `X-Forwarded-Proto` / `-Host` through `context.forwardedTrusted` (`client_ip.go`). A behaviour change for apps behind nginx on the same host (trusted by default), so it needs a decision: opt-in, or on with the default list. From the N-055 work.
+- **N-076** · raised `2026-1114-1715-n062-n059-n060-n072-ws-browser-linger-strict-head` · value low
+  After `Shutdown`'s 1001 (`WSConn.goingAway`), a handler that ignores the peer's `CloseMessage` and calls `ReadMessage` again waits out the 2 s `closeHandshakeTimeout` read deadline before getting an i/o timeout, because `goingAway` leaves the conn open for the handler's loop to close. `Shutdown` waits on that handler meanwhile. Once `closeRcvd` and `closed` are both set, `ReadMessage` could fail at once (`io.EOF` or a named error). Found in the N-062 browser run with a handler that echoed the close reply.
 
 ## Validate
 
@@ -65,8 +67,7 @@ Items whose remaining work is purely testing: run, look, measure, or write or
 repair the test that covers it. No product change is planned unless the check
 finds a defect. Same item form as Open.
 
-- **N-062** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
-  The WebSocket changes of N-040 (origin check, 30 s pings, write timeout, 1001 at shutdown) are covered by Go-client tests only. Check with a real browser and `wscat`, including one run behind a reverse proxy that rewrites `Host` (expected: 403 until `AllowedOrigins` lists the public origin).
+(none)
 
 ## Roadmap
 
@@ -94,6 +95,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-062** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14 (validated, no code change)
+  Checked on a scratch server (rweb on :18081, a second rweb origin on :18082, and a Go `httputil.ReverseProxy` on :18083 that rewrites `Host` to `backend.internal:18081`) with headless Chrome (four instances) and `wscat` 6.0.1. Chrome: same-origin page opens and echoes; a page on the other origin gets 403 (browser: error, close 1006); through the Host-rewriting proxy `/ws` gets 403 and a route with `AllowedOrigins: ["http://127.0.0.1:18083"]` gets 101 and echoes; over 75 s idle both sockets got the 30 s pings and Chrome's pongs reached the pong handler twice each; `Shutdown` sent 1001, Chrome logged `close code=1001 clean=true`, both handlers got the `CloseMessage` and returned, and `Shutdown` returned nil 0.2 s after it was called. wscat: no Origin → connects (direct and through the proxy), `-o http://evil.example` → 403, the proxy's origin → 403 on `/ws` and 101 on the listed route. Not checkable from a browser or wscat: the write timeout (needs a peer that stops reading); the Go-client tests cover it. Raised N-076 (a `ReadMessage` after the shutdown close reply waits out the 2 s handshake deadline).
 - **N-073** · raised `2026-1113-2331-n048-n049-n050-hooks-param-decode-header-case` · closed 2026-11-14, 2026-1114-1648-n073-response-framing-headers (`ac411b1`)
   Skip, not refuse: `writeResponse` writes `Content-Length`/`Transfer-Encoding` itself and leaves every handler-set copy out of the header loop (`isFramingHeader`, `Server.go`); `writeWebSocketUpgradeResponse` leaves them off the 101 too. `dropFramingHeader` warns when a handler length differs from the one sent (or is no valid length), naming `set` and `sent`; a matching length, any `Transfer-Encoding`, and a length on a response with none of its own (chunked, HTTP/1.0 unframed, SSE, 1xx/204/304) show only under `Debug`. Behaviour change: a handler `Content-Length` on a 304 is no longer passed through (net/http drops it too; caches ignore it, RFC 9111 §3.2). HEAD exception: with no in-memory body and no stream, the handler's first `Content-Length`, if valid (`response.declaredContentLength`, OWS trimmed), is the one sent instead of 0, so an explicit `s.Head` route can state GET's length; a HEAD on a GET handler keeps the measured length. Keep-alive benchmarks within noise. Tests: `response_framing_test.go` (wire: mismatch, match, TE on a sized body, length beside a chunked stream, HTTP/1.0 unframed, HEAD explicit/twice/spaced/invalid/GET-fallback, 304, 204, warnings; Debug line; WebSocket 101); all three fail without the change. Documented in CLAUDE.md ("Response framing") and SKILL.md.
 - **N-055** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14, 2026-1114-1627-phase4-n054-n055-sse-cors-trusted-proxies (`fce3ebb`)
