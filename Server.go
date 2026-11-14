@@ -145,6 +145,18 @@ type ServerOptions struct {
 	// stays connected.
 	ProxyResponseHeaderTimeout time.Duration
 
+	// ProxyReadTimeout bounds each read of a Proxy route's upstream response
+	// body, once its headers are in: an upstream that sends nothing for
+	// this long mid-body has its request cancelled, and the client's
+	// connection is closed, so the client sees a truncated body. It times
+	// the wait for the upstream only, not the writes to the client, so a
+	// slow client does not trip it. Off by default (zero or negative), as
+	// ReadTimeout is: a proxied event stream or long poll may rightly go
+	// quiet for minutes, and nginx's 60 s proxy_read_timeout default is
+	// known for cutting those off. Set it above the longest silence an
+	// upstream may keep (an SSE upstream's heartbeat interval, say).
+	ProxyReadTimeout time.Duration
+
 	// Logger receives the server's own log lines. Nil selects the default,
 	// which writes through github.com/rohanthewiz/logger (configure it with
 	// logger.InitLog). A *slog.Logger fits as it is. Errors and warnings
@@ -430,6 +442,15 @@ func WithProxyResponseHeaderTimeout(d time.Duration) ServerOption {
 	}
 }
 
+// WithProxyReadTimeout bounds each read of a Proxy route's upstream body;
+// an upstream that stalls longer mid-body is cut off and the client's
+// connection closed. Off by default; 0 or a negative value keeps it off.
+func WithProxyReadTimeout(d time.Duration) ServerOption {
+	return func(opts *ServerOptions) {
+		opts.ProxyReadTimeout = d
+	}
+}
+
 // WithOptions creates a ServerOption from a ServerOptions struct.
 // This is provided for backwards compatibility with the old configuration style.
 // Example: WithOptions(ServerOptions{Address: ":8080", Verbose: true})
@@ -455,6 +476,7 @@ func WithOptions(serverOpts ServerOptions) ServerOption {
 		opts.WriteTimeout = serverOpts.WriteTimeout
 		opts.ShutdownTimeout = serverOpts.ShutdownTimeout
 		opts.ProxyResponseHeaderTimeout = serverOpts.ProxyResponseHeaderTimeout
+		opts.ProxyReadTimeout = serverOpts.ProxyReadTimeout
 		opts.Logger = serverOpts.Logger
 		opts.TrustedProxies = serverOpts.TrustedProxies
 	}
@@ -1133,6 +1155,9 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 //     (default 60 s) is a 504; an unreachable or failing upstream is a 502.
 //     Both go through the error handler. A client that leaves mid-call
 //     cancels the upstream request and is recorded as 502 without it.
+//   - With ServerOptions.ProxyReadTimeout set (off by default), an
+//     upstream body that stalls longer than that mid-stream is cut off and
+//     the client's connection closed (the client sees a truncated body).
 //   - Every Proxy route of a server shares one HTTP client and connection
 //     pool, whose idle connections Shutdown closes.
 func (s *Server) Proxy(pathPrefix string, targetURL string, prefixTokensToRemove int) (err error) {
@@ -1171,6 +1196,10 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 	// here could close.
 	client := s.proxyHTTPClient()
 
+	// The per-read bound on the upstream body (proxyBodyReader, proxy.go);
+	// 0 when off. Options are fixed before serving, so read once here.
+	readTimeout := max(s.options.ProxyReadTimeout, 0)
+
 	hdlr := func(ctx Context) (err error) {
 		ctxReq := ctx.Request()
 
@@ -1197,11 +1226,28 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		// leaving it to run (and be read in full) for nobody.
 		reqCtx := ctxReq.Context()
 
+		// With a read timeout, the upstream request gets a context of its
+		// own, a child of reqCtx, so the timer in proxyBodyReader can cancel
+		// this one upstream call (and so fail a stalled body read) without
+		// touching the client's request context. upCtx is reqCtx otherwise.
+		// cancelUp is released by proxyBodyReader.Close once the body has
+		// been streamed, or below when no body reader takes it over.
+		upCtx, cancelUp := reqCtx, stdctx.CancelFunc(func() {})
+		if readTimeout > 0 {
+			upCtx, cancelUp = stdctx.WithCancel(reqCtx)
+		}
+		bodyOwnsCancel := false
+		defer func() {
+			if !bodyOwnsCancel {
+				cancelUp()
+			}
+		}()
+
 		if ctxReq.Body() != nil {
 			buf := bytes.NewBuffer(ctxReq.Body())
-			req, err = http.NewRequestWithContext(reqCtx, ctx.Request().Method(), proxyURL, buf)
+			req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, buf)
 		} else {
-			req, err = http.NewRequestWithContext(reqCtx, ctx.Request().Method(), proxyURL, nil)
+			req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, nil)
 		}
 		if err != nil {
 			return err
@@ -1284,7 +1330,17 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		// the body read is not cut off when the handler returns. Shutdown
 		// cancelling it does cut off a body still streaming, as it ends
 		// every other request-bound operation.
-		return Stream(ctx, resp.Body, resp.ContentLength)
+		//
+		// With ProxyReadTimeout, the body goes out through proxyBodyReader,
+		// which times each read and cancels upCtx when one stalls; its Close
+		// (writeBodyStream's, writeChunkedBody's or closeBodyStream's, which
+		// every path through writeResponse ends in) releases upCtx.
+		var body io.Reader = resp.Body
+		if readTimeout > 0 {
+			body = newProxyBodyReader(resp.Body, readTimeout, cancelUp)
+			bodyOwnsCancel = true
+		}
+		return Stream(ctx, body, resp.ContentLength)
 	}
 
 	var routeHdlr Handler = hdlr

@@ -86,6 +86,7 @@ default and a negative value disables it**.
 | `WriteTimeout` | off | any single stalled write (each ≤ 1 MB piece), **not** the whole response | response ends, close |
 | `SSECfg.WriteTimeout` | 30 s | each flush of an event stream (on even when `WriteTimeout` is off) | stream ends, cleanup runs |
 | `ProxyResponseHeaderTimeout` | 60 s | a `Proxy` route's wait for the upstream's response headers (not the body) | `504` (see Reverse Proxy) |
+| `ProxyReadTimeout` | off | each read of a `Proxy` route's upstream body (the wait on the upstream only, not writes to the client) | body cut off, client conn closed |
 
 ```go
 s := rweb.NewServerWithOptions(
@@ -1257,6 +1258,11 @@ From v0.2.1:
   unreachable, refused or a bad response → **502** (was 500). Both still go to the error
   handler, which logs them and keeps the status. The timeout covers only the wait for the
   headers, not a long body.
+- **A stalled upstream body** (v0.2.1+): with `ProxyReadTimeout` set, an upstream that sends
+  nothing for that long mid-body has its request cancelled and the client's connection closed,
+  so the client sees a truncated body. Only the wait on the upstream is timed, so a slow
+  client is not cut off. Off by default (a proxied event stream or long poll may rightly go
+  quiet); set it above the longest silence an upstream keeps, e.g. an SSE heartbeat interval.
 - All `Proxy` routes of a server share one client with its own connection pool (32 idle conns
   per upstream host); `Shutdown` closes its idle connections. `Shutdown` also cuts off a
   proxied body still streaming, since it cancels every request context.
@@ -1266,6 +1272,8 @@ s := rweb.NewServerWithOptions(
     rweb.WithAddress(":8080"),
     // 0 = default 60 s (nginx's proxy_read_timeout); negative = wait as long as the client does
     rweb.WithProxyResponseHeaderTimeout(30*time.Second),
+    // off by default; > 0 bounds each wait for the upstream body mid-stream
+    rweb.WithProxyReadTimeout(2*time.Minute),
 )
 ```
 

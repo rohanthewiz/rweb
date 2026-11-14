@@ -1,10 +1,14 @@
 package rweb
 
 import (
+	stdctx "context"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -32,6 +36,10 @@ import (
 //	upstream unreachable, reset, bad response ──────────────► 502
 //	client gone / server shutting down ─────────────────────► 502, quietly
 //	                                                          (clientGone)
+//	a body read stalled past ProxyReadTimeout (off by
+//	default) ────────────────────────────────────────────────► body cut off,
+//	                                                          client conn
+//	                                                          closed
 
 // defaultProxyResponseHeaderTimeout bounds the wait for an upstream's
 // response headers when ServerOptions.ProxyResponseHeaderTimeout is zero.
@@ -211,4 +219,88 @@ func peerIP(ctx Context) string {
 		return host
 	}
 	return addr
+}
+
+// errProxyReadTimeout is what a read of an upstream body returns when it
+// waited longer than ServerOptions.ProxyReadTimeout. It shows in the Debug
+// line for a stream cut short ("rweb: body stream cut short").
+var errProxyReadTimeout = errors.New("rweb: proxy: upstream body read timed out (ProxyReadTimeout)")
+
+// proxyBodyReader is an upstream response body whose every Read must return
+// within timeout (ServerOptions.ProxyReadTimeout); otherwise the upstream
+// request is cancelled and the read fails with errProxyReadTimeout.
+//
+// Why: once the response headers are in, nothing else bounds the body. An
+// upstream that stalls mid-body (hung, or a slow rweb.Stream producer
+// behind it) held the client connection, a goroutine and an upstream
+// connection until Shutdown; and since the disconnect watch is stopped
+// before writeResponse, a client that left meanwhile was not noticed until
+// the next write.
+//
+// Why each Read, not the gap between reads as nginx's proxy_read_timeout
+// counts it: nginx buffers the upstream's body, rweb does not. Between two
+// reads here lies the write of the previous piece to the client, so a gap
+// timer would also fire on a slow but live client. Timing only the wait
+// inside Read charges the upstream alone.
+//
+// How a read is cut off: http.Response.Body has no deadline to set. The
+// upstream request runs under its own cancellable context (a child of
+// Request().Context(), see Server.proxy); a timer armed on entry to Read
+// and stopped on its return cancels that context, which makes the
+// transport fail the pending Read and close the upstream connection.
+//
+//	Read ─► timer.Reset(timeout) ─► body.Read ─────────► timer.Stop ─► n, err
+//	                     │ timer fires first
+//	                     ▼
+//	        fired = true, cancel(upstream ctx) ─► body.Read fails
+//	                                            ─► n, errProxyReadTimeout
+//
+// writeBodyStream and writeChunkedBody then see a failed read and close the
+// client connection, so the client gets a truncated body (never a short one
+// that looks complete), and closing the stream (Close below) releases the
+// upstream side.
+type proxyBodyReader struct {
+	body    io.ReadCloser
+	timeout time.Duration
+	timer   *time.Timer
+	// fired is set by the timer before it cancels, so a read failing on the
+	// cancellation can be told apart from any other upstream error.
+	fired  atomic.Bool
+	cancel stdctx.CancelFunc
+}
+
+// newProxyBodyReader wraps body, whose request runs under the context that
+// cancel cancels. The timer is created stopped: it runs only inside Read.
+func newProxyBodyReader(body io.ReadCloser, timeout time.Duration, cancel stdctx.CancelFunc) *proxyBodyReader {
+	pr := &proxyBodyReader{body: body, timeout: timeout, cancel: cancel}
+	pr.timer = time.AfterFunc(time.Hour, func() {
+		pr.fired.Store(true)
+		cancel()
+	})
+	pr.timer.Stop()
+	return pr
+}
+
+func (pr *proxyBodyReader) Read(p []byte) (int, error) {
+	pr.timer.Reset(pr.timeout)
+	n, err := pr.body.Read(p)
+	pr.timer.Stop()
+	// A timer that fired during this read (or just after the previous one
+	// returned, making this one fail at once) is the cause of the error,
+	// whatever the transport calls it (context canceled, use of closed
+	// connection). io.EOF is kept: the body was complete.
+	if err != nil && err != io.EOF && pr.fired.Load() {
+		err = errProxyReadTimeout
+	}
+	return n, err
+}
+
+// Close stops the timer, closes the body (returning the upstream
+// connection to the pool when it was read to the end) and releases the
+// upstream request's context.
+func (pr *proxyBodyReader) Close() error {
+	pr.timer.Stop()
+	err := pr.body.Close()
+	pr.cancel()
+	return err
 }
