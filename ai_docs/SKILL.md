@@ -106,6 +106,11 @@ never meet a request's deadline. Because `WriteTimeout` bounds a *stalled*
 write, a long download that keeps moving is not cut off; static files keep
 using sendfile.
 
+A request refused before any handler runs (`400`, `408`, `413`, `417`, `431`,
+`501`) is closed gently: the server shuts its write side after the response
+and reads and discards whatever the client still sends for up to 1 s, so a
+client caught mid-upload reads the `413` instead of a connection reset.
+
 ### Graceful Shutdown (v0.2.1+)
 
 `s.Run()` serves until SIGINT/SIGTERM, then shuts down gracefully and returns

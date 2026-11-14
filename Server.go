@@ -2058,6 +2058,18 @@ func (s *Server) serveConn(tc *trackedConn) {
 	rd := readDeadline{conn: conn}
 	firstRequest := true
 
+	// refuse answers a request that is refused before any handler runs
+	// (malformed or ambiguous head, unknown method, unmet expectation, body
+	// over the cap, head over budget or too slow) with one of the canned
+	// responses in consts, then closes gently: the client may still be
+	// sending, and lingerClose (conn_limits.go) keeps that from turning the
+	// close into a reset that hides the response. The caller returns after
+	// it, and the deferred Close finishes the job.
+	refuse := func(resp string) {
+		_, _ = io.WriteString(conn, resp)
+		lingerClose(conn)
+	}
+
 	// headFailed answers a request whose head (or body) could not be read;
 	// the caller then returns, closing the connection. Only a deadline or the
 	// budget gets an answer; any other error (EOF, a reset) means the client
@@ -2065,9 +2077,9 @@ func (s *Server) serveConn(tc *trackedConn) {
 	headFailed := func(err error) {
 		switch {
 		case errors.Is(err, errHeaderTooLarge):
-			_, _ = io.WriteString(conn, consts.HTTPHeaderTooLarge)
+			refuse(consts.HTTPHeaderTooLarge)
 		case isTimeout(err):
-			_, _ = io.WriteString(conn, consts.HTTPRequestTimeout)
+			refuse(consts.HTTPRequestTimeout)
 		case s.options.Debug && !errors.Is(err, io.EOF):
 			s.log.Debug("rweb: reading request", "remote", conn.RemoteAddr().String(), "error", err)
 		}
@@ -2127,7 +2139,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 		space := strings.IndexByte(message, consts.RuneSingleSpace)
 
 		if space <= 0 {
-			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+			refuse(consts.HTTPBadRequest)
 			return
 		}
 
@@ -2139,7 +2151,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 		// no resource" (RFC 9110 §15.6.2). Extension methods (PROPFIND,
 		// PURGE, ...) are well-formed HTTP and land here too.
 		if !isValidRequestMethod(method) {
-			_, _ = io.WriteString(conn, consts.HTTPNotImplemented)
+			refuse(consts.HTTPNotImplemented)
 			return
 		}
 
@@ -2176,7 +2188,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 		// No target at all is not a request for "/": nothing names the
 		// resource, and routing it would mean picking one for the client.
 		if url == "" {
-			_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+			refuse(consts.HTTPBadRequest)
 			return
 		}
 
@@ -2214,7 +2226,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 			// or refuse the message; a proxy that unfolds and one that does
 			// not would see different headers, so it is refused.
 			if message[0] == ' ' || message[0] == '\t' {
-				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				refuse(consts.HTTPBadRequest)
 				return
 			}
 
@@ -2226,7 +2238,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 			// server MUST answer whitespace before the colon with 400).
 			colon := strings.IndexByte(message, consts.RuneColon)
 			if colon < 0 || !isValidHeaderKey(message[:colon]) {
-				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				refuse(consts.HTTPBadRequest)
 				return
 			}
 
@@ -2250,7 +2262,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 				// where it thinks the next request starts.
 				n, ok := parseContentLength(value)
 				if !ok || (sawContentLength && n != contentLen) {
-					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					refuse(consts.HTTPBadRequest)
 					return
 				}
 				contentLen, sawContentLength = n, true
@@ -2279,7 +2291,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 				//     here);
 				//   - hand-rolled clients and raw-socket tests omit it.
 				if sawHost || !isValidHostHeader(value) {
-					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					refuse(consts.HTTPBadRequest)
 					return
 				}
 				sawHost = true
@@ -2288,7 +2300,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 				// is chunked applied twice, which no sender may do); there is
 				// no reading of it worth the ambiguity.
 				if sawTransferEncoding {
-					_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+					refuse(consts.HTTPBadRequest)
 					return
 				}
 				transferEncoding, sawTransferEncoding = value, true
@@ -2319,11 +2331,11 @@ func (s *Server) serveConn(tc *trackedConn) {
 		// Content-Length).
 		if sawTransferEncoding {
 			if sawContentLength {
-				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				refuse(consts.HTTPBadRequest)
 				return
 			}
 			if reply := transferEncodingReply(transferEncoding); reply != "" {
-				_, _ = io.WriteString(conn, reply)
+				refuse(reply)
 				return
 			}
 			isChunked = true
@@ -2333,7 +2345,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 		// is read; the client may already have sent one, so the connection
 		// is closed after it rather than resynchronised.
 		if expectUnmet {
-			_, _ = io.WriteString(conn, consts.HTTPExpectationFailed)
+			refuse(consts.HTTPExpectationFailed)
 			return
 		}
 
@@ -2370,7 +2382,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 			// Reject oversized bodies before allocating anything — the
 			// client-supplied Content-Length must not dictate our memory use.
 			if maxBody > 0 && contentLen > maxBody {
-				_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
+				refuse(consts.HTTPPayloadTooLarge)
 				return
 			}
 
@@ -2413,10 +2425,10 @@ func (s *Server) serveConn(tc *trackedConn) {
 			switch {
 			case err == nil:
 			case errors.Is(err, errBadChunk):
-				_, _ = io.WriteString(conn, consts.HTTPBadRequest)
+				refuse(consts.HTTPBadRequest)
 				return
 			case errors.Is(err, errChunkTooLarge):
-				_, _ = io.WriteString(conn, consts.HTTPPayloadTooLarge)
+				refuse(consts.HTTPPayloadTooLarge)
 				return
 			default: // over the trailer budget, a deadline, or the client left
 				headFailed(err)

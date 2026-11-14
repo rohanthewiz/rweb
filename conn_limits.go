@@ -26,9 +26,9 @@ import (
 //	  │  │        Peek(1): timeout or EOF here → close silently, nothing was asked    │
 //	  │  │ head   read deadline = now+ReadHeaderTimeout, from the first byte          │
 //	  │  │        request line + headers, charged to the MaxHeaderBytes budget        │
-//	  │  │        timeout → 408, over budget → 431, then close                       │
+//	  │  │        timeout → 408, over budget → 431, then lingerClose                 │
 //	  │  │ body   read deadline = now+ReadTimeout, or none   (only if there is one)   │
-//	  │  │        timeout → 408, then close                                          │
+//	  │  │        timeout → 408, then lingerClose                                    │
 //	  │  │ run    read deadline cleared ──────────────────────────────────────────┐   │
 //	  │  │        handler; disconnect watch, WebSocket and GetConn read the conn  │   │
 //	  │  │        with no deadline of ours in the way (the watch's own stopWatch  │   │
@@ -65,6 +65,11 @@ const (
 	// chunkLineMax caps one chunk-size line of a chunked request body
 	// (hex size, optional extensions, CRLF). Real ones are a few bytes.
 	chunkLineMax = 4 << 10
+
+	// lingerTimeout bounds lingerClose: how long the connection of a
+	// refused request goes on reading, and discarding, what the client
+	// still sends before it is closed.
+	lingerTimeout = time.Second
 )
 
 // connLimits is ServerOptions' limits with defaults applied. Zero means
@@ -177,6 +182,60 @@ func isTimeout(err error) bool {
 	}
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// lingerClose shuts the write side of a connection that has just been sent
+// an early refusal (a 400, 408, 413, 417, 431 or 501 written by serveConn
+// before any handler ran), then reads and discards whatever the client still
+// sends, for at most lingerTimeout. The caller's deferred Close follows.
+//
+// Why: the refusal often goes out while the client is still sending: the
+// rest of an oversized head (431), a body over the cap (413), the body that
+// followed a malformed head (400). Closing a socket that has unread bytes in
+// its receive buffer, or that receives more after the close, makes the
+// kernel answer with a TCP reset instead of an orderly FIN. A reset that
+// reaches the client before it has read the response can wipe the response
+// from the client's receive buffer (Linux does; macOS loopback usually
+// delivers it anyway), so the client sees "connection reset" instead of
+// the 413 that explains it.
+//
+//	server                                        client
+//	  write "HTTP/1.1 413 …"  ─────────────────►   (still sending the body)
+//	  CloseWrite: FIN         ─────────────────►   reads the 413, then EOF
+//	  read and discard   ◄──────────────────────   rest of what it had sent
+//	  EOF, or lingerTimeout   ◄─────── FIN ──────   closes its end
+//	  → Close (no reset: nothing left unread)
+//
+// Once the write side is shut, the client reads the response and then EOF,
+// and closes its end; that EOF ends the draining at once, so a client that
+// stops sending costs nothing. A client that keeps on sending is cut off
+// after lingerTimeout. Other servers: net/http pauses a fixed 500 ms after a
+// 431 without reading, which leaves a client's sends stalled on full
+// buffers; nginx lingers for up to 30 s (lingering_time). One second covers
+// a client that writes a moderate body before it reads anything (simple
+// synchronous clients do) without letting a refused connection be held for
+// long. No byte cap: time is the bound that matters, and the client pays
+// for every byte it makes us discard.
+//
+// TLS: (*tls.Conn).CloseWrite sends close_notify, which the client reads as
+// EOF; the TCP connection stays open until Close, so the draining still
+// reads (and decrypts) records. CloseWrite fails before the handshake has
+// completed, and a conn type without one (a test fake) cannot half-close;
+// either way nothing is drained and the caller closes at once, as before.
+//
+// The connection stays active in the server's registry meanwhile, so a
+// Shutdown that starts during the draining waits up to lingerTimeout longer
+// for it (or closes it at its own deadline).
+func lingerClose(conn net.Conn) {
+	cw, ok := conn.(interface{ CloseWrite() error })
+	if !ok || cw.CloseWrite() != nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(lingerTimeout))
+	// io.Discard's ReadFrom reads through a pooled buffer, so the draining
+	// allocates nothing of its own. Any error (EOF, the deadline, a reset)
+	// ends it the same way.
+	_, _ = io.Copy(io.Discard, conn)
 }
 
 // readDeadline arms and clears a connection's read deadline for the request
