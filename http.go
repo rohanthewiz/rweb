@@ -138,6 +138,69 @@ func isValidHeaderKey(k string) bool {
 	return true
 }
 
+// isValidHeaderValue reports whether v, a request header value with its line
+// ending removed (optional whitespace still on), holds no control byte other
+// than HTAB:
+//
+//	field-value   = *field-content                        (RFC 9110 §5.5)
+//	field-content = field-vchar [ 1*( SP / HTAB / field-vchar ) field-vchar ]
+//	field-vchar   = VCHAR / obs-text          (0x21-0x7E, 0x80-0xFF)
+//
+// So 0x00-0x08, 0x0A-0x1F and 0x7F are refused: NUL, a bare CR, VT, FF, ESC
+// and the rest. RFC 9110 lets a recipient either reject such a value or (for
+// CR, LF and NUL) replace the bytes with SP. rweb rejects, with 400, as
+// net/http does (httpguts.ValidHeaderFieldValue), for the reason the framing
+// checks refuse rather than resolve (request_framing.go): a proxy in front
+// that strips or replaces the bytes, and a handler here that sees them,
+// would be reading two different heads; and a value that reaches a handler
+// with an ESC or a NUL in it is a log-injection or truncation hazard for
+// whatever the handler passes it on to. obs-text (bytes 0x80 and up) is
+// kept: UTF-8 in header values is common and harmless to framing.
+//
+// A byte loop, like isValidHeaderKey, so it allocates nothing.
+func isValidHeaderValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; c < ' ' && c != '\t' || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidRequestLine reports whether line, a request line with its ending
+// removed, has the shape serveConn accepts:
+//
+//	request-line = method SP request-target SP HTTP-version   (RFC 9112 §3)
+//	             | method SP request-target           (no version: served as 1.1)
+//
+// that is, one or two single spaces, the last field non-empty, and no control
+// byte anywhere (HTAB, VT, FF and a bare CR included: RFC 9112 §3 notes that
+// some parsers split on those as if they were SP). The fields themselves are
+// checked by the caller (method, empty target).
+//
+// Why strict: serveConn splits at the first and the last space, so a third
+// space used to stay inside the target ("GET /a b HTTP/1.1" reached a "/a b"
+// route) or start it (two spaces after the method looked up " /x"). RFC 9112
+// §3 says a recipient SHOULD NOT autocorrect an invalid request line and
+// then process it, since such a line may be crafted to get past a filter in
+// front that splits it differently, and §3.2 allows no whitespace in the
+// target. net/http refuses the same lines, with 400.
+func isValidRequestLine(line string) bool {
+	spaces := 0
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == ' ':
+			if spaces++; spaces > 2 {
+				return false
+			}
+		case c < ' ' || c == 0x7f:
+			return false
+		}
+	}
+	// "GET /x " would otherwise be a request with an empty version field.
+	return spaces > 0 && line[len(line)-1] != ' '
+}
+
 // headerValueBreakers are the bytes that must not reach the wire inside a
 // header value: CR and LF end the line (and so let the value start a header
 // of its own), and NUL truncates the line in some C-based parsers.

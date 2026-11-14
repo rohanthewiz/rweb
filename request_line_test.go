@@ -70,3 +70,53 @@ func TestRequestLineEmptyTarget(t *testing.T) {
 		})
 	}
 }
+
+// A request line that is not exactly "method SP target [SP version]", with
+// single spaces and no control bytes, is refused with 400 and a close rather
+// than split at its first and last space (N-072). Before, "GET /a b
+// HTTP/1.1" reached a "/a b" route and "GET  /x HTTP/1.1" looked up " /x".
+func TestRequestLineRefusesExtraWhitespaceAndControls(t *testing.T) {
+	s := requestLineServer()
+	s.Get("/a b", func(ctx Context) error { return ctx.WriteString("space route") })
+	for _, tr := range transports {
+		t.Run(tr.name, func(t *testing.T) {
+			addr := serveTest(t, s, tr)
+			for _, c := range []struct{ name, req string }{
+				{"space inside the target", "GET /a b HTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"two spaces after the method", "GET  /x HTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"two spaces before the version", "GET /x  HTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"trailing space after the version", "GET /x HTTP/1.1 \r\nHost: t\r\n\r\n"},
+				{"empty version field", "GET /x \r\n\r\n"},
+				{"tab for a space", "GET\t/x HTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"tab before the version", "GET /x\tHTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"control byte in the target", "GET /x\x01 HTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"DEL in the target", "GET /x\x7f HTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"bare CR inside the line", "GET /x\rHTTP/1.1\r\nHost: t\r\n\r\n"},
+				{"NUL in the version", "GET /x HTTP/1.1\x00\r\nHost: t\r\n\r\n"},
+			} {
+				t.Run(c.name, func(t *testing.T) {
+					conn := dialTest(t, addr, tr)
+					writeAll(t, conn, c.req)
+					got, _ := readUntilClosed(conn)
+					if !strings.HasPrefix(got, "HTTP/1.1 400 ") {
+						t.Fatalf("got %q, want 400 and a close", firstLine(got))
+					}
+				})
+			}
+		})
+	}
+}
+
+// What stays accepted next to the refusals above: a target with non-ASCII
+// bytes (obs-text, not a control byte) is routed, not refused.
+func TestRequestLineKeepsNonASCIITarget(t *testing.T) {
+	s := requestLineServer()
+	s.Get("/café", func(ctx Context) error { return ctx.WriteString("cafe") })
+	addr := serveTest(t, s, transports[0])
+	conn := dialTest(t, addr, transports[0])
+	writeAll(t, conn, "GET /café HTTP/1.1\r\nHost: t\r\n\r\n")
+	status, body := readBody(t, bufio.NewReader(conn))
+	if status != 200 || body != "cafe" {
+		t.Fatalf("got %d %q, want 200 \"cafe\"", status, body)
+	}
+}

@@ -162,6 +162,13 @@ smuggling behind a proxy) are refused and the connection closed:
   space/tab (obsolete folding); a header line with no colon; `Transfer-Encoding`
   whose last coding is not `chunked`; a second `Transfer-Encoding` line; chunk
   data not followed by CRLF; a malformed chunk size.
+- `400`: a request line that is not `METHOD SP target SP version` (or
+  `METHOD SP target`) with single spaces: a space inside the target
+  (`GET /a b HTTP/1.1`), two spaces in a row, a tab for a space, a trailing
+  space; and any control byte in the request line or in a header value (NUL,
+  ESC, a bare CR, VT, FF, DEL; HTAB inside a value and UTF-8 are fine). Such
+  bytes are refused rather than stripped, as net/http does. Header values are
+  trimmed of spaces and tabs only.
 - `501`: `Transfer-Encoding` naming a coding besides `chunked` (`gzip, chunked`).
 
 Chunked bodies accept chunk extensions (ignored) and trailers (read and

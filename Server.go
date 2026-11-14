@@ -2143,6 +2143,29 @@ func (s *Server) serveConn(tc *trackedConn) {
 			return
 		}
 
+		// Work on the line without its ending. readLine stops at the first
+		// LF, so the ending is "\r\n" or, which RFC 9112 §2.2 lets a
+		// recipient accept, a bare "\n". Both fields below are cut from this
+		// trimmed line, so neither depends on which ending arrived: the
+		// target used to be cut by assuming a two-byte CRLF whenever there
+		// was no version field, which dropped the target's last byte after a
+		// bare LF ("GET /xy\n" → "/x") and sliced past its start for an
+		// empty one ("GET \n" → [4:3], a panic) (N-063). TrimRight, as the
+		// version field always had, also takes stray CRs before the LF.
+		line := strings.TrimRight(message, "\r\n")
+
+		// One or two single spaces and no control bytes, or 400: a line the
+		// split below would have to guess at ("GET /a b HTTP/1.1", two
+		// spaces after the method, a tab for a space) is refused rather than
+		// autocorrected (N-072; see isValidRequestLine). Checked before the
+		// method, so a malformed line is a 400 even when the piece before
+		// its first space ("GET\t/x") is no method: 501 is for a well-formed
+		// request naming a method rweb does not serve.
+		if !isValidRequestLine(line) {
+			refuse(consts.HTTPBadRequest)
+			return
+		}
+
 		method = message[:space]
 
 		// A method the routers keep no table for can never be served, so it
@@ -2155,16 +2178,6 @@ func (s *Server) serveConn(tc *trackedConn) {
 			return
 		}
 
-		// Work on the line without its ending. readLine stops at the first
-		// LF, so the ending is "\r\n" or, which RFC 9112 §2.2 lets a
-		// recipient accept, a bare "\n". Both fields below are cut from this
-		// trimmed line, so neither depends on which ending arrived: the
-		// target used to be cut by assuming a two-byte CRLF whenever there
-		// was no version field, which dropped the target's last byte after a
-		// bare LF ("GET /xy\n" → "/x") and sliced past its start for an
-		// empty one ("GET \n" → [4:3], a panic) (N-063). TrimRight, as the
-		// version field always had, also takes stray CRs before the LF.
-		line := strings.TrimRight(message, "\r\n")
 		lastSpace := strings.LastIndexByte(line, consts.RuneSingleSpace)
 
 		// The protocol version is the request line's last field. A line with
@@ -2175,7 +2188,8 @@ func (s *Server) serveConn(tc *trackedConn) {
 		//
 		//   "GET /xy HTTP/1.1"     space=3, lastSpace=7 → url "/xy", proto "HTTP/1.1"
 		//   "GET /xy"              space=3, lastSpace=3 → url "/xy", no proto
-		//   "GET " / "GET  HTTP/1.1"                     → url "", refused below
+		//   "GET  HTTP/1.1"                              → url "", refused below
+		//   "GET " (empty last field)                    → refused above
 		var proto string
 		if lastSpace == space {
 			url = line[space+1:]
@@ -2246,9 +2260,20 @@ func (s *Server) serveConn(tc *trackedConn) {
 			// Everything after the colon is the value. Never assume a space
 			// follows the colon — "Host:example.com" is legal per RFC 7230,
 			// and "X-Empty:" has no value at all (slicing colon+2 here used
-			// to panic on that). TrimSpace removes the trailing CRLF along
-			// with any optional whitespace (OWS) around the value.
-			value := strings.TrimSpace(message[colon+1:])
+			// to panic on that). The line ending ("\r\n", or a bare "\n")
+			// comes off first; what remains may hold no control byte but HTAB
+			// (N-060, see isValidHeaderValue), and is then trimmed of the
+			// optional whitespace around it (OWS = SP / HTAB, RFC 9110 §5.6.3).
+			// The trim used to be TrimSpace over the whole rest of the line,
+			// which also took VT, FF and stray CRs at either end without a
+			// word; those are refused now, and the trim covers exactly OWS.
+			raw := strings.TrimSuffix(message[colon+1:], "\n")
+			raw = strings.TrimSuffix(raw, "\r")
+			if !isValidHeaderValue(raw) {
+				refuse(consts.HTTPBadRequest)
+				return
+			}
+			value := strings.Trim(raw, " \t")
 
 			ctx.request.headers = append(ctx.request.headers, Header{
 				Key:   key,
