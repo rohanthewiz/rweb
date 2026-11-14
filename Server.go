@@ -2333,7 +2333,7 @@ func (s *Server) serveConn(tc *trackedConn) {
 				return
 			}
 
-			if message == consts.CRLF { // "empty" line // end of headers
+			if isBlankLine(message) { // the empty line ("\r\n" or "\n") ends the head
 				break
 			}
 

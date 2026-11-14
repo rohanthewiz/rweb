@@ -181,7 +181,7 @@ func readChunkedBody(r *bufio.Reader, lr *lineReader, body *[]byte, maxBody int6
 				if err != nil {
 					return err
 				}
-				if line == consts.CRLF {
+				if isBlankLine(line) { // "\r\n" or a bare "\n", as for the head
 					return nil
 				}
 			}

@@ -171,6 +171,24 @@ func isValidHeaderValue(v string) bool {
 	return true
 }
 
+// isBlankLine reports whether line, as lineReader returns it (ending
+// included), is the empty line that ends a request head or a chunked body's
+// trailers: CRLF, or a bare LF.
+//
+// RFC 9112 §2.2 lets a recipient take a lone LF as a line ending, and rweb
+// does for the request line, header lines and chunk-size lines; it took
+// only CRLF for the empty line, though, which made a head written with LF
+// throughout a 400 and, worse, left a chunked body's trailers open after a
+// bare-LF empty line: the next pipelined request was then read as more
+// trailer lines and swallowed, where a proxy in front that takes LF saw
+// two requests (N-077). Accepting LF here as well keeps every line ending
+// read the same way. Nothing becomes ambiguous by it: a parser that refuses
+// bare LF refuses such a head as a whole, and one that accepts it ends the
+// head (or the trailers) on the same line rweb now does.
+func isBlankLine(line string) bool {
+	return line == "\r\n" || line == "\n"
+}
+
 // isValidRequestLine reports whether line, a request line with its ending
 // removed, has the shape serveConn accepts:
 //

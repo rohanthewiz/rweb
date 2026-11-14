@@ -175,6 +175,11 @@ smuggling behind a proxy) are refused and the connection closed:
 Chunked bodies accept chunk extensions (ignored) and trailers (read and
 discarded, counted against `MaxHeaderBytes`).
 
+A bare LF is taken as a line ending wherever CRLF is (RFC 9112 §2.2): the
+request line, header lines, the empty line that ends the head, chunk-size
+lines and trailers. The one exception is the end of chunk data, which must be
+exactly CRLF.
+
 `Expect: 100-continue` on an HTTP/1.1 request with a body gets
 `HTTP/1.1 100 Continue` just before the body is read, after the framing and
 `MaxRequestBodySize` checks, so a request that will be refused (e.g. `413`) never
