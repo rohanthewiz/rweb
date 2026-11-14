@@ -34,12 +34,10 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-074
+**Next ID:** N-075
 
 ## Open
 
-- **N-052** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
-  Static files and `SendFile`: no Range, ETag, Cache-Control or index options; unknown types forced to download; filename encoding. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-053** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
   Logging goes straight to stdout through about thirty `fmt.Print*` calls, several unconditional; add a pluggable logger. Includes the unconditional `log.Printf` for a dropped response header name added by N-031 (`Response.go`, `acceptHeaderKey`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-054** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
@@ -64,6 +62,8 @@ code at `3169f85`.
   The request line is split only at its first and last space (`serveConn`, `Server.go`), so extra spaces and a space inside the target are accepted: `GET /a b HTTP/1.1` reaches a `/a b` route (200), and `GET  /x HTTP/1.1` looks up ` /x` (404, not 400). RFC 9112 §3 says a recipient SHOULD NOT autocorrect an invalid request line and then process it, since such a line may be crafted to get past a filter in front, and §3.2 allows no whitespace in the target. A 400 would match the framing rules of N-036. Decide together with N-060 (control characters in header values). Found while fixing N-063; both cases checked on the wire with a throwaway test.
 - **N-073** · raised `2026-1113-2331-n048-n049-n050-hooks-param-decode-header-case` · value medium
   A handler that sets `Content-Length` (or `Transfer-Encoding`) itself gets it sent alongside the server's own framing header: `SetHeader("Content-Length", "999")` + `WriteString("hi")` sends `Content-Length: 2` and `Content-Length: 999` (reproduced). Two differing lengths make the response ambiguous to a proxy in front (RFC 9112 §6.3). `writeResponse` frames every body itself, so it should skip (or refuse) handler-set framing headers, minding an explicit `s.Head` route that sets the GET length for a bodiless HEAD reply. From the N-050 work.
+- **N-074** · raised `2026-1114-0809-n052-static-range-etag-options` · value low
+  Response head conformance in `writeResponse` (`Server.go`): the status line omits the space before an empty reason phrase, and `consts.StatusTextFromCode` lacks most codes (413, 422, 429, …), so a 429 goes out as `HTTP/1.1 429\r\n` where RFC 9112 §4 requires `HTTP/1.1 429 ` (seen on the wire; clients tolerate it). Fall back to `http.StatusText`, as the default error page does since N-048, and always write the space. Also: ordinary responses carry no `Date` header (only file responses set one), which RFC 9110 §6.6.1 requires of an origin server with a clock; a per-second cached value would keep it cheap. From the N-052 work.
 
 ## Validate
 
@@ -100,6 +100,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-052** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14 (`ed5a124`)
+  New `file_serve.go`: `serveFile`, shared by every static route and `SendFile`/`SendFileAs`, sends a strong ETag (mtime ns + size; strong so `If-Range` can match, unlike the plan's weak tag), `Accept-Ranges: bytes`, and evaluates RFC 9110 §13.2.2 in order: `If-Match`/`If-Unmodified-Since` → 412, `If-None-Match` ahead of `If-Modified-Since` → 304 (with Date, ETag, Cache-Control), one byte range → 206 by seeking the file and streaming the span (sendfile kept) or 416 with `bytes */size`; lists, other units and bad syntax are ignored (200), as is a range on an empty file. `StaticFilesWithOptions`/`StaticFilesAbsWithOptions` on Server and Group take `StaticOptions{CacheControl, Index, SPAFallback}`; with Index or SPAFallback the prefix route is registered too (a wildcard never matches an empty remainder, and trailing slashes are dropped, so no add-a-slash redirect). `"/"` can now be mounted (the guard was `len < 2`). Unknown extensions ask `mime.TypeByExtension` before an octet-stream download; Content-Disposition via `mime.FormatMediaType` with an ASCII `filename` plus `filename*` for non-ASCII names, `x-filename` encodeURIComponent-style. New statuses 412, 416. `middleware/critical` skips 206 and weakens the ETag / sets `Accept-Ranges: none` on pages it rewrites. Tests: `static_range_test.go`, `TestStaticFileRangeAndValidators` (critical). Raised N-074.
 - **N-051** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14, 2026-1114-0017-n051-text-charset-utf8 (`9d1acfd`)
   `WriteHTML`/`WriteText` (and the `…Bytes` forms) send `text/html; charset=utf-8` / `text/plain; charset=utf-8`; `rweb.HTML`, `Text`, `CSS`, `JS` and also `CSV` (as `setFileHeaders` already did for `.csv`) send their types with `charset=utf-8`. New constants `consts.CharsetUTF8`, `MIMEHTMLUTF8`, `MIMETextPlainUTF8`, `MIMECSSUTF8`, `MIMEJavaScriptUTF8`, `MIMECSVUTF8` (plus bare `MIMECSS`, `MIMEJavaScript`, `MIMECSV`, now used by `setFileHeaders`); the bare constants keep their values. JSON and XML stay bare by design (RFC 8259 has no charset for JSON; on XML it would override the document's encoding declaration). The default error page gains the charset via `WriteHTML`. Behaviour change: the header now outranks a page's `<meta charset>`; noted in SKILL.md. Tests: `text_charset_test.go` (on the wire, via `mime.ParseMediaType`), `TestContentTypes`, `TestWriteHTMLBytes`/`TestWriteTextBytes`.
 - **N-050** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13, 2026-1113-2331-n048-n049-n050-hooks-param-decode-header-case (`f64493d`)
