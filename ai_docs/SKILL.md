@@ -1252,8 +1252,16 @@ From v0.2.1:
 - **Hop-by-hop headers are dropped both ways**: `Connection` and every header it names,
   `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`,
   `Proxy-Authenticate`, `Proxy-Authorization`; also the request's `Expect` (rweb already
-  answered `100 Continue`). So WebSocket upgrades cannot be proxied. Repeated request headers
-  keep every line (they used to collapse to the last one).
+  answered `100 Continue`). Repeated request headers keep every line (they used to collapse to
+  the last one).
+- **WebSockets** (v0.2.1+): a handshake keeps its upgrade, and on the upstream's `101` the
+  client's connection is tied to the upstream's: frames are copied both ways, unparsed, until
+  either side closes (subprotocol, compression, pings and the close handshake are the two
+  ends' business). Any other answer (a `403` from the upstream's origin check, say) reaches
+  the client as a normal response. The upstream sees the target's `Host`, so an rweb upstream
+  needs the public origin in `WSOptions.AllowedOrigins` (`X-Forwarded-Host` carries the
+  public host). `Shutdown` closes a proxied socket at once (no `1001` from the proxy; an
+  upstream that shuts down sends its own).
 - **`X-Forwarded-*` is set**: `X-Forwarded-For` gets the peer's IP appended (`"client, proxy1,
   peer"`). `X-Forwarded-Proto` and `X-Forwarded-Host` are set to what this server saw,
   replacing values sent by an untrusted peer; a **trusted** peer's values (see

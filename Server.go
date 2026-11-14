@@ -1153,6 +1153,11 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 //     directions. X-Forwarded-For gets the client's IP appended;
 //     X-Forwarded-Proto and X-Forwarded-Host are set to this hop's values.
 //     The upstream sees its own host in Host.
+//   - A WebSocket handshake keeps its upgrade; when the upstream answers 101
+//     the client's connection is relayed to the upstream's as a tunnel
+//     until either side closes, or Shutdown closes both. The upstream sees
+//     the target's Host, so its origin check must admit the public origin
+//     (an rweb upstream: WSOptions.AllowedOrigins).
 //   - No response headers within ServerOptions.ProxyResponseHeaderTimeout
 //     (default 60 s) is a 504; an unreachable or failing upstream is a 502.
 //     Both go through the error handler. A client that leaves mid-call
@@ -1277,6 +1282,23 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		req.Header.Del(consts.HeaderExpect)
 		setForwardedHeaders(req.Header, ctx)
 
+		// A WebSocket handshake keeps its upgrade (N-066). removeHopByHop
+		// took Connection and Upgrade off like any hop-by-hop header, which
+		// is right for this hop's own options; the upgrade itself is put
+		// back, so the upstream sees a handshake. Go's Transport sends such
+		// a request over HTTP/1.1 even to an HTTP/2-capable upstream, and on
+		// a 101 hands back the upstream connection as resp.Body (an
+		// io.ReadWriteCloser), which relayProxiedUpgrade (proxy.go) ties to
+		// the client's. Sec-WebSocket-Key, -Version, -Protocol and
+		// -Extensions pass as they are: the handshake, subprotocol and
+		// compression are agreed between the client and the upstream, and
+		// this hop only copies bytes.
+		wsUpgrade := ctx.IsWebSocketUpgrade()
+		if wsUpgrade {
+			req.Header.Set(consts.HeaderConnection, consts.HeaderUpgrade)
+			req.Header.Set(consts.HeaderUpgrade, "websocket")
+		}
+
 		resp, err := client.Do(req)
 		if err != nil {
 			if reqCtx.Err() != nil {
@@ -1296,6 +1318,14 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 				ctx.SetStatus(consts.StatusBadGateway)
 			}
 			return err
+		}
+
+		// The upstream agreed to the upgrade: from here the request is a
+		// tunnel, not a response. Any other answer to a handshake (a 403
+		// from the upstream's origin check, a 400, a redirect) goes to the
+		// client below like any response.
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			return s.relayProxiedUpgrade(ctx, resp, wsUpgrade)
 		}
 
 		ctx.Response().SetStatus(resp.StatusCode)

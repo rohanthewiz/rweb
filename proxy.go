@@ -1,6 +1,7 @@
 package rweb
 
 import (
+	"bytes"
 	stdctx "context"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -40,6 +42,13 @@ import (
 //	upstream unreachable, reset, bad response ──────────────► 502
 //	client gone / server shutting down ─────────────────────► 502, quietly
 //	                                                          (clientGone)
+//	WebSocket handshake answered 101 ───────────────────────► tunnel: bytes
+//	                                                          copied both
+//	                                                          ways until
+//	                                                          either side
+//	                                                          ends
+//	                                                          (relayProxied-
+//	                                                          Upgrade)
 //	a body read stalled past ProxyReadTimeout (off by
 //	default) ────────────────────────────────────────────────► body cut off,
 //	                                                          client conn
@@ -138,7 +147,9 @@ func (s *Server) closeProxyIdleConns() {
 //     own, and an upstream has no business with a client's proxy
 //     credentials, nor the client with an upstream proxy's challenge.
 //   - Upgrade: a protocol switch (a WebSocket, h2c) is a property of the
-//     connection, and this proxy relays messages, not connections.
+//     connection. The client's own options are dropped like any other; a
+//     WebSocket handshake then gets its upgrade put back (Server.proxy) and
+//     is relayed as a tunnel (relayProxiedUpgrade). No other protocol is.
 var hopByHopHeaders = []string{
 	consts.HeaderConnection,
 	"Keep-Alive",
@@ -410,4 +421,124 @@ func hostWithDefaultPort(scheme, host string) string {
 		return net.JoinHostPort(strings.Trim(host, "[]"), "443")
 	}
 	return host
+}
+
+// errProxyUnexpectedUpgrade is the error behind the 502 a client gets when
+// the upstream answers 101 to a request that did not ask to switch to a
+// WebSocket, or switches to something else: a tunnel nobody asked for is
+// not one to open.
+var errProxyUnexpectedUpgrade = errors.New("rweb: proxy: upstream switched protocols without a WebSocket handshake to answer")
+
+// relayProxiedUpgrade turns a Proxy request whose upstream answered a
+// WebSocket handshake with 101 into a tunnel between the client's
+// connection and the upstream's, and returns when the tunnel ends.
+//
+//	client ──handshake──► rweb (Proxy route) ──handshake──► upstream
+//	client ◄────101────── rweb ◄────────101──────────────── upstream
+//	                       │ the client's conn is taken over (GetConn:
+//	                       │ disconnect watch stopped; readAhead: bytes the
+//	                       │ client sent behind its handshake)
+//	client ═══frames═══► copy ═══► upstream conn (resp.Body, read-write)
+//	client ◄══frames════ copy ◄═══ upstream conn
+//
+// Frames are copied as bytes, never parsed: the client and the upstream
+// agreed the protocol, subprotocol and compression between them, and their
+// own pings and close handshake pass through, so liveness is the two ends'
+// business (an rweb upstream pings every 30 s by default).
+//
+// The tunnel ends when either copy ends (one side closed or failed; after a
+// close handshake that is the normal end) or the request context is
+// cancelled, which after GetConn means Shutdown: both connections are then
+// closed, which ends the other copy too. Closing both on the first end, as
+// httputil.ReverseProxy does, rather than half-closing and waiting, means a
+// peer that vanished without a FIN cannot hold the tunnel open from the
+// other side. Shutdown closes a tunnel at once rather than sending a 1001
+// close frame as it does to the server's own WebSockets: a frame written
+// here could land in the middle of one the upstream is sending.
+//
+// The client's connection is marked upgraded (wsUpgraded) as soon as it is
+// taken over, so writeResponse sends nothing more on it and the request
+// loop closes it once the handler returns. Writes to the client go under
+// WriteTimeout when one is set, as every other write does.
+//
+// A 101 that does not answer a WebSocket handshake made through this route
+// (asked false, another Upgrade token, a Transport that did not hand the
+// connection over, or a synthetic request with no conn) is closed and
+// answered with 502 instead.
+func (s *Server) relayProxiedUpgrade(ctx Context, resp *http.Response, asked bool) error {
+	up, isRW := resp.Body.(io.ReadWriteCloser)
+	c, isCtx := ctx.(*context)
+	if !asked || !isRW || !isCtx || c.conn == nil ||
+		!strings.EqualFold(resp.Header.Get(consts.HeaderUpgrade), "websocket") {
+		_ = resp.Body.Close()
+		ctx.SetStatus(consts.StatusBadGateway)
+		return errProxyUnexpectedUpgrade
+	}
+
+	conn := c.GetConn()
+	lead := c.request.readAhead()
+	c.wsUpgraded = true
+	c.response.SetStatus(http.StatusSwitchingProtocols) // for logging middleware
+
+	var toClient io.Writer = conn
+	if d := s.limits.write; d > 0 {
+		toClient = &deadlineWriter{conn: conn, w: conn, d: d}
+	}
+	if _, err := toClient.Write(appendUpgradeHead(nil, resp.Header)); err != nil {
+		_ = up.Close() // the client is gone; its conn closes with the loop
+		return nil
+	}
+
+	var fromClient io.Reader = conn
+	if len(lead) > 0 {
+		fromClient = io.MultiReader(bytes.NewReader(lead), conn)
+	}
+
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(up, fromClient); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(toClient, up); done <- struct{}{} }()
+	pending := 2
+	select {
+	case <-done:
+		pending--
+	case <-ctx.Request().Context().Done():
+	}
+	_ = up.Close()
+	_ = conn.Close()
+	for ; pending > 0; pending-- {
+		<-done
+	}
+	if s.options.Verbose {
+		s.log.Info("rweb: proxied WebSocket ended", "path", c.request.Path())
+	}
+	return nil
+}
+
+// appendUpgradeHead appends to b the 101 a client gets for a proxied
+// WebSocket handshake: this hop's Connection and Upgrade, then the
+// upstream's own response headers (Sec-WebSocket-Accept, -Protocol,
+// -Extensions, Set-Cookie, ...) minus its hop-by-hop ones. Names that are
+// no token and framing headers are left out, and values are cleaned of
+// CR, LF and NUL, as for any response rweb writes. Names go out sorted so
+// the head is the same for the same headers.
+func appendUpgradeHead(b []byte, h http.Header) []byte {
+	removeHopByHop(h)
+	b = append(b, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n"...)
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if !isValidHeaderKey(k) || isFramingHeader(k) {
+			continue
+		}
+		for _, v := range h[k] {
+			b = append(b, k...)
+			b = append(b, ": "...)
+			b = append(b, sanitizeHeaderValue(v)...)
+			b = append(b, "\r\n"...)
+		}
+	}
+	return append(b, "\r\n"...)
 }
