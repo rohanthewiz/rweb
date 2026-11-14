@@ -638,9 +638,25 @@ func selectSubprotocol(headers []Header, supported []string) string {
 // second ReadMessage: calls from two goroutines take turns rather than
 // splitting frames between them. After a Close on another goroutine it
 // fails (the connection is closed by then) instead of reading.
+//
+// Once the peer's close frame has been read (returned as a CloseMessage, or
+// read by Close), every later call returns ErrWebSocketAlreadyClosed at once:
+// RFC 6455 §5.5.1 forbids an endpoint any data frame after its close frame,
+// so there is nothing left to wait for. Without this check, a handler that
+// read on past the CloseMessage after the server's own close (Shutdown's
+// 1001, which leaves the conn open for the handler's loop to close) blocked
+// until the 2 s closeHandshakeTimeout deadline, and Shutdown waited with it
+// (N-076). ErrWebSocketAlreadyClosed counts as an ordinary session end
+// (isWebSocketSessionEnd), so a handler returning it logs nothing.
 func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 	ws.readSem <- struct{}{}
 	defer func() { <-ws.readSem }()
+
+	// closeRcvd is stored before the reader that saw the close frame gives
+	// readSem up, so holding readSem here sees it.
+	if ws.closeRcvd.Load() {
+		return nil, ErrWebSocketAlreadyClosed
+	}
 
 	for {
 		frameType, fin, rsv1, data, err := ws.readFrame()

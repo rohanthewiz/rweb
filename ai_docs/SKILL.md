@@ -1132,7 +1132,9 @@ Reading is single-owner: `ReadMessage` calls from two goroutines take turns
 calls `ws.Close` while the handler reads, the handler's `ReadMessage` returns
 the peer's answering close frame (`CloseMessage`) — or an error if the peer
 sends data first or never answers — and `Close` returns once it has, or after
-2 s. `Close` may also be called inside a ping, pong or `OnClose` handler; in an
+2 s. Once the peer's close frame has been read, any further `ReadMessage`
+returns `ErrWebSocketAlreadyClosed` at once (v0.2.1+), so a loop that reads on
+past a `CloseMessage` ends instead of waiting. `Close` may also be called inside a ping, pong or `OnClose` handler; in an
 `OnClose` handler it answers the peer's close frame with its own code (without
 it, the peer's code is echoed back automatically).
 
