@@ -224,6 +224,42 @@ routed (e.g. `Allow: GET, HEAD, POST`). A path routed under no method still gets
 `404`. A method rweb has no routes for at all (`PROPFIND`, `PURGE`, ...) gets
 `501 Not Implemented`, before any middleware runs.
 
+### Error, not-found and 405 hooks
+
+```go
+// Replaces the default error page (log under a random code, send a short
+// HTML page with that code and the status's reason phrase, e.g.
+// "502 Bad Gateway"). Called for a returned error or a recovered panic.
+s.SetErrorHandler(func(ctx rweb.Context, err error) {
+    log.Println(err)
+    if ctx.Response().Status() < 400 { // keep a status the handler chose
+        ctx.SetStatus(500)
+    }
+    _ = ctx.WriteJSON(map[string]string{"error": "internal"})
+})
+
+// Runs for a path routed under no method, after middleware, with the
+// status already 404 — writing a body is enough.
+s.SetNotFoundHandler(func(ctx rweb.Context) error {
+    return ctx.WriteHTML("<h1>Page not found</h1>")
+})
+
+// Runs for a path routed under other methods only, with 405 and the Allow
+// header already set.
+s.SetMethodNotAllowedHandler(func(ctx rweb.Context) error {
+    return ctx.WriteJSON(map[string]string{"allow": ctx.Response().Header("Allow")})
+})
+```
+
+Passing `nil` to any of them restores the default. Call them before serving.
+Only unrouted requests reach the not-found hook: a route's own 404 (a missing
+file under `StaticFiles`, or a handler that sets 404) is that route's
+response. An error a hook returns goes to the error handler.
+
+`s.Routes()` returns every route (`[]rtr.RouteList`: Method, Path,
+HandlerRef), `:param` and `*wildcard` routes included, sorted by path then
+method; `s.ListRoutes()` prints the same as a table.
+
 ### HEAD (v0.2.1+)
 
 A HEAD with no HEAD route is served by the GET handler: it runs as for GET

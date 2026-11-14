@@ -424,6 +424,20 @@ type Server struct {
 	hashRouter   *rtr.HashRouter[Handler]
 	errorHandler func(Context, error)
 	options      ServerOptions
+
+	// notFoundHandler and methodNotAllowedHandler, when set, write the
+	// response for a request no route matched (404) or one whose path is
+	// routed under other methods only (405). Nil keeps the default: the
+	// status alone, with an empty body. See SetNotFoundHandler.
+	notFoundHandler         Handler
+	methodNotAllowedHandler Handler
+
+	// radixRoutes records each :param / *wildcard route as it is added, so
+	// Routes and ListRoutes can show them. The radix tree keeps no list of
+	// its routes and cannot give back a pattern from its compressed nodes;
+	// recording at Add is far simpler than walking the tree to rebuild one.
+	// Exact routes need no such record: the hash router's maps are the list.
+	radixRoutes []rtr.RouteList
 	// listenAddr is the address of the listener most recently served
 	// (GetListenAddr). Guarded by lifeMu: Serve sets it from its own
 	// goroutine while the caller may already be reading it.
@@ -508,20 +522,11 @@ func NewServer(options ...ServerOptions) *Server {
 	}
 
 	s := &Server{
-		radixRouter: radRtr,
-		hashRouter:  hashRtr,
-		options:     opts,
-		limits:      resolveConnLimits(opts),
-		errorHandler: func(ctx Context, err error) {
-			errCode := GenRandString(8, true)
-			log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
-
-			if ctx.Response().Status() == 0 || ctx.Response().Status() == consts.StatusOK {
-				ctx.SetStatus(consts.StatusInternalServerError)
-			}
-			_ = ctx.WriteHTML(fmt.Sprintf("<h3>%d Internal Server Error</h3>\n<p>Error code: %s</p>",
-				ctx.Response().Status(), errCode))
-		},
+		radixRouter:  radRtr,
+		hashRouter:   hashRtr,
+		options:      opts,
+		limits:       resolveConnLimits(opts),
+		errorHandler: defaultErrorHandler,
 	}
 
 	s.handlers = []Handler{
@@ -574,12 +579,22 @@ func NewServer(options ...ServerOptions) *Server {
 					}
 					ctx.response.SetHeader(consts.HeaderAllow, allow)
 					ctx.SetStatus(consts.StatusMethodNotAllowed)
+					// The hook runs with the status and Allow header already
+					// set, so a handler that only writes a body still sends
+					// a correct 405. It may change either.
+					if s.methodNotAllowedHandler != nil {
+						return s.methodNotAllowedHandler(c)
+					}
 					return nil
 				}
 				if s.options.Debug {
 					fmt.Println("Route not found in radix router either -- returning 404")
 				}
 				ctx.SetStatus(consts.StatusNotFound)
+				// As for 405: status first, so a body-only hook is enough.
+				if s.notFoundHandler != nil {
+					return s.notFoundHandler(c)
+				}
 				return nil
 			}
 
@@ -599,6 +614,80 @@ func NewServer(options ...ServerOptions) *Server {
 
 	s.contextPool.New = func() any { return s.newContext() }
 	return s
+}
+
+// defaultErrorHandler is the error handler a new Server starts with, and
+// what SetErrorHandler(nil) restores. It logs the error under a random code
+// and sends a small HTML page carrying the same code, so a user's report can
+// be matched to the log line without the page leaking the error itself.
+//
+// A status the handler already chose (anything but 0 or 200) is kept: a
+// handler that set 403 and then returned an error still sends a 403. The
+// page's heading uses that status's own reason phrase, so the proxy's 502
+// reads "502 Bad Gateway" rather than "502 Internal Server Error".
+// http.StatusText rather than consts.StatusTextFromCode: the latter lists
+// only the statuses rweb itself sends, and a handler may pick any.
+func defaultErrorHandler(ctx Context, err error) {
+	errCode := GenRandString(8, true)
+	log.Printf("[ERR: %s] %q - error: %s\n", errCode, ctx.Request().Path(), err)
+
+	if ctx.Response().Status() == 0 || ctx.Response().Status() == consts.StatusOK {
+		ctx.SetStatus(consts.StatusInternalServerError)
+	}
+	status := ctx.Response().Status()
+	text := http.StatusText(status)
+	if text == "" {
+		text = "Error"
+	}
+	_ = ctx.WriteHTML(fmt.Sprintf("<h3>%d %s</h3>\n<p>Error code: %s</p>",
+		status, text, errCode))
+}
+
+// SetErrorHandler replaces the handler that answers a request whose handler
+// chain returned an error or panicked. It is called after any stream the
+// handler attached has been dropped, with whatever status and headers the
+// handler had set, and writes the response through ctx as a handler would.
+// It is not called for a WebSocket after its upgrade (the 101 is out, so
+// there is no response to write) or for a client that went away mid-proxy.
+// nil restores the default (defaultErrorHandler: log under a random code,
+// send a short HTML page with that code).
+//
+// Like route registration, call it before serving: the request path reads
+// it without a lock.
+func (s *Server) SetErrorHandler(h func(Context, error)) {
+	if h == nil {
+		h = defaultErrorHandler
+	}
+	s.errorHandler = h
+}
+
+// SetNotFoundHandler sets a handler for requests that match no route under
+// any method. It runs at the end of the middleware chain, in place of a
+// route handler, with the status already set to 404; it typically just
+// writes a body, and may change the status. An error it returns goes to the
+// error handler as any handler's would. nil restores the default: a 404 with
+// an empty body.
+//
+// Only unrouted requests reach it. A route's own 404 (a missing file under
+// StaticFiles, or a handler that sets 404 itself) is that route's response.
+//
+// Call it before serving.
+func (s *Server) SetNotFoundHandler(h Handler) {
+	s.notFoundHandler = h
+}
+
+// SetMethodNotAllowedHandler sets a handler for requests whose path is routed
+// under other methods but not this one. It runs with the status already set
+// to 405 and the Allow header listing the accepted methods (RFC 9110
+// §15.5.6), and otherwise behaves as SetNotFoundHandler's hook. nil restores
+// the default: the 405 and Allow header with an empty body.
+//
+// A method rweb does not route at all is answered 501 before any handler
+// runs and never reaches this hook.
+//
+// Call it before serving.
+func (s *Server) SetMethodNotAllowedHandler(h Handler) {
+	s.methodNotAllowedHandler = h
 }
 
 // baseContext returns the context request contexts currently derive from.
@@ -721,12 +810,32 @@ func NewServerWithOptions(options ...ServerOption) *Server {
 	return NewServer(opts)
 }
 
+// AddMethod registers handler for method and path. A path with no :param or
+// *wildcard segment goes to the hash router (one map lookup per request);
+// any other goes to the radix router, and is also recorded for Routes.
 func (s *Server) AddMethod(method string, path string, handler Handler) {
 	if strings.IndexByte(path, consts.RuneColon) < 0 && strings.IndexByte(path, consts.RuneAsterisk) < 0 {
 		s.hashRouter.Add(method, path, handler)
 	} else {
 		s.radixRouter.Add(method, path, handler)
+		s.recordRadixRoute(method, path, handler)
 	}
+}
+
+// recordRadixRoute adds a radix route to radixRoutes, replacing the entry for
+// the same method and path if there is one, since a second Add of that pair
+// replaces the handler in the tree too (as a second Add does in the hash
+// router's map). A linear scan: registration is a startup cost, done once
+// per route.
+func (s *Server) recordRadixRoute(method, path string, handler Handler) {
+	rt := rtr.RouteList{Method: method, Path: path, HandlerRef: fmt.Sprintf("%v", handler)}
+	for i := range s.radixRoutes {
+		if s.radixRoutes[i].Method == method && s.radixRoutes[i].Path == path {
+			s.radixRoutes[i] = rt
+			return
+		}
+	}
+	s.radixRoutes = append(s.radixRoutes, rt)
 }
 
 // Get registers your function to be called when the given GET path has been requested.
@@ -1535,11 +1644,38 @@ func (s *Server) runUntilSignal(l net.Listener, redirector *http.Server, rl net.
 	return nil
 }
 
-// ListRoutes prints all server routes by method in tabular format.
+// Routes returns every registered route, exact and :param / *wildcard
+// alike, sorted by path and then by method in routableMethods order (GET,
+// HEAD, POST, ...), so the result is stable from run to run although the
+// hash router keeps its routes in maps. Group routes appear under their full
+// path. HandlerRef is fmt's %v of the handler, which for a func is its
+// address: enough to tell two handlers apart, not to name them.
+//
+// Built fresh on each call; it is meant for startup output, docs and tests,
+// not the request path.
+func (s *Server) Routes() []rtr.RouteList {
+	routes := s.hashRouter.ListRoutes()
+	routes = append(routes, s.radixRoutes...)
+
+	methodRank := func(m string) int {
+		if i := slices.Index(routableMethods[:], m); i >= 0 {
+			return i
+		}
+		return len(routableMethods)
+	}
+	slices.SortFunc(routes, func(a, b rtr.RouteList) int {
+		if c := strings.Compare(a.Path, b.Path); c != 0 {
+			return c
+		}
+		return methodRank(a.Method) - methodRank(b.Method)
+	})
+	return routes
+}
+
+// ListRoutes prints all server routes (Routes) in tabular format.
 func (s *Server) ListRoutes() {
-	fmt.Println("\n---- Routes (routes with params are not listed) ----")
-	routesList := s.hashRouter.ListRoutes()
-	// Can we list routes for radix router? Maybe we will just track the number of Adds
+	fmt.Println("\n---- Routes ----")
+	routesList := s.Routes()
 
 	fmt.Println("Method\t\tPath\t\t\tHandler")
 	fmt.Println("------\t\t----\t\t\t----------")
@@ -1548,7 +1684,6 @@ func (s *Server) ListRoutes() {
 		fmt.Printf("%-8s\t%-20s\t%-30s\n", route.Method, route.Path, route.HandlerRef)
 	}
 	fmt.Println()
-	// s.radixRouter.PrintRoutes()
 }
 
 // Use adds handlers to your handlers chain.
