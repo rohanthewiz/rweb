@@ -38,8 +38,6 @@ code at `3169f85`.
 
 ## Open
 
-- **N-064** · raised `2026-1111-1143-phase-3-performance` · value low
-  No read timeout on a streamed body once its headers are sent: an upstream behind `Proxy` (or any slow `rweb.Stream` producer) that stalls mid-body holds the client connection until shutdown, and since the disconnect watch is stopped before `writeResponse`, a client that leaves during the stall is not noticed until the next write. nginx's `proxy_read_timeout` bounds each read; a per-read idle timer around `resp.Body` would do it for the proxy. From the N-047 report.
 - **N-065** · raised `2026-1111-1143-phase-3-performance` · value low
   `Proxy` does not rewrite an upstream `Location` (or cookie `Path`) under the proxy prefix, so an upstream redirect to `/new` sends the client to the proxy's root rather than under the prefix (no `ProxyPassReverse` equivalent). From the N-047 report.
 - **N-066** · raised `2026-1111-1143-phase-3-performance` · value low
@@ -91,6 +89,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-064** · raised `2026-1111-1143-phase-3-performance` · closed 2026-11-14 (`042379d`)
+  New `ServerOptions.ProxyReadTimeout` / `WithProxyReadTimeout` (copied by `WithOptions`). With it set, each upstream call runs under its own child of `Request().Context()`, and the body goes out through `proxyBodyReader` (`proxy.go`): a timer armed on entry to each `Read` and stopped on return cancels that context when a read stalls (`errProxyReadTimeout`), and the stream writers close the client's connection, so the client sees a truncated body. Only the wait on the upstream is timed, not the gap between reads as nginx does: rweb does not buffer the body, so a gap timer would cut off a slow client. Decision: off by default, like `ReadTimeout`, since a proxied SSE stream or long poll may rightly go quiet (nginx's 60 s default is known for cutting those off). A stall in an app's own `rweb.Stream` producer is the app's to bound (it owns the reader); with the timeout set, a client that leaves during an upstream stall is let go when the timer fires. Tests: `proxy_read_timeout_test.go` (stalled sized and chunked bodies cut off at about the timeout with the upstream call abandoned, 10 s without the wiring; short stalls, default and negative off leave the body whole; a slow client reading 2 MB with pauses of 3× the timeout gets all of it, cut off at 823 KB with a gap timer). Documented in SKILL.md (limits table, Reverse Proxy) and CLAUDE.md.
 - **N-072** · raised `2026-1111-1814-n063-n069-n067-n071-hardening` · closed 2026-11-14, 2026-1114-1718-n062-n059-n060-n072-ws-browser-linger-strict-head (`eca2f2f`)
   `isValidRequestLine` (`http.go`), checked in `serveConn` before the method: one or two single spaces, a non-empty last field, and no control byte (tab, VT, FF, bare CR, NUL, DEL), else 400 and a close (through N-059's `refuse`). Before the method so `GET\t/x` is a 400, not a 501. Lines with no version (`GET /x`) stay accepted, and a non-ASCII target still routes. Tests: `TestRequestLineRefusesExtraWhitespaceAndControls` (11 lines, tcp and tls; every case was served or 404'd before), `TestRequestLineKeepsNonASCIITarget`. Decided together with N-060, as the item asked. Raised N-077 (a head ending in a bare-LF blank line is refused).
 - **N-060** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-14, 2026-1114-1718-n062-n059-n060-n072-ws-browser-linger-strict-head (`eca2f2f`)
