@@ -34,12 +34,10 @@ code at `3169f85`.
   fine.
 - **Open, Validate and Roadmap stay in ID order.**
 
-**Next ID:** N-073
+**Next ID:** N-074
 
 ## Open
 
-- **N-050** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
-  Response header names are matched case-sensitively, so two Content-Type lines can be sent (`Response.go:151`). Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-051** · raised `2026-1109-1806-once-over-review-phases-1-2` · value low
   `WriteHTML`/`WriteText` send no charset although documented to. Plan: `PLAN_ONCE_OVER_2026-1109.md`.
 - **N-052** · raised `2026-1109-1806-once-over-review-phases-1-2` · value medium
@@ -66,6 +64,8 @@ code at `3169f85`.
   Small allocation savings, unmeasured: `strconv.Itoa(int(ctx.status))` allocates on every response (`writeResponse`, `writeWebSocketUpgradeResponse`; one of hello's 4 allocs/op; `strconv.AppendInt` into `respBuf` avoids it), and `writeChunkedBody` allocates a 32 KB buffer per chunked response (pool it). Benchmark with `bench_test.go`; drop if under 5 %. From the N-042 report.
 - **N-072** · raised `2026-1111-1814-n063-n069-n067-n071-hardening` · value low
   The request line is split only at its first and last space (`serveConn`, `Server.go`), so extra spaces and a space inside the target are accepted: `GET /a b HTTP/1.1` reaches a `/a b` route (200), and `GET  /x HTTP/1.1` looks up ` /x` (404, not 400). RFC 9112 §3 says a recipient SHOULD NOT autocorrect an invalid request line and then process it, since such a line may be crafted to get past a filter in front, and §3.2 allows no whitespace in the target. A 400 would match the framing rules of N-036. Decide together with N-060 (control characters in header values). Found while fixing N-063; both cases checked on the wire with a throwaway test.
+- **N-073** · raised `2026-1113-n048-n049-n050` · value medium
+  A handler that sets `Content-Length` (or `Transfer-Encoding`) itself gets it sent alongside the server's own framing header: `SetHeader("Content-Length", "999")` + `WriteString("hi")` sends `Content-Length: 2` and `Content-Length: 999` (reproduced). Two differing lengths make the response ambiguous to a proxy in front (RFC 9112 §6.3). `writeResponse` frames every body itself, so it should skip (or refuse) handler-set framing headers, minding an explicit `s.Head` route that sets the GET length for a bodiless HEAD reply. From the N-050 work.
 
 ## Validate
 
@@ -102,6 +102,8 @@ Newest first. Closures before this file existed are recorded in the session
 docs under `ai_docs/claude_sessions/`; the ones below were found done while
 seeding.
 
+- **N-050** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13 (`f64493d`)
+  `response.Header` and `SetHeader` match names with `headerKeyEqual` (length check, then `strings.EqualFold`), so `SetHeader("content-type", …)` + `WriteJSON` sends one Content-Type. `SetHeader` also replaces every value under the name, `AddHeader` duplicates of any case included (net/http `Header.Set` semantics), in place and without allocating; the kept entry stays at the first one's position with the new spelling. Benchmarks within noise. Tests: `response_header_case_test.go`. Raised N-073 (handler-set `Content-Length` duplicates the server's).
 - **N-049** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13 (`6721dfd`)
   Decision D7: yes, decode, and (user) never twice. `request.addParameter` decodes a value containing `%` with `url.PathUnescape` (`+` stays `+`); a bad escape is kept raw. Routing still uses the raw path and `Path()` stays raw. `StaticFiles` no longer decodes its `*path`; it 404s a bad escape by checking the raw path (only when it holds `%`) and runs its traversal checks on the decoded value as before. `%252e%252e` and a `x%2520y.txt` vs `x y.txt` case prove a single decode. Stylus `*path` is safe (go-styl cleans and rejects `..`). Behaviour change for apps that decoded params themselves; noted in SKILL.md. Tests: `path_param_decode_test.go`, `TestStaticFilesPathTraversal`.
 - **N-048** · raised `2026-1109-1806-once-over-review-phases-1-2` · closed 2026-11-13 (`a2315f6`)
