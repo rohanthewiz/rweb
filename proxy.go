@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
+	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -27,6 +29,8 @@ import (
 //
 //	client ◄── rweb ◄───────────────────────────────────────── upstream
 //	           status as is (3xx included: redirects are not followed)
+//	           Location / Content-Location on the target's own host mapped
+//	           under the route prefix (proxyRedirect)
 //	           response headers: hop-by-hop dropped, Content-Length
 //	           re-derived from the stream size
 //	           body: rweb.Stream(resp.Body, resp.ContentLength), copied to
@@ -303,4 +307,107 @@ func (pr *proxyBodyReader) Close() error {
 	err := pr.body.Close()
 	pr.cancel()
 	return err
+}
+
+// proxyRedirect maps a URL the upstream sends back in Location or
+// Content-Location onto the address the client reaches it at through the
+// proxy: the reverse of the request mapping in Server.proxy, as nginx's
+// "proxy_redirect default" and Apache's ProxyPassReverse do.
+//
+//	request:  client /<pathPrefix>/rest ──► upstream <target>/<upBase>/rest
+//	response: Location <target scheme://host>/<upBase>/rest?q
+//	                                  ──► /<pathPrefix>/rest?q   (to the client)
+//
+// e.g. Proxy("/api", "http://127.0.0.1:9000", 1) strips "api", so upBase is
+// "/" and clientBase "/api": an upstream redirect to
+// http://127.0.0.1:9000/login reaches the client as /api/login, instead of
+// sending a browser to an address that is only reachable from this server.
+//
+// Only an absolute URL on the target's own scheme and host (default ports
+// equal to none) whose path lies under upBase is rewritten; it comes back
+// as an absolute path, which the client resolves against the scheme and
+// host it used itself (RFC 9110 §10.2.2 allows a relative Location), so
+// nothing here has to guess them. Everything else passes through as sent:
+//
+//   - another host: not ours to map;
+//   - the target's host but a path outside upBase: nothing through this
+//     proxy reaches it, and a wrong rewrite would be worse than none;
+//   - a relative reference ("/new", "next"): an upstream that sends one may
+//     not know about the prefix (it wants /api/new) or may already include
+//     it (an app configured with a sub-path root URL sends /api/new itself,
+//     and a rewrite would make it /api/api/new). The two cannot be told
+//     apart from here, so, like nginx by default, it is left alone.
+//
+// Set-Cookie Path is not rewritten either: an upstream that sets Path=/
+// often means the whole site (a login service mounted under a prefix
+// setting the site's session), and narrowing that to the prefix would
+// break it. nginx (proxy_cookie_path) and Apache (ProxyPassReverseCookiePath)
+// leave cookies alone unless told to.
+type proxyRedirect struct {
+	scheme string // the target's scheme, lower-case
+	host   string // the target's host:port, lower-case, default port added
+	// upBase and clientBase are path prefixes with no trailing slash; ""
+	// stands for the root.
+	upBase     string
+	clientBase string
+}
+
+// newProxyRedirect derives the mapping from a Proxy route's settings: the
+// parsed target, the route's prefix (no leading slash) and that prefix with
+// its stripped tokens removed, as Server.proxy computes them.
+func newProxyRedirect(target *url.URL, pathPrefix, strippedPrefix string) *proxyRedirect {
+	scheme := strings.ToLower(target.Scheme)
+	return &proxyRedirect{
+		scheme:     scheme,
+		host:       hostWithDefaultPort(scheme, target.Host),
+		upBase:     strings.TrimSuffix(path.Join("/", strippedPrefix, target.Path), "/"),
+		clientBase: strings.TrimSuffix(path.Join("/", pathPrefix), "/"),
+	}
+}
+
+// rewrite returns loc mapped for the client, or loc itself when it is not
+// an absolute URL under the target's base (see proxyRedirect).
+func (m *proxyRedirect) rewrite(loc string) string {
+	u, err := url.Parse(loc)
+	if err != nil || !u.IsAbs() || u.Opaque != "" || u.User != nil ||
+		strings.ToLower(u.Scheme) != m.scheme || hostWithDefaultPort(m.scheme, u.Host) != m.host {
+		return loc
+	}
+	p := u.EscapedPath()
+	if p == "" {
+		p = "/"
+	}
+	// Under upBase on a segment boundary: "/app" covers "/app" and "/app/x",
+	// not "/apple". With upBase "" (the root) every absolute path is under it.
+	if p != m.upBase && !strings.HasPrefix(p, m.upBase+"/") {
+		return loc
+	}
+	out := m.clientBase + p[len(m.upBase):]
+	if out == "" {
+		out = "/"
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		out += "?" + u.RawQuery
+	}
+	if u.Fragment != "" {
+		out += "#" + u.EscapedFragment()
+	}
+	return out
+}
+
+// hostWithDefaultPort lower-cases host and gives it the scheme's default
+// port when it names none, so "example.com" and "example.com:80" compare
+// equal under http.
+func hostWithDefaultPort(scheme, host string) string {
+	host = strings.ToLower(host)
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
+	}
+	switch scheme {
+	case "http", "ws":
+		return net.JoinHostPort(strings.Trim(host, "[]"), "80")
+	case "https", "wss":
+		return net.JoinHostPort(strings.Trim(host, "[]"), "443")
+	}
+	return host
 }

@@ -1236,9 +1236,14 @@ error handler (no `[ERR]` log line).
 
 From v0.2.1:
 
-- **Redirects are passed through**, not followed: a 3xx from the upstream reaches the client
-  with its `Location` as sent (not rewritten to the proxy's prefix). Earlier versions used
-  `http.DefaultClient`, which followed them.
+- **Redirects are passed through**, not followed: a 3xx from the upstream reaches the client.
+  Earlier versions used `http.DefaultClient`, which followed them. A `Location` (or
+  `Content-Location`) that is an absolute URL on the target's own scheme and host, under the
+  target's base path, is mapped under the route's prefix (`http://backend:8081/login` →
+  `/api/backend/login` for the example above), as nginx's `proxy_redirect default` does.
+  Other URLs pass through as sent: another host, a path outside the target's base, and any
+  relative reference (`/new`), since an upstream configured with a sub-path root URL already
+  includes the prefix and a rewrite would double it. Cookie `Path` is not rewritten.
 - **The response is streamed** (`rweb.Stream`), not read into memory: the client gets bytes as
   the upstream sends them. An upstream `Content-Length` is kept; an unknown length goes chunked
   (unframed, ended by close, to an HTTP/1.0 client). An upstream that ends short closes the

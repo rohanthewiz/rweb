@@ -1143,7 +1143,9 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 //
 // How a request goes through (v0.2.1+; see proxy.go for the details):
 //   - The upstream's status, headers and body go to the client as sent, a
-//     3xx included: redirects are not followed by the proxy.
+//     3xx included: redirects are not followed by the proxy. An absolute
+//     Location or Content-Location on the target's own host is mapped under
+//     pathPrefix; relative ones pass through (see proxyRedirect in proxy.go).
 //   - The response body is streamed (rweb.Stream), not read into memory; the
 //     request body is still read in full before the upstream call.
 //   - Hop-by-hop headers (Connection and the headers it names, Keep-Alive,
@@ -1195,6 +1197,10 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 	// itself, and kept its idle connections in a process-wide pool nothing
 	// here could close.
 	client := s.proxyHTTPClient()
+
+	// Maps an upstream Location / Content-Location that points at the
+	// target back under this route's prefix (proxyRedirect, proxy.go).
+	redirect := newProxyRedirect(tURL, pathPrefix, strippedPrefix)
 
 	// The per-read bound on the upstream body (proxyBodyReader, proxy.go);
 	// 0 when off. Options are fixed before serving, so read once here.
@@ -1303,9 +1309,19 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			if strings.EqualFold(consts.HeaderContentLength, hdr) {
 				continue
 			}
+			// An absolute Location or Content-Location on the target's own
+			// host is mapped to the address the client reaches it at
+			// through this route, as nginx's "proxy_redirect default" does;
+			// anything else passes through as sent (see proxyRedirect for
+			// what is left alone, relative references included, and why).
+			// resp.Header keys are canonical, so == is exact here.
+			rewrite := hdr == consts.HeaderLocation || hdr == consts.HeaderContentLocation
 			// One header line per value — joining with commas corrupts
 			// headers that legally repeat, most notably Set-Cookie.
 			for _, val := range vals {
+				if rewrite {
+					val = redirect.rewrite(val)
+				}
 				ctx.Response().AddHeader(hdr, val)
 			}
 		}

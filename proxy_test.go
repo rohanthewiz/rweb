@@ -393,6 +393,40 @@ func TestProxyPassesRedirectThrough(t *testing.T) {
 	assert.Equal(t, int32(0), targetHits.Load())
 }
 
+// An absolute Location (or Content-Location) that points at the target
+// itself is mapped under the proxy's prefix (N-065), as nginx's
+// "proxy_redirect default" does: the target's address is often reachable
+// only from the proxy, so passing it on sent the browser nowhere. A URL on
+// another host passes through as sent, and a relative one too
+// (TestProxyPassesRedirectThrough): an upstream may already include the
+// prefix in it, and a rewrite would double it.
+func TestProxyRewritesTargetLocation(t *testing.T) {
+	var upURL string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/old":
+			w.Header().Set("Content-Location", upURL+"/old.html")
+			http.Redirect(w, r, upURL+"/new?x=1", http.StatusFound)
+		case "/away":
+			http.Redirect(w, r, "https://elsewhere.test/x", http.StatusFound)
+		}
+	}))
+	t.Cleanup(up.Close)
+	upURL = up.URL
+
+	s := rweb.NewServer()
+	assert.Nil(t, s.Proxy("/up", up.URL, 1))
+	c, br := dialProxyTest(t, serveProxyTest(t, s))
+
+	resp, _ := proxyRoundTrip(t, c, br, "GET", "GET /up/old HTTP/1.1\r\nHost: front.test\r\n\r\n")
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/up/new?x=1", resp.Header.Get("Location"))
+	assert.Equal(t, "/up/old.html", resp.Header.Get("Content-Location"))
+
+	resp, _ = proxyRoundTrip(t, c, br, "GET", "GET /up/away HTTP/1.1\r\nHost: front.test\r\n\r\n")
+	assert.Equal(t, "https://elsewhere.test/x", resp.Header.Get("Location"))
+}
+
 // Hop-by-hop headers (RFC 9110 §7.6.1) describe one connection and must not
 // be forwarded, in either direction: the fixed list, and every header the
 // Connection header names. End-to-end headers, repeated ones included, pass.
