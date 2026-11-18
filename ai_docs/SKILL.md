@@ -1266,6 +1266,9 @@ From v0.2.1:
   Other URLs pass through as sent: another host, a path outside the target's base, and any
   relative reference (`/new`), since an upstream configured with a sub-path root URL already
   includes the prefix and a rewrite would double it. Cookie `Path` is not rewritten.
+  So an app mounted under a prefix should be told that prefix as its base path (its root
+  URL / `BASE_PATH` setting): it also puts root-relative links in its pages, and those
+  would miss the prefix whatever the proxy did with `Location`.
 - **The response is streamed** (`rweb.Stream`), not read into memory: the client gets bytes as
   the upstream sends them. An upstream `Content-Length` is kept; an unknown length goes chunked
   (unframed, ended by close, to an HTTP/1.0 client). An upstream that ends short closes the
