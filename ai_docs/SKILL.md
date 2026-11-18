@@ -1028,7 +1028,12 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
   }
   ```
 
-  Behind a reverse proxy that rewrites `Host`, list the public origin in
+  Behind a reverse proxy that rewrites `Host` (rweb's own `Proxy` does), the
+  origin's host is also matched against the proxy's `X-Forwarded-Host` when
+  the proxy is a **trusted peer** (`TrustedProxies`; by default loopback and
+  private ranges; v0.2.1+), so the public origin works with no configuration.
+  This is safe because a page cannot add headers to a WebSocket handshake.
+  Behind a proxy this server does not trust, list the public origin in
   `AllowedOrigins`. A manual `ctx.UpgradeWebSocket()` takes no options, so it
   gets the default check; it returns `rweb.ErrWebSocketOriginNotAllowed` with
   the 403 already set — return nil to send it (see Manual Upgrade).
@@ -1275,9 +1280,10 @@ From v0.2.1:
   client's connection is tied to the upstream's: frames are copied both ways, unparsed, until
   either side closes (subprotocol, compression, pings and the close handshake are the two
   ends' business). Any other answer (a `403` from the upstream's origin check, say) reaches
-  the client as a normal response. The upstream sees the target's `Host`, so an rweb upstream
-  needs the public origin in `WSOptions.AllowedOrigins` (`X-Forwarded-Host` carries the
-  public host). `Shutdown` closes a proxied socket at once (no `1001` from the proxy; an
+  the client as a normal response. The upstream sees the target's `Host`; an rweb upstream
+  that trusts the proxy (by default, one on loopback or a private network) admits the public
+  origin through the `X-Forwarded-Host` the proxy sets, and one that does not needs it in
+  `WSOptions.AllowedOrigins`. `Shutdown` closes a proxied socket at once (no `1001` from the proxy; an
   upstream that shuts down sends its own).
 - **`X-Forwarded-*` is set**: `X-Forwarded-For` gets the peer's IP appended (`"client, proxy1,
   peer"`). `X-Forwarded-Proto` and `X-Forwarded-Host` are set to what this server saw,
@@ -1313,7 +1319,7 @@ s := rweb.NewServerWithOptions(
 req := ctx.Request()
 
 req.Method()              // GET, POST, etc.
-req.Scheme()              // "http" or "https" (v0.1.31+: from the connection when the target has none)
+req.Scheme()              // "http" or "https" (v0.1.31+: from the connection when the target has none; v0.2.1+: a trusted proxy's X-Forwarded-Proto first)
 req.Host()                // Host the client asked for, as sent, port included: "example.com", "127.0.0.1:8080"
 req.Path()                // /users/123
 req.Query()               // Raw query string: "page=2&sort=name"
@@ -1343,9 +1349,19 @@ is safe to echo. A missing `Host` is still tolerated.
 
 `req.Scheme()` (v0.1.31+) is the scheme of an absolute-form target if there is one, otherwise
 `"https"` when the connection is TLS and `"http"` when it is not. Before v0.1.31 it was `""`
-for ordinary requests. It reports what *this server* terminated: behind a TLS-terminating
-proxy it is `"http"`, and `X-Forwarded-Proto` is deliberately not consulted — read that header
-yourself if you trust the proxy that sets it.
+for ordinary requests. Since v0.2.1, when the connection's peer is a **trusted proxy**
+(`TrustedProxies`, see Client IP below; by default loopback and private ranges) and sends
+`X-Forwarded-Proto: https` (or `http`), `Scheme()` is that value. So behind nginx/Caddy
+terminating TLS on the same host or in Docker, `Scheme()` is `"https"` with no configuration,
+and an `http` → `https` redirect on `Scheme()` no longer loops. Only the rightmost entry of the
+header counts (the one the trusted proxy wrote; a client's forged entries sit to its left), and
+any value other than `http`/`https` is ignored. From an untrusted peer the header is ignored.
+`rweb.NoTrustedProxies()` turns this off. `Forwarded` (RFC 7239) is not read.
+
+`req.Host()` does **not** take `X-Forwarded-Host`, from any peer: many nginx configs set
+`Host` but pass a client's own `X-Forwarded-Host` through untouched, so a client could pick the
+host an app puts in links (password-reset emails). Read the header yourself if your proxy
+always overwrites it.
 
 ```go
 // DNS-rebinding guard for a loopback-only server: allow-list the exact host:port
@@ -1387,7 +1403,10 @@ used. All trusted → the leftmost entry. An entry that is not an IP (`unknown`)
 the last valid one. No answer from the header → `X-Real-IP` (if an IP) → the peer. Addresses
 from headers come back canonical (`[2001:db8::1]:4711` → `2001:db8::1`, `::ffff:1.2.3.4` →
 `1.2.3.4`). A synthetic `s.Request()` has no peer and reads the headers, unless no proxy is
-trusted. The same list decides whether a `Proxy` route passes on `X-Forwarded-Proto`/`-Host`.
+trusted. The same list decides whether a `Proxy` route passes on `X-Forwarded-Proto`/`-Host`,
+whether `req.Scheme()` takes a peer's `X-Forwarded-Proto`, and whether the WebSocket origin check
+admits an origin through a peer's `X-Forwarded-Host` (see Request Information, and the
+WebSockets Safety Defaults).
 
 ### Request Context (v0.2.0+)
 

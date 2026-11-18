@@ -25,8 +25,12 @@ func wsHandshake(path, extra string) string {
 
 // wsUpstream serves an rweb WebSocket upstream: /ws greets, then echoes
 // until the peer closes, and reports on ended when its handler returns.
-// AllowedOrigins admits the test's browser origin, which the upstream would
-// otherwise refuse: the proxy sends it the target's Host, not front.test.
+// AllowedOrigins admits the test's browser origin outright. The proxy sends
+// the upstream the target's Host, not front.test; since N-075 the upstream
+// would also admit front.test through the front's X-Forwarded-Host (the
+// front is on loopback, trusted by default), but listing it keeps these
+// tunnel tests independent of that rule, which
+// TestProxyWebSocketOriginThroughForwardedHost covers.
 func wsUpstream(t *testing.T) (target string, ended <-chan struct{}) {
 	t.Helper()
 	done := make(chan struct{}, 4)

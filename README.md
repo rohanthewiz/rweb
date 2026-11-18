@@ -334,7 +334,11 @@ s := rweb.NewServerWithOptions(
 ```
 
 The same list decides whether a `Proxy` route passes a peer's `X-Forwarded-Proto` and
-`X-Forwarded-Host` on to the upstream (trusted) or replaces them with its own (untrusted).
+`X-Forwarded-Host` on to the upstream (trusted) or replaces them with its own (untrusted). It
+also decides whether `ctx.Request().Scheme()` takes a peer's `X-Forwarded-Proto` (so behind a
+TLS-terminating nginx it reports `https`), and whether the WebSocket origin check admits a
+browser's origin through a peer's `X-Forwarded-Host`. `Request().Host()` never reads
+`X-Forwarded-Host`: many proxies pass a client's own copy through unchanged.
 
 ## Request Context and Cancellation
 
@@ -416,7 +420,7 @@ defaults are chosen to be safe, and apply to `s.WebSocket` and `ctx.UpgradeWebSo
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `AllowedOrigins`, `CheckOrigin` | same origin | A browser handshake whose `Origin` host differs from the request's `Host` gets 403 (browsers send cookies cross-site and apply no CORS to WebSockets). No `Origin` header (non-browser clients) is allowed. `AllowedOrigins` adds origins (`"*"` allows all); `CheckOrigin` replaces the check. |
+| `AllowedOrigins`, `CheckOrigin` | same origin | A browser handshake whose `Origin` host differs from the request's `Host` gets 403 (browsers send cookies cross-site and apply no CORS to WebSockets). Behind a trusted proxy that rewrites `Host`, the proxy's `X-Forwarded-Host` counts like `Host` (v0.2.1+). No `Origin` header (non-browser clients) is allowed. `AllowedOrigins` adds origins (`"*"` allows all); `CheckOrigin` replaces the check. |
 | `PingInterval` | 30 s (negative disables) | The server pings the peer; every frame received extends the read deadline to interval + `PongTimeout` (10 s), so a vanished peer makes `ReadMessage` fail instead of blocking forever. `ws.SetReadDeadline` still applies; the earlier deadline wins. |
 | `WriteTimeout` | 10 s (negative disables) | Each socket write must finish in time, so a peer that stops reading cannot block a writer forever. `ws.SetWriteDeadline` overrides it while set. |
 | `Subprotocols` | none | The first protocol the client offers that is listed is selected (`ws.Subprotocol()`); with no match, no `Sec-WebSocket-Protocol` is sent. |

@@ -199,7 +199,10 @@ func removeHopByHop(h http.Header) {
 // front of the chain (a TLS-terminating load balancer, say), and knows the
 // scheme and host the client really used, where this hop would only report
 // its own (http from the balancer). A trusted peer that sent none gets this
-// hop's values, as before.
+// hop's values, as before. (Since N-075, Request().Scheme() already reports
+// a trusted peer's valid X-Forwarded-Proto; the header is still passed on as
+// sent rather than rebuilt from Scheme(), so the upstream sees exactly what
+// the front of the chain wrote.)
 func setForwardedHeaders(h http.Header, ctx Context) {
 	if ip := peerIP(ctx); ip != "" {
 		if prior := h.Values(consts.HeaderXForwardedFor); len(prior) > 0 {

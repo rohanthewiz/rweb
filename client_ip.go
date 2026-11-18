@@ -270,3 +270,119 @@ func clientFromXFF(headers []Header, prefixes []netip.Prefix) (netip.Addr, bool)
 	}
 	return last, last.IsValid()
 }
+
+// Scheme and WebSocket origin behind a trusted proxy (N-075).
+//
+// A proxy that terminates TLS or rewrites Host hides two things from this
+// server: the scheme the client used, and the host it asked for. Proxies
+// report them in X-Forwarded-Proto and X-Forwarded-Host. From a trusted peer
+// (forwardedTrusted, the rule ClientIP uses), rweb takes them in two places:
+//
+//	client ──https──► nginx on 127.0.0.1 (terminates TLS) ──http──► rweb
+//	                  sends X-Forwarded-Proto: https
+//	                        X-Forwarded-Host:  app.example
+//
+//	Request().Scheme()      "https" (was "http": the nginx → rweb hop)
+//	WebSocket origin check  Origin https://app.example admitted through
+//	                        X-Forwarded-Host as well as through Host()
+//	Request().Host()        unchanged: the Host header, as sent
+//
+// Host() is left alone on purpose. A common nginx setup sets Host but not
+// X-Forwarded-Host (proxy_set_header Host $host), and nginx passes on request
+// headers it does not set as the client sent them. So a client's own
+// X-Forwarded-Host reaches this server from a trusted peer; if Host()
+// believed it, a client could choose the host an app writes into links it
+// sends elsewhere (a password-reset email, say). The two uses above are safe
+// against that:
+//
+//   - Scheme: a client that lies can only lie about its own connection (it
+//     then gets Secure cookies over http, or skips an https redirect meant
+//     for it). An attacker on the client's path gains nothing either: it
+//     could reach the server over real https itself.
+//   - Origin check: it exists only to stop a page in a victim's browser from
+//     opening a socket with the victim's cookies (cross-site WebSocket
+//     hijacking), and a page cannot add headers to a WebSocket handshake. A
+//     client that can set X-Forwarded-Host is not a browser page, and is
+//     admitted anyway by sending no Origin.
+//
+// Forwarded (RFC 7239) is not read, as ClientIP does not read it: nginx,
+// Caddy and the cloud load balancers send the X- headers.
+
+// forwardedProto returns the scheme X-Forwarded-Proto names, "http" or
+// "https" in lower case, or "" when the header is absent or names anything
+// else. It does not check trust: the caller does (forwardedTrusted), after
+// this cheaper scan has found something to trust.
+//
+// Only the rightmost entry counts, across every X-Forwarded-Proto line: the
+// one the trusted peer wrote itself, or passed on as the one value it was
+// sent. Most proxies replace the header (nginx's proxy_set_header, cloud load
+// balancers, rweb's own Proxy), so there is only one entry. A proxy that
+// appends instead leaves the client's own entries to the left of its own,
+// and that is where a forged "https" would sit:
+//
+//	client sends "X-Forwarded-Proto: https" over plain http
+//	an appending proxy adds what it saw:   "https, http"
+//	rightmost -> "http", the truth; leftmost would be the forged "https"
+//
+// A chain of appending proxies therefore reports the last hop's scheme,
+// which may be http where the client used https: the answer rweb gave before
+// N-075, never a scheme no trusted hop vouched for. For the same reason an
+// unknown rightmost value is not skipped in favour of an earlier entry.
+// Empty list elements ("https, ") are skipped, as the list syntax allows
+// (RFC 9110 §5.6.1).
+//
+// The walk mirrors clientFromXFF: backwards through the lines, and within a
+// line backwards from comma to comma, without splitting or allocating.
+func forwardedProto(headers []Header) string {
+	for i := len(headers) - 1; i >= 0; i-- {
+		if !headerKeyEqual(headers[i].Key, consts.HeaderXForwardedProto) {
+			continue
+		}
+		rest := headers[i].Value
+		for {
+			entry := rest
+			comma := strings.LastIndexByte(rest, ',')
+			if comma >= 0 {
+				entry, rest = rest[comma+1:], rest[:comma]
+			}
+			if entry = strings.Trim(entry, " \t"); entry != "" {
+				switch {
+				case strings.EqualFold(entry, consts.HTTPS):
+					return consts.HTTPS
+				case strings.EqualFold(entry, consts.HTTP):
+					return consts.HTTP
+				}
+				return "" // the rightmost entry decides, even when unknown
+			}
+			if comma < 0 {
+				break
+			}
+		}
+	}
+	return ""
+}
+
+// forwardedHostHas reports whether any X-Forwarded-Host entry, on any of its
+// lines, is host, compared case-insensitively and with any port as written,
+// as the origin check compares Host(). It does not check trust; the caller
+// does (forwardedTrusted).
+//
+// Unlike forwardedProto, every entry counts. The WebSocket origin check, the
+// only caller, uses it to admit an origin, and no entry can come from a
+// browser page (see the notes above forwardedProto), so a forged entry
+// admits nothing an attacker could use. Every entry is also what works: a
+// chain of proxies that append puts the public host, the one the browser's
+// Origin names, leftmost, and the internal hops after it.
+func forwardedHostHas(headers []Header, host string) bool {
+	for _, h := range headers {
+		if !headerKeyEqual(h.Key, consts.HeaderXForwardedHost) {
+			continue
+		}
+		for entry := range strings.SplitSeq(h.Value, ",") {
+			if e := strings.Trim(entry, " \t"); e != "" && strings.EqualFold(e, host) {
+				return true
+			}
+		}
+	}
+	return false
+}

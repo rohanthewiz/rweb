@@ -1156,8 +1156,10 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 //   - A WebSocket handshake keeps its upgrade; when the upstream answers 101
 //     the client's connection is relayed to the upstream's as a tunnel
 //     until either side closes, or Shutdown closes both. The upstream sees
-//     the target's Host, so its origin check must admit the public origin
-//     (an rweb upstream: WSOptions.AllowedOrigins).
+//     the target's Host, so its origin check must admit the public origin.
+//     An rweb upstream does so through X-Forwarded-Host when it trusts this
+//     server (ServerOptions.TrustedProxies, by default loopback and private
+//     ranges); otherwise list the origin in its WSOptions.AllowedOrigins.
 //   - No response headers within ServerOptions.ProxyResponseHeaderTimeout
 //     (default 60 s) is a 504; an unreachable or failing upstream is a 502.
 //     Both go through the error handler. A client that leaves mid-call
@@ -2657,17 +2659,34 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		ctx.host = consts.Localhost
 	}
 
-	// Resolve the effective scheme the same way. Only an absolute-form target
-	// carries one, and almost no request is absolute-form, so Scheme() used to
-	// be "" in practice. The transport is the ground truth for an origin-form
-	// request: a connection we terminated TLS on is https, anything else is
-	// http. A synthetic Request() has no connection and reports http, in line
-	// with its "localhost" host.
+	// Resolve the effective scheme the same way, in this order:
 	//
-	// Deliberately NOT consulted: X-Forwarded-Proto / Forwarded. Those are
-	// client-controlled unless a trusted proxy overwrites them, and whether one
-	// does is deployment knowledge this server does not have. An app behind
-	// such a proxy can read the header itself.
+	//	absolute-form target "GET https://example.com/x" -> its scheme
+	//	trusted peer sent X-Forwarded-Proto http|https   -> that (N-075)
+	//	otherwise                                         -> the transport:
+	//	                                                     https over TLS,
+	//	                                                     else http
+	//
+	// Only an absolute-form target carries a scheme, and almost no request is
+	// absolute-form, so Scheme() used to be "" in practice. For an origin-form
+	// request the transport is the ground truth of this hop, but behind a
+	// TLS-terminating proxy this hop is the proxy's plain http, and an app
+	// that redirects http to https would loop. So a trusted peer's
+	// X-Forwarded-Proto (ServerOptions.TrustedProxies; by default loopback and
+	// private ranges, the rule ClientIP uses) names the client's scheme
+	// instead. The header is looked for first, so a request without it never
+	// pays for the trust check. From an untrusted peer the header is the
+	// client's own claim and is ignored. client_ip.go explains why only the
+	// rightmost entry counts, and why Host() takes no X-Forwarded-Host.
+	//
+	// A synthetic Request() has no connection: it reports http, in line with
+	// its "localhost" host, unless its headers carry X-Forwarded-Proto (they
+	// count as trusted unless the list is empty, as for ClientIP).
+	if ctx.scheme == "" {
+		if p := forwardedProto(ctx.request.headers); p != "" && ctx.forwardedTrusted() {
+			ctx.scheme = p
+		}
+	}
 	if ctx.scheme == "" {
 		if _, isTLS := ctx.conn.(*tls.Conn); isTLS {
 			ctx.scheme = consts.HTTPS

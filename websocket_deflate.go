@@ -70,6 +70,10 @@ type WSOptions struct {
 	// ("https://app.example.com") must match the Origin header exactly; one
 	// without ("app.example.com:8443") matches the origin's host[:port] on
 	// any scheme; "*" allows every origin (no check). Case-insensitive.
+	// Behind a trusted proxy (ServerOptions.TrustedProxies) that rewrites
+	// Host, the host it reports in X-Forwarded-Host is admitted like the
+	// request's own; only a proxy this server does not trust needs its
+	// public origin listed here.
 	AllowedOrigins []string
 	// CheckOrigin, when set, alone decides whether a handshake is accepted
 	// (true) or refused with 403 (false), Origin header or not; the default

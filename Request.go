@@ -299,9 +299,12 @@ func (req *request) parseQueryArgs() {
 }
 
 // Scheme returns `http` or `https`. An absolute-form request target supplies
-// it directly; otherwise it reflects the transport — `https` when the
-// connection is TLS, `http` when it is not. Proxy headers such as
-// X-Forwarded-Proto are not consulted (see handleRequest).
+// it directly. Otherwise, when the connection's peer is a trusted proxy
+// (ServerOptions.TrustedProxies; by default loopback and private ranges) and
+// sent X-Forwarded-Proto `http` or `https`, it is that (its rightmost entry),
+// so an app behind a TLS-terminating proxy sees `https`. Otherwise it
+// reflects the transport: `https` when the connection is TLS, `http` when it
+// is not. See handleRequest, and client_ip.go for the trust rules.
 func (req *request) Scheme() string {
 	return req.scheme
 }

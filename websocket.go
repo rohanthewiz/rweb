@@ -476,6 +476,9 @@ func rejectWebSocketRequest(ctx Context) error {
 //	                                mobile client), and no ambient cookies
 //	                                for a page to abuse
 //	origin host[:port] == Host() -> allowed: the server's own pages
+//	origin host[:port] is in a   -> allowed: the server's own pages, reached
+//	  trusted peer's               through a proxy that rewrites Host
+//	  X-Forwarded-Host             (N-075)
 //	listed in AllowedOrigins     -> allowed (full origin, bare host, or "*")
 //	anything else ("null" too)   -> refused
 //
@@ -484,6 +487,16 @@ func rejectWebSocketRequest(ctx Context) error {
 // where this server sees plain HTTP), and ignores case since host names are
 // case-insensitive. Ports must match exactly: another port is another
 // origin, possibly another app.
+//
+// X-Forwarded-Host: a proxy that rewrites Host (rweb's own Proxy sends the
+// target's) hides the host the browser asked for, so the browser's pages
+// failed this check unless their origin was listed by hand. The proxy reports
+// that host in X-Forwarded-Host, and from a trusted peer
+// (ServerOptions.TrustedProxies, as for ClientIP) it now counts like Host().
+// Believing it cannot open the check to an attack: a page cannot add headers
+// to a WebSocket handshake, so a forged value never comes with a victim's
+// browser behind it (client_ip.go, the N-075 notes). The header is scanned
+// before the trust check, so a handshake without it costs nothing more.
 func originAllowed(ctx Context, opts WSOptions) bool {
 	if opts.CheckOrigin != nil {
 		return opts.CheckOrigin(ctx)
@@ -498,6 +511,11 @@ func originAllowed(ctx Context, opts WSOptions) bool {
 	originHost := originHostOf(origin)
 	if originHost != "" && strings.EqualFold(originHost, ctx.Request().Host()) {
 		return true
+	}
+	if originHost != "" {
+		if c, ok := ctx.(*context); ok && forwardedHostHas(c.request.headers, originHost) && c.forwardedTrusted() {
+			return true
+		}
 	}
 
 	listed, _ := originListed(origin, originHost, opts.AllowedOrigins)
