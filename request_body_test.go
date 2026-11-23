@@ -2,8 +2,8 @@ package rweb
 
 // Tests for the lazy request body (N-057, request_body.go): nothing of a
 // body is read before a handler asks; Body() reads it whole, BodyReader()
-// streams it; a body that cannot be read ends the handler and is answered by
-// the server; what nobody read is drained or the connection closed; MaxBody
+// streams it; a body that cannot be read comes back nil with BodyErr set and
+// is answered by the server; what nobody read is drained or the connection closed; MaxBody
 // caps a route.
 //
 // They talk to the server over raw connections (serveTest / dialTest), since
@@ -283,10 +283,17 @@ func TestNoContinueOnTheWire(t *testing.T) {
 	}
 }
 
-// A body that cannot be read ends the handler at Body(): nothing after the
-// call runs, so a handler cannot act on a body it did not get, and the
-// server answers as it did when such a request never reached a handler.
-func TestUnreadableBodyEndsTheHandler(t *testing.T) {
+// A body that cannot be read: Body() returns nil (never the part that did
+// arrive), BodyErr() says why, and the server answers as it did when such a
+// request never reached a handler, whatever the handler wrote. No panic is
+// involved: the handler runs to its end.
+//
+// Each failure is tried with a handler that checks BodyErr and one that
+// does not. The one that does not has been handed an empty body it cannot
+// tell from a real one, which is logged as a warning naming the route; the
+// one that checks leaves nothing above Debug, and its returned error is not
+// sent to the error handler.
+func TestUnreadableBodyIsNilAndRefusedByTheServer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		opts ServerOptions
@@ -307,42 +314,100 @@ func TestUnreadableBodyEndsTheHandler(t *testing.T) {
 		{name: "client left mid-body", hangUp: true,
 			req: "POST /store HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nhello"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var entered, stored atomic.Bool
-			done := make(chan struct{})
-			s := NewServer(tc.opts)
-			s.Use(func(ctx Context) error {
-				defer close(done) // deferred functions still run when a handler is ended
-				return ctx.Next()
-			})
-			s.Post("/store", func(ctx Context) error {
-				entered.Store(true)
-				body := ctx.Request().Body()
-				stored.Store(true) // stands for "wrote body to the database"
-				return ctx.WriteString(string(body))
-			})
-			c := dialTest(t, serveTest(t, s, transports[0]), transports[0])
-			writeAll(t, c, tc.req)
-			if tc.hangUp {
-				_ = c.(*net.TCPConn).CloseWrite()
+		for _, checks := range []bool{false, true} {
+			name := tc.name + "/unchecked"
+			if checks {
+				name = tc.name + "/checks BodyErr"
 			}
-			got, _ := readUntilClosed(c)
-			recv(t, done, "handler chain to unwind")
+			t.Run(name, func(t *testing.T) {
+				logs := &captureLogger{}
+				opts := tc.opts
+				opts.Logger = logs
 
-			if !entered.Load() {
-				t.Fatal("handler never ran: the test did not reach the lazy read")
-			}
-			if stored.Load() {
-				t.Fatal("handler carried on past Body() with a body that could not be read")
-			}
-			if tc.want == "" {
-				if got != "" {
-					t.Fatalf("response to a client that left: %q", got)
+				var gotNil, finished, stored atomic.Bool
+				done := make(chan struct{})
+				s := NewServer(opts)
+				s.Use(func(ctx Context) error {
+					defer close(done)
+					return ctx.Next()
+				})
+				s.Post("/store", func(ctx Context) error {
+					defer finished.Store(true)
+					body := ctx.Request().Body()
+					gotNil.Store(body == nil)
+					if checks {
+						if err := ctx.Request().BodyErr(); err != nil {
+							return err
+						}
+					}
+					stored.Store(true)               // stands for "wrote body to the database"
+					return ctx.WriteString("stored") // overruled by the server
+				})
+				c := dialTest(t, serveTest(t, s, transports[0]), transports[0])
+				writeAll(t, c, tc.req)
+				if tc.hangUp {
+					_ = c.(*net.TCPConn).CloseWrite()
 				}
-			} else if !strings.HasPrefix(got, tc.want) {
-				t.Fatalf("got %q, want %s", firstLine(got), tc.want)
-			}
-		})
+				got, _ := readUntilClosed(c)
+				recv(t, done, "handler chain to return")
+
+				if !finished.Load() {
+					t.Fatal("handler did not run to its end")
+				}
+				if !gotNil.Load() {
+					t.Fatal("Body() returned something for a body that could not be read")
+				}
+				if stored.Load() == checks {
+					t.Fatalf("handler stored = %v with checks = %v", stored.Load(), checks)
+				}
+				if strings.Contains(got, "stored") {
+					t.Fatalf("the handler's response was sent: %q", got)
+				}
+				if tc.want == "" {
+					if got != "" {
+						t.Fatalf("response to a client that left: %q", got)
+					}
+				} else if !strings.HasPrefix(got, tc.want) {
+					t.Fatalf("got %q, want %s", firstLine(got), tc.want)
+				}
+
+				levels := logs.levels()
+				if checks {
+					if levels["warn"] > 0 || levels["error"] > 0 {
+						t.Fatalf("a handler that checked BodyErr left warnings or errors:\n%s", logs.String())
+					}
+				} else {
+					l := logs.mustFind(t, "warn", "request body could not be read")
+					if l.kv["path"] != "/store" || l.kv["method"] != "POST" || l.kv["error"] == "" {
+						t.Fatalf("warning fields = %v", l.kv)
+					}
+				}
+			})
+		}
+	}
+}
+
+// The form accessors behave as Body() does: no value for a body that did
+// not arrive, and BodyErr to tell that from a field that was not sent.
+func TestFormValueOfUnreadableBody(t *testing.T) {
+	var value atomic.Value
+	var bodyErr atomic.Bool
+	s := NewServer(ServerOptions{Logger: &captureLogger{}})
+	s.Post("/form", func(ctx Context) error {
+		value.Store(ctx.Request().FormValue("a") + ctx.Request().GetPostValue("a"))
+		err := ctx.Request().BodyErr()
+		bodyErr.Store(err != nil)
+		return err
+	})
+	c := dialTest(t, serveTest(t, s, transports[0]), transports[0])
+	writeAll(t, c, "POST /form HTTP/1.1\r\nHost: test\r\nContent-Type: application/x-www-form-urlencoded\r\n"+
+		"Transfer-Encoding: chunked\r\n\r\n3\r\na=1XX\r\n0\r\n\r\n")
+	got, _ := readUntilClosed(c)
+	if !strings.HasPrefix(got, "HTTP/1.1 400 ") {
+		t.Fatalf("got %q, want 400", firstLine(got))
+	}
+	if v, _ := value.Load().(string); v != "" || !bodyErr.Load() {
+		t.Fatalf("form value %q, BodyErr set = %v; want no value and an error", v, bodyErr.Load())
 	}
 }
 
@@ -584,21 +649,6 @@ func TestRequestContextWatchStartsAfterBody(t *testing.T) {
 	}
 }
 
-// An application may end a request itself with ErrAbortHandler: no response
-// is written and the connection closes.
-func TestAbortHandlerByTheApplication(t *testing.T) {
-	s := NewServer()
-	s.Get("/drop", func(ctx Context) error {
-		_ = ctx.WriteString("never sent")
-		panic(ErrAbortHandler)
-	})
-	c := dialTest(t, serveTest(t, s, transports[0]), transports[0])
-	writeAll(t, c, getReq("/drop"))
-	if got, _ := readUntilClosed(c); got != "" {
-		t.Fatalf("got %q, want the connection closed with no response", got)
-	}
-}
-
 // A synthetic request's body is in memory from the start: Body and
 // BodyReader both serve it, and MaxBody answers 413 in the Response.
 func TestSyntheticRequestBody(t *testing.T) {
@@ -618,6 +668,14 @@ func TestSyntheticRequestBody(t *testing.T) {
 	res = s.Request("POST", "/small/echo", nil, strings.NewReader("hello"))
 	if res.Status() != 413 || len(res.Body()) != 0 {
 		t.Fatalf("over MaxBody: %d %q, want 413 and no body", res.Status(), res.Body())
+	}
+	// A body that is fine has no error to report.
+	s.Post("/err", func(ctx Context) error {
+		_ = ctx.Request().Body()
+		return ctx.WriteString(fmt.Sprint(ctx.Request().BodyErr()))
+	})
+	if res := s.Request("POST", "/err", nil, strings.NewReader("ok")); string(res.Body()) != "<nil>" {
+		t.Fatalf("BodyErr on a good body: %q", res.Body())
 	}
 	res = s.Request("POST", "/small/echo", nil, strings.NewReader("hi"))
 	if res.Status() != 200 || string(res.Body()) != "hi" {

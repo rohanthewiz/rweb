@@ -1296,7 +1296,13 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		// the server answers such a request itself (settleBody).
 		rq, _ := ctxReq.(*request) // nil only for a foreign ItfRequest, which is buffered as before
 		wholeBody := true
-		if rq != nil && !wsUpgrade {
+		if rq != nil && wsUpgrade {
+			// Body() below would return nil for a body that failed, and the
+			// handshake would go upstream as if it had none.
+			if rq.bufferBody() != nil {
+				return nil
+			}
+		} else if rq != nil {
 			if rq.lazy.kind == bodySized && rq.lazy.err == nil && rq.lazy.remain > proxyBufferBodyMax {
 				wholeBody = false // known to be large: not a byte is buffered
 			} else {
@@ -2843,20 +2849,9 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	// A panic in any handler is recovered here and routed through the
 	// error handler as a 500 — one bad handler must not take down the
 	// whole process (or even the connection).
-	//
-	// One panic value is not a failure: ErrAbortHandler ends the handler
-	// on purpose, raised by Body() and the other error-less body accessors
-	// when the body cannot be read, or by the application to drop a
-	// request (see ErrAbortHandler, request_body.go). It is noted and
-	// swallowed here; settleBody below decides what the client gets.
-	aborted := false
 	err := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				if e, ok := r.(error); ok && errors.Is(e, ErrAbortHandler) {
-					aborted = true
-					return
-				}
 				err = fmt.Errorf("panic in handler for %q: %v\n%s", ctx.path, r, debug.Stack())
 			}
 		}()
@@ -2874,8 +2869,8 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		}
 	case err != nil && ctx.request.lazy.lease == nil && ctx.request.bodyFailed():
 		// The handler returned an error and the request body could not be
-		// read: almost always the same event (a BodyReader read failed and
-		// the handler passed the error on). settleBody answers such a
+		// read: almost always the same event (a BodyReader read failed, or
+		// BodyErr was set, and the handler passed the error on). settleBody answers such a
 		// request itself, with the 400/408/413 the failure calls for, so
 		// the error handler's page would be thrown away, and its error log
 		// line would blame the application for a client's broken upload.
@@ -2919,7 +2914,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	// answer in the handler's place. A WebSocket upgrade buffered the body
 	// before taking the connection over, and writes nothing more.
 	if !ctx.wsUpgraded {
-		if !s.settleBody(ctx, respWriter, aborted) {
+		if !s.settleBody(ctx, respWriter) {
 			return
 		}
 	}

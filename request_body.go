@@ -48,9 +48,8 @@ import (
 //   - Body() still returns the whole body, and global middleware still sees
 //     the body of an unrouted request: only the moment of reading moved;
 //   - a body that cannot be read (malformed chunk, over the cap, too slow,
-//     client gone) is still answered by the server, and no handler acts on
-//     it: see ErrAbortHandler for how that holds now that a handler is
-//     already running when the failure is found.
+//     client gone) is still answered by the server, whatever the handler
+//     wrote: see "A body that cannot be read" below.
 //
 // The disconnect watch behind Request().Context() (conn_reader.go) reads the
 // connection one byte ahead, so it cannot run while body bytes are still to
@@ -58,34 +57,46 @@ import (
 // same). A handler that never reads its request's body gets no disconnect
 // notice for that request.
 
-// ErrAbortHandler is the panic value that ends a handler without a response
-// from it, as http.ErrAbortHandler does in net/http.
+// A body that cannot be read, now that a handler is already running when
+// that is found out.
 //
-// rweb raises it itself in one situation: a handler asked for the request
-// body through an accessor that has no way to report an error (Body,
-// GetPostValue, PostArgs, FormValue, GetConn's buffering aside) and the body
-// could not be read. Before the body was lazy such a request never reached a
-// handler; returning an empty or cut-short body instead would let the
-// handler act on it (store an empty document over a good one, say), which is
-// worse than not running. So the handler is unwound, and the server answers
-// as it always has for that failure (400, 408, 413 or 431, or nothing for a
-// client that left) and closes the connection.
+// Before the body was lazy, a request whose body was malformed, over the
+// cap, too slow or cut off never reached a handler: serveConn refused it.
+// The refusal is kept: whatever the handler does, the server answers such a
+// request itself (400, 408, 413 or 431; nothing for a client that left) and
+// closes the connection (settleBody, refuseBody). What is new is that the
+// handler has run, so it has to be told:
 //
-// Design choice: a panic rather than a nil return. A panic is the only way
-// to stop a handler from an accessor with no error result; the cost is that
-// deferred functions run but code after the call does not, as with any
-// panic. A handler that wants the error instead reads through BodyReader,
-// whose Read returns it, or the multipart accessors that return an error.
+//	accessor                              on a body that could not be read
+//	────────                              ────────────────────────────────
+//	BodyReader().Read                     returns the error
+//	ParseMultipartForm, GetFormFile(s)    return the error
+//	Body                                  returns nil (never a cut-short body)
+//	GetPostValue, PostArgs, FormValue     return "" / no args
+//	BodyErr                               returns the error, nil when all is well
 //
-// A handler or middleware may also panic with it on purpose to drop a
-// request: no response is written, nothing is logged, and the connection is
-// closed. Middleware that recovers panics should let this one through:
+// The accessors in the lower half have no error result, so a handler whose
+// work must not happen on a missing body (it stores the body, say) checks
+// BodyErr after them, or reads through BodyReader:
 //
-//	if r := recover(); r != nil {
-//	    if r == rweb.ErrAbortHandler { panic(r) }
-//	    ...
+//	data := ctx.Request().Body()
+//	if err := ctx.Request().BodyErr(); err != nil {
+//	    return err // the server answers 400/408/413 itself
 //	}
-var ErrAbortHandler = errors.New("rweb: handler aborted")
+//
+// Design choice: nil plus BodyErr, not a panic that unwinds the handler.
+// A panic would guarantee no handler carries on with a body it did not get,
+// but it runs through the application's own frames: code after the call is
+// skipped, a lock released without defer stays held, and recovery
+// middleware has to know to let it pass. A server should not do that to the
+// code it hosts over a client's broken upload. The failure is handled as
+// data instead: an empty result the handler can check, the server's own
+// answer on the wire, and a log line. That line is a warning when a handler
+// was given an empty result and never asked BodyErr (lazyBody.unseen): it
+// may have acted on a body it did not have, which is worth an operator's
+// attention. In every other case the failure is the client's doing and the
+// handler knew or never looked, so it is a Debug line, like the refusals
+// serveConn writes before a handler runs.
 
 // ErrBodyTooLarge is the error a body read returns when the body is larger
 // than the cap in force: ServerOptions.MaxRequestBodySize, or a lower one set
@@ -199,6 +210,11 @@ type lazyBody struct {
 	eofSeen bool
 	// logged: the Debug line with the buffered body has been written.
 	logged bool
+	// unseen: an accessor with no error result (Body, the form accessors)
+	// returned empty because the body could not be read, and the handler
+	// has not asked BodyErr since. It decides the level of refuseBody's log
+	// line: a handler that may have acted on a body it did not have.
+	unseen bool
 	// linger: after the response, the connection is to be closed with
 	// lingerClose rather than at once, because the client may still be
 	// sending body bytes nobody will read (see settleBody).
@@ -446,14 +462,38 @@ func (req *request) logBufferedBody() {
 // holds.
 //
 // If the body cannot be read (malformed, over the cap, timed out, client
-// gone), Body does not return: it ends the handler with ErrAbortHandler and
-// the server answers the request, as it did when bodies were read before the
-// handler ran. Read through BodyReader to handle the error instead.
+// gone), Body returns nil: never the part that did arrive, which a handler
+// could take for the whole. BodyErr then says why. The server answers such a
+// request itself (400, 408, 413) and closes the connection, so the handler
+// only has to stop: check BodyErr before acting on the body.
 func (req *request) Body() []byte {
 	if err := req.bufferBody(); err != nil {
-		panic(ErrAbortHandler)
+		req.lazy.unseen = true // an empty result with no error beside it
+		return nil
 	}
 	return req.body
+}
+
+// BodyErr reports why the request body could not be read, or nil: the body
+// is fine so far, has not been asked for, or there is none. It is the error
+// result that Body, GetPostValue, PostArgs and FormValue do not have:
+//
+//	data := ctx.Request().Body()
+//	if err := ctx.Request().BodyErr(); err != nil {
+//	    return err
+//	}
+//
+// The error is ErrBodyTooLarge for a body over the cap, and otherwise
+// whatever stopped the read (a malformed chunk, a timeout, the client
+// leaving). Returning it from the handler is enough: the server answers the
+// request with the matching status in any case, and does not send the error
+// to the error handler.
+func (req *request) BodyErr() error {
+	if !req.bodyFailed() {
+		return nil
+	}
+	req.lazy.unseen = false // the handler has been told
+	return req.lazy.err
 }
 
 // BodyReader returns the request body as a stream, for a handler that wants
@@ -684,7 +724,6 @@ func bodyRefusal(err error) (wire string, status int) {
 //	could not be read                   400/408/413/431,    lingering close
 //	                                    or none (client
 //	                                    gone)
-//	handler aborted (ErrAbortHandler)   none                closed
 //	Proxy still uploading it            the handler's,      lingering close
 //	                                    Connection: close   after the response
 //	100 Continue never sent             the handler's,      lingering close
@@ -707,7 +746,7 @@ func bodyRefusal(err error) (wire string, status int) {
 // The failure row is what keeps the old guarantee that a request with a bad
 // body is never answered by a handler: whatever the handler wrote, having
 // seen a read error or not, is replaced.
-func (s *Server) settleBody(ctx *context, respWriter io.Writer, aborted bool) (respond bool) {
+func (s *Server) settleBody(ctx *context, respWriter io.Writer) (respond bool) {
 	req := &ctx.request
 	lb := &req.lazy
 
@@ -717,7 +756,7 @@ func (s *Server) settleBody(ctx *context, respWriter io.Writer, aborted bool) (r
 	// may answer early and still want the rest, or not), and is stopped
 	// after it; lazyBody is not ours to look at until then.
 	if lb.lease != nil {
-		if !lb.lease.finished() && !aborted {
+		if !lb.lease.finished() {
 			req.connClose = true
 			lb.linger = true
 			return true
@@ -728,11 +767,6 @@ func (s *Server) settleBody(ctx *context, respWriter io.Writer, aborted bool) (r
 	switch {
 	case req.bodyFailed():
 		s.refuseBody(ctx, respWriter)
-		return false
-	case aborted:
-		// A handler that panicked with ErrAbortHandler for its own
-		// reasons: no response, and the connection ends.
-		s.dropResponse(ctx)
 		return false
 	case req.bodyComplete():
 		return true
@@ -800,12 +834,30 @@ func (s *Server) dropResponse(ctx *context) {
 //
 // A synthetic request has no connection: its Response carries the status
 // instead, with an empty body.
+//
+// The log line (levels as in the Logger policy table, logging.go):
+//
+//	Warn, always   a handler got an empty Body() or form value for this
+//	               request and never asked BodyErr: it could not tell the
+//	               body was missing, and may have acted on that. The line
+//	               names the route to fix.
+//	Debug          every other case: the handler was given the error
+//	               (BodyReader, the multipart accessors, BodyErr), or never
+//	               touched the body (MaxBody refused it, the drain found
+//	               it). The client's doing, as for a refusal before the
+//	               handler.
+//
+// status is 0 in the line when no response is sent (the client left).
 func (s *Server) refuseBody(ctx *context, respWriter io.Writer) {
 	err := ctx.request.lazy.err
 	s.dropResponse(ctx)
 	wire, status := bodyRefusal(err)
-	if s.options.Debug {
-		s.log.Debug("rweb: request body could not be read", "path", ctx.request.path, "status", status, "error", err)
+	if ctx.request.lazy.unseen {
+		s.log.Warn("rweb: request body could not be read, and the handler was given an empty body without checking Request().BodyErr(); its response is replaced",
+			"method", ctx.request.method, "path", ctx.request.path, "status", status, "error", err)
+	} else if s.options.Debug {
+		s.log.Debug("rweb: request body could not be read; the handler's response is replaced",
+			"method", ctx.request.method, "path", ctx.request.path, "status", status, "error", err)
 	}
 	if ctx.conn == nil {
 		if status != 0 {

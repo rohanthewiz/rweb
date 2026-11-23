@@ -493,11 +493,13 @@ needs it.
 >
 > - *A body that fails mid-handler.* `Body()` has no error result, and
 >   before this change a request with a bad body never reached a handler.
->   Returning an empty or cut-short body would let a handler act on it, so
->   the error-less accessors end the handler with `panic(ErrAbortHandler)`
->   (as net/http's `ErrAbortHandler`), and the server answers 400/408/413
->   itself, replacing whatever the handler wrote. `BodyReader` returns the
->   error instead.
+>   The server still answers 400/408/413 itself, replacing whatever the
+>   handler wrote. First built with the error-less accessors ending the
+>   handler by `panic(ErrAbortHandler)`; changed the same day on the user's
+>   call (no panics in production): `Body()` returns nil, the form
+>   accessors `""`, new `Request().BodyErr()` gives the error, and a handler
+>   handed an empty body that never checks it is logged as a warning.
+>   `BodyReader` returns the error from `Read`.
 > - *"Discarded up to a bound, else the connection closes."* 256 KB and 1 s
 >   (the response waits on the drain). Past either, the response goes out
 >   with `Connection: close` and the connection gets a lingering close.

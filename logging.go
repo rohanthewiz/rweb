@@ -38,12 +38,17 @@ import (
 //	                       recovered panic, a WebSocket handler's error, a bad
 //	                       cookie key, a static route refused at registration
 //	Warn   always          a response header with an invalid name (dropped),
-//	                       an accept error (retried), a ReadyChan with no buffer
+//	                       an accept error (retried), a ReadyChan with no buffer,
+//	                       a request body that could not be read when the
+//	                       handler was given an empty Body() or form value and
+//	                       never checked Request().BodyErr() (refuseBody)
 //	Info   Verbose         listening address, proxy routes and targets, SSE
 //	                       stream start and end
 //	Debug  Debug           routing trace, request bodies, and failures that are
 //	                       the client's doing: it left mid-response, a stream
-//	                       was cut short, a WebSocket upgrade was refused
+//	                       was cut short, a WebSocket upgrade was refused, a
+//	                       request body could not be read (and the handler
+//	                       was told, or never looked)
 //
 // A Debug line must also get past the logger's own level. With the default
 // logger that is logrus's level, which is info until the app calls

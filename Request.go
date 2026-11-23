@@ -53,10 +53,15 @@ type ItfRequest interface {
 	GetFormFiles(string) ([]*multipart.FileHeader, error)
 	// Body returns the whole request body. It is read off the connection on
 	// the first call (bodies are lazy: nothing is read before a handler
-	// asks), and kept for later calls. If the body cannot be read, the
-	// handler is ended with ErrAbortHandler and the server answers the
-	// request; see request_body.go.
+	// asks), and kept for later calls. If the body cannot be read it
+	// returns nil and BodyErr says why; the server answers such a request
+	// itself. See request_body.go.
 	Body() []byte
+	// BodyErr reports why the request body could not be read (malformed,
+	// over the cap, timed out, client gone), or nil. Check it after Body,
+	// GetPostValue or FormValue before acting on what they returned: those
+	// have no error result and return empty for a body that did not arrive.
+	BodyErr() error
 	// BodyReader returns the request body as a stream, read from the
 	// connection as the handler reads it, so an upload need not be held in
 	// memory. See (*request).BodyReader for the rules.
@@ -426,9 +431,10 @@ func (req *request) PostArgs() *Args {
 // parse would read the body of every such request before routing, wanted or
 // not, so the parse now waits for the first GetPostValue, PostArgs or
 // FormValue, as the multipart parse already did. Body() does the reading
-// (and ends the handler with ErrAbortHandler if the body cannot be read:
-// these accessors have no error to return), and keeps the bytes, so Body()
-// after a form lookup still returns them.
+// and keeps the bytes, so Body() after a form lookup still returns them. If
+// the body cannot be read there are no args, Body() having returned nil;
+// these accessors have no error to return, and BodyErr is where a handler
+// finds out.
 func (req *request) parsePostArgs() {
 	if req.parsedPostArgs {
 		return
@@ -588,11 +594,11 @@ func (req *request) FormValue(key string) string {
 		// when the underlying parse error matters.
 		if err := req.ParseMultipartForm(); err != nil || req.multipartForm == nil {
 			// A form that does not parse reads as "no such value", as it
-			// always has. A body that did not arrive is another matter:
-			// "" would let the handler act on a request it only half
-			// received, so it ends the handler, as Body() does.
+			// always has. So does a body that did not arrive, but that
+			// one is noted, as for Body(): the handler has been given an
+			// empty value with no error beside it (see BodyErr).
 			if req.bodyFailed() {
-				panic(ErrAbortHandler)
+				req.lazy.unseen = true
 			}
 			return ""
 		}

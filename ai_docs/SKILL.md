@@ -681,7 +681,10 @@ Nothing of a body is read before a handler asks. `Body()` reads it whole on firs
 `BodyReader()` streams it; a multipart form is parsed straight off the connection.
 
 ```go
-data := ctx.Request().Body()                       // whole body, in memory
+data := ctx.Request().Body()                       // whole body, in memory; nil if it could not be read
+if err := ctx.Request().BodyErr(); err != nil {    // malformed, over the cap, timed out, client gone
+    return err                                     // the server answers 400/408/413 itself
+}
 
 s.Post("/upload/:name", func(ctx rweb.Context) error { // streamed, never held whole
     f, err := os.Create(filepath.Join("uploads", filepath.Base(ctx.Request().Param("name"))))
@@ -701,10 +704,12 @@ api := s.Group("/api", rweb.MaxBody(1<<20))         // per-group cap, 413 over i
   goroutine only, and not after the handler returns (`rweb.ErrBodyReadAfterHandler`).
 - A body that cannot be read (malformed chunks, over the cap, past `ReadTimeout`, client gone)
   is answered by the server (`400`/`408`/`413`) and the connection closed, replacing whatever
-  the handler wrote. `BodyReader()`'s `Read` returns the error (`rweb.ErrBodyTooLarge` for the
-  cap); `Body()`, `GetPostValue`, `PostArgs` and `FormValue` end the handler by panicking with
-  `rweb.ErrAbortHandler` (deferred functions run; recovery middleware must re-panic it). A
-  handler may panic with it to drop a request with no response.
+  the handler wrote. No panic: `BodyReader()`'s `Read` and the multipart accessors return the
+  error (`rweb.ErrBodyTooLarge` for the cap); `Body()` returns nil and `GetPostValue` /
+  `FormValue` return `""`. **Check `ctx.Request().BodyErr()` after those before acting on the
+  body** (`if err := ctx.Request().BodyErr(); err != nil { return err }`); the returned error
+  is not sent to the error handler. A handler given an empty body that never checks is logged
+  as a warning naming its route.
 - An unread remainder is drained after the handler when small (≤ 256 KB within 1 s), keeping
   the connection; otherwise the response carries `Connection: close`. `100 Continue` is sent
   only when something reads the body.
@@ -1376,6 +1381,7 @@ req.PathParam("id")       // Route parameter
 req.Header("Authorization") // Request header
 req.Body()                // Raw request body bytes (read on first call; see Request Bodies)
 req.BodyReader()          // The body as an io.Reader, streamed from the connection (v0.2.1+)
+req.BodyErr()             // Why the body could not be read, or nil; check after Body()/FormValue (v0.2.1+)
 req.FormValue("field")    // Form field value
 req.GetPostValue("field") // POST form value
 req.Context()             // context.Context, cancelled when the client disconnects (v0.2.0+)

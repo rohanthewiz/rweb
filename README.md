@@ -309,11 +309,20 @@ api := s.Group("/api", rweb.MaxBody(1<<20))
   was left unread. Use it on the handler's goroutine, before the handler returns.
 - **A body that cannot be read** (malformed chunking, over the cap, slower than `ReadTimeout`,
   client gone) is answered by the server (`400`, `408`, `413`) and the connection closed,
-  whatever the handler wrote. `BodyReader()`'s `Read` returns the error (`rweb.ErrBodyTooLarge`
-  for the cap). `Body()` and the other accessors that return no error end the handler instead,
-  by panicking with `rweb.ErrAbortHandler`, so no handler carries on with half a body; deferred
-  functions run, and recovery middleware should re-panic that value. A handler may panic with
-  it itself to drop a request without a response.
+  whatever the handler wrote. The handler is told through its accessor: `BodyReader()`'s `Read`
+  and the multipart accessors return the error (`rweb.ErrBodyTooLarge` for the cap); `Body()`
+  returns nil and `GetPostValue`/`FormValue` return `""`, with `Request().BodyErr()` saying
+  why. A handler that acts on the body (stores it, say) checks before it does:
+
+  ```go
+  data := ctx.Request().Body()
+  if err := ctx.Request().BodyErr(); err != nil {
+  	return err // the server answers 400/408/413 itself; not sent to the error handler
+  }
+  ```
+
+  A handler that was handed an empty body this way and never checked `BodyErr` is logged as a
+  warning with its route; otherwise the failure is a debug line.
 - **What a handler leaves unread** is drained after it returns if it is small (up to 256 KB
   arriving within 1 s), and the connection is kept. Otherwise the response is sent with
   `Connection: close`. A client that sent `Expect: 100-continue` is only told to send the body
