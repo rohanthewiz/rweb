@@ -1,14 +1,16 @@
 # N-057: lazy request body, `BodyReader`, `MaxBody`, streamed `Proxy` uploads
 
 Session id: `74bc1dff-27ff-44ca-a271-b3679534e9b8`
-Date: 2026-11-23 · Branch: `roh/once-over-fab5.2` · Start `78b587b` → end `9d96d5e` (+ this doc)
+Date: 2026-11-23 · Branch: `roh/once-over-fab5.2` · Start `78b587b` → end `a5c0d81` (+ this doc)
 Run: the user named Roadmap item N-057 (which had absorbed N-046), then asked
-for `/sess-wrap` when it was complete. Open and Validate stay empty; Roadmap
-is down to N-056.
+for `/sess-wrap` when it was complete. After the first wrap (`9d96d5e`,
+`a28da1f`) the user ruled out the panic used for unreadable bodies; that was
+reworked in `a5c0d81` and the session wrapped again. This doc describes the
+final state. Open and Validate stay empty; Roadmap is down to N-056.
 
 ## Done
 
-### N-057: the request body is read on demand (`9d96d5e`)
+### N-057: the request body is read on demand (`9d96d5e`, `a5c0d81`)
 
 Before: `serveConn` read every body into memory, up to the 100 MB cap, before
 routing. Now it parses and checks the head, records the framing in
@@ -36,23 +38,37 @@ routing. Now it parses and checks the head, records the framing in
     with `Connection: close`, then `lingerClose`.
   - an event stream to follow: the body is read to its end first, as before.
 - `rweb.MaxBody(n)` middleware lowers the cap (`lazyBody.max`).
-- New exported errors: `ErrAbortHandler`, `ErrBodyTooLarge`,
-  `ErrBodyReadAfterHandler`. New `consts.StatusRequestEntityTooLarge`.
+- New exported errors: `ErrBodyTooLarge`, `ErrBodyReadAfterHandler`. New
+  `Request().BodyErr()`. New `consts.StatusRequestEntityTooLarge`.
 
 **Decisions made without asking** (each explained in a comment at its site):
 
-1. **A body that fails mid-handler ends the handler.** `Body()`,
-   `GetPostValue`, `PostArgs` and `FormValue` have no error result. Before
-   this change a request with a bad body never reached a handler. Returning
-   nil would let a handler act on an upload that never arrived (store an
-   empty document over a good one). So these panic with `ErrAbortHandler`,
-   recovered in `handleRequest`, as net/http does with its own
-   `ErrAbortHandler`. `BodyReader` and the multipart accessors return the
-   error instead. An app may panic with it to drop a request.
-   The alternative is one line in `Body()`: return nil instead of panicking.
+1. **A body that fails mid-handler (decided by the user: no panics).**
+   `Body()`, `GetPostValue`, `PostArgs` and `FormValue` have no error result.
+   - As first committed (`9d96d5e`) they ended the handler with
+     `panic(ErrAbortHandler)`, so no handler could act on an upload that
+     never arrived.
+   - The user's call: panics are bad in production; handle it gracefully and
+     log. Reworked in `a5c0d81`:
+     - `Body()` returns nil, never the part that did arrive. The form
+       accessors return `""`.
+     - New `Request().BodyErr()` returns the error, for a handler to check
+       before it acts on the body. (My addition: without it a `Body()` or
+       `FormValue` user cannot tell a failed upload from an empty one.)
+     - `BodyReader` and the multipart accessors return the error, as before.
+     - `refuseBody` logs a warning (method, path, status, error) when a
+       handler was given an empty result and never called `BodyErr`
+       (`lazyBody.unseen`). Every other case is a Debug line. The Logger
+       policy table in `logging.go` lists both.
+     - `ErrAbortHandler` and its recover branch are removed.
+   - Left as is: a handler that skips the check runs on with the nil body.
+     The client still gets the server's refusal; the warning is the trace.
+   - The warning can be triggered by any client that sends a bad body to
+     such a route, one line per request.
 2. **The server's refusal always replaces the handler's response** for a
    failed body, so a handler that ignores a read error cannot answer 200 for
-   a broken upload. The error handler is skipped for such a request.
+   a broken upload. The error handler is skipped for such a request, so a
+   handler can simply return `BodyErr()`.
 3. **`MaxBody` only lowers the cap**, and refuses a known-oversize
    `Content-Length` on the spot. "Last one in the chain wins" was tried in a
    test and dropped: an outer lower cap refuses a sized body before the inner
@@ -92,9 +108,10 @@ routing. Now it parses and checks the head, records the framing in
 - `request_framing.go`: `readChunkedBody` became `nextChunk`, the same
   decoder cut at the chunk boundary. Every check is unchanged.
   `errChunkTooLarge` is now `ErrBodyTooLarge`.
-- `Server.go`: `serveConn` sets up `lazyBody`; `handleRequest` recovers
-  `ErrAbortHandler`, calls `settleBody`, ends the lease and lingers after the
-  response. `lineReader` moved into `request.lr` so a handler-side chunked
+- `Server.go`: `serveConn` sets up `lazyBody`; `handleRequest` calls
+  `settleBody`, ends the lease and lingers after the response. `Proxy`
+  buffers a WebSocket handshake's body explicitly, so a failed one is not
+  sent upstream as "no body". `lineReader` moved into `request.lr` so a handler-side chunked
   read can use it.
 - `Context.go`: `upgradeWebSocket` and `GetConn` buffer an unread body before
   taking the connection over. `Clean` resets `lazy`.
@@ -111,16 +128,18 @@ and an "As done" note under N-046 in `PLAN_ONCE_OVER_2026-1109.md`.
 
 - `go test -race ./...`: all packages pass.
 - `GOOS=windows go vet ./...`: clean.
-- New tests, all run 8 times under `-race` without a failure:
+- New tests, repeated under `-race` (8 times at `9d96d5e`; the ones changed
+  for `a5c0d81` 6 times more) without a failure:
   - `request_body_test.go` (19): handler runs before the body arrives;
     3 MB streamed with nothing buffered (both framings, TCP and TLS);
     `Body`/`BodyReader` together; small unread body drained with a pipelined
     request behind it; 50 MB unread body answered at once and closed; no
-    100 Continue for an unread body; four failure kinds end the handler at
-    `Body()`; `BodyReader` error overruled by the server's 413; `MaxBody`
-    cases; stale reader; multipart streamed; urlencoded on use; watch starts
-    after the body; app-raised `ErrAbortHandler`; synthetic requests; SSE
-    after an unread body; WebSocket handshake with a body.
+    100 Continue for an unread body; four failure kinds, each with a handler
+    that checks `BodyErr` and one that does not (nil body, server's refusal,
+    warning or none); `FormValue` of a failed body; `BodyReader` error
+    overruled by the server's 413; `MaxBody` cases; stale reader; multipart
+    streamed; urlencoded on use; watch starts after the body; synthetic
+    requests; SSE after an unread body; WebSocket handshake with a body.
   - `proxy_upload_test.go` (6): large upload streamed (both framings) with
     keep-alive after; small chunked upload buffered and sent sized; upstream
     answers mid-upload (TCP and TLS); `Expect` passed on, refused and
