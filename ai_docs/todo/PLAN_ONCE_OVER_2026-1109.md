@@ -485,6 +485,39 @@ needs it.
 > the cap already. Only a lazy body (step 2) removes the cost without
 > changing what middleware sees.
 
+> **As done (2026-11-23), N-057.** `request_body.go`: `serveConn` records
+> the framing and reads nothing; `Body()` buffers on first call,
+> `Request().BodyReader()` streams, urlencoded and multipart forms parse on
+> first use (multipart straight off the connection). Where the sketch was
+> silent or turned out different:
+>
+> - *A body that fails mid-handler.* `Body()` has no error result, and
+>   before this change a request with a bad body never reached a handler.
+>   Returning an empty or cut-short body would let a handler act on it, so
+>   the error-less accessors end the handler with `panic(ErrAbortHandler)`
+>   (as net/http's `ErrAbortHandler`), and the server answers 400/408/413
+>   itself, replacing whatever the handler wrote. `BodyReader` returns the
+>   error instead.
+> - *"Discarded up to a bound, else the connection closes."* 256 KB and 1 s
+>   (the response waits on the drain). Past either, the response goes out
+>   with `Connection: close` and the connection gets a lingering close.
+> - *100 Continue* is sent by the first read, so a body nobody reads is
+>   never sent; the connection closes after that response.
+> - *`rweb.MaxBody(n)`* lowers the cap only (the server-wide cap is still
+>   checked before any handler), and refuses a known-oversize request on
+>   the spot.
+> - *Disconnect watch* starts when the body has been read to its end; a
+>   handler that never reads its body gets no disconnect notice.
+> - *`ReadTimeout`* runs from the first read of the body, not the end of
+>   the head.
+> - *`Proxy`* streams bodies over 256 KB (`proxyRequestBody`); smaller ones
+>   stay buffered so the Transport can replay them on a stale upstream
+>   connection. The upload may outlive `client.Do`, so the body's reading
+>   state is leased to the Transport's goroutine until the response is out.
+> - *Unchanged on purpose:* a HEAD or TRACE body is still discarded before
+>   the handler, and an event stream answering a request with an unread
+>   body still has that body read to its end first.
+
 ### N-047 · `Proxy` buffers the response and uses `http.DefaultClient` · read · value medium · needs D6
 
 `Server.go:738-771`: no timeout, redirects are followed by the proxy instead

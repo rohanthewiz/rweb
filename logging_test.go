@@ -282,7 +282,12 @@ func TestSSEHubLogger(t *testing.T) {
 // event that cannot be encoded.
 func loggingServer(opts ServerOptions) *Server {
 	s := NewServer(opts)
-	s.Post("/echo", func(ctx Context) error { return ctx.WriteString("ok") })
+	// The handler asks for the body: the Debug "request body" line is
+	// written when a body is buffered (N-057), not for one nobody reads.
+	s.Post("/echo", func(ctx Context) error {
+		_ = ctx.Request().Body()
+		return ctx.WriteString("ok")
+	})
 	s.Get("/sse-close", func(ctx Context) error {
 		ch := make(chan any, 4)
 		ch <- "a"

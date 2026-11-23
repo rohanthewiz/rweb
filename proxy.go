@@ -12,6 +12,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,9 +26,13 @@ import (
 //
 //	client ──► rweb ─────────────────────────────────────────► upstream
 //	           request headers: hop-by-hop dropped (Connection and what it
-//	           names, Keep-Alive, TE, Upgrade, ...), Expect dropped,
-//	           X-Forwarded-For/-Proto/-Host set; Host = the target's
-//	           body: the buffered request body
+//	           names, Keep-Alive, TE, Upgrade, ...), X-Forwarded-For/-Proto/
+//	           -Host set; Host = the target's
+//	           body: up to 256 KB (proxyBufferBodyMax) buffered and sent
+//	           with a Content-Length, Expect dropped; a larger one streamed
+//	           from the client's connection as it arrives
+//	           (proxyRequestBody), with the client's "Expect: 100-continue"
+//	           passed on so the upstream decides whether it is sent at all
 //
 //	client ◄── rweb ◄───────────────────────────────────────── upstream
 //	           status as is (3xx included: redirects are not followed)
@@ -544,4 +549,202 @@ func appendUpgradeHead(b []byte, h http.Header) []byte {
 		}
 	}
 	return append(b, "\r\n"...)
+}
+
+// proxyBufferBodyMax is the largest request body Proxy still buffers before
+// calling the upstream; a larger one is streamed (proxyRequestBody).
+//
+// Buffering small bodies is deliberate, not a leftover. A buffered body can
+// be replayed, so Go's Transport transparently retries a request that met an
+// upstream keep-alive connection the upstream had just closed; a streamed
+// body cannot, and the same race is a 502. It is also sent with a
+// Content-Length even when the client sent it chunked, which some upstreams
+// insist on. And it keeps a slow client from holding an upstream connection
+// while it trickles a form post (the reason nginx buffers request bodies by
+// default). Past this size those conveniences cost real memory per request,
+// so the body goes through as it arrives. The value is maxRetainedBuf: up to
+// there the body sits in the context's pooled buffer and costs no allocation.
+const proxyBufferBodyMax = maxRetainedBuf
+
+// errProxyBodyDetached is what the upstream request's body read returns
+// once the proxied request is over on the client's side (detach).
+var errProxyBodyDetached = errors.New("rweb: proxy: request body detached, the client's request has ended")
+
+// proxyRequestBody is the client's request body as the upstream request's
+// Body: Proxy's streaming upload (N-057). It reads the lazy body
+// (request_body.go) straight off the client's connection, so an upload of
+// any size passes through in the Transport's copy buffer.
+//
+// What makes it more than a pass-through is that the Transport reads it on
+// its own goroutine, and may go on reading after client.Do has returned:
+//
+//	handler goroutine                 Transport's write goroutine
+//	─────────────────                 ───────────────────────────
+//	client.Do(req) ───────────────►   Read … Read … (uploading)
+//	  blocked                           │
+//	◄── response headers                │  the upstream may answer before
+//	responded()                         │  it has read the whole body
+//	return Stream(resp.Body)            │
+//	settleBody: lease unfinished        │  still uploading: the response is
+//	  → Connection: close               │  relayed while the upload goes on
+//	writeResponse (relays the body)     │  (full duplex, as the upstream sees
+//	endBodyLease → detach() ─────────►  ▼  it with a direct client)
+//	  waits for the Read in flight    Read returns errProxyBodyDetached
+//	lingerClose, close
+//
+// So the pooled request's reading state (request.lazy, the bufio.Reader, the
+// line reader) is owned by whoever holds the lease: this type while
+// request.lazy.lease points at it, the handler goroutine otherwise. Every
+// touch of that state from here is either under mu or inside a Read that
+// detach waits for, and the handler side asks only finished() until it has
+// called detach.
+//
+// The common case costs none of the ceremony: an upstream that reads the
+// whole upload before answering leaves the lease finished when the handler
+// returns, the connection stays keep-alive, and detach has nothing to wait
+// for.
+//
+// Three things are decided under mu, because they must not race with the
+// handler goroutine moving on to the response:
+//
+//   - 100 Continue. The client's interim response is written by the first
+//     Read (startBody). Once responded() has been called the final response
+//     is on its way and an interim one written now could land in the middle
+//     of it, so a first Read arriving after that never sends it: it parks
+//     until detach. (Go's Transport does read the body after an early final
+//     response when it means to keep the upstream connection.) The client
+//     was never told to send the body, so there is nothing to forward.
+//   - The read deadline. startBody arms ReadTimeout; done under mu, it can
+//     never overwrite the past deadline detach sets to interrupt a Read.
+//   - The disconnect watch. The Read that reaches the body's end may start
+//     it, so a client leaving while the upstream works on a finished upload
+//     cancels the upstream call as it does for a buffered body, but only
+//     while the handler is still inside client.Do.
+type proxyRequestBody struct {
+	req  *request
+	conn net.Conn
+
+	mu   sync.Mutex
+	cond *sync.Cond // signals: a Read returned, or detach was called
+
+	inRead       bool // a Read is past mu and reading the connection
+	stopped      bool // detach was called: no Read touches the request again
+	responding   bool // client.Do has returned; the handler is answering
+	interrupting bool // detach set a past read deadline to end the Read in flight
+	sawEOF       bool // the body was read to its end
+}
+
+func newProxyRequestBody(req *request) *proxyRequestBody {
+	b := &proxyRequestBody{req: req, conn: req.cr.netConn()}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+// Read implements io.Reader for the upstream request.
+func (b *proxyRequestBody) Read(p []byte) (int, error) {
+	lb := &b.req.lazy
+
+	b.mu.Lock()
+	// One Read at a time. The Transport reads sequentially, though not
+	// always from one goroutine (it may probe the first byte from a helper).
+	for b.inRead && !b.stopped {
+		b.cond.Wait()
+	}
+	if b.stopped {
+		b.mu.Unlock()
+		return 0, errProxyBodyDetached
+	}
+	if lb.err == nil && !lb.started {
+		if lb.continueOwed && b.responding {
+			// See the type comment: too late for 100 Continue. Wait for the
+			// request to end rather than fail now, since an error from the
+			// body makes the Transport drop the upstream connection, and
+			// with it the response still being relayed.
+			for !b.stopped {
+				b.cond.Wait()
+			}
+			b.mu.Unlock()
+			return 0, errProxyBodyDetached
+		}
+		if err := b.req.startBody(); err != nil {
+			err = b.req.failBody(err)
+			b.mu.Unlock()
+			return 0, err
+		}
+	}
+	b.inRead = true
+	b.mu.Unlock()
+
+	n, err := b.req.readBodyRaw(p)
+
+	b.mu.Lock()
+	b.inRead = false
+	if b.interrupting && err != nil && isTimeout(err) {
+		// detach cut this Read short. Not a failure of the client's: the
+		// body is abandoned (the stream position may be lost mid-chunk-line,
+		// so the connection cannot be reused, which detach's caller has
+		// already arranged).
+		lb.err = errBodyAbandoned
+		err = errProxyBodyDetached
+	}
+	if lb.err == io.EOF {
+		b.sawEOF = true
+		if !lb.eofSeen {
+			lb.eofSeen = true
+			if !b.responding && !b.stopped {
+				b.req.startWatchIfIdle()
+			}
+		}
+	}
+	b.cond.Broadcast()
+	b.mu.Unlock()
+	return n, err
+}
+
+// Close is called by the Transport when it is done with the body. Nothing
+// to release: the body is the client's connection, which the request loop
+// owns.
+func (b *proxyRequestBody) Close() error { return nil }
+
+// responded records that client.Do has returned: from here the handler is
+// answering the client (see the type comment for what that switches off).
+func (b *proxyRequestBody) responded() {
+	b.mu.Lock()
+	b.responding = true
+	b.mu.Unlock()
+}
+
+// finished reports whether the upstream request has read the whole body and
+// is not reading now, in which case the connection is at the next request
+// and detach will not have to interrupt anything.
+func (b *proxyRequestBody) finished() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sawEOF && !b.inRead
+}
+
+// detach ends the upstream request's use of the body: Reads from now on
+// fail with errProxyBodyDetached without touching the request, and a Read in
+// flight is waited for. One parked in the connection (the client has
+// stopped sending, or not started) is woken with a past read deadline, the
+// way connReader.stopWatch ends its watch; the deadline is cleared again
+// once the Read has returned. Idempotent.
+func (b *proxyRequestBody) detach() {
+	b.mu.Lock()
+	b.stopped = true
+	if b.inRead && b.conn != nil {
+		b.interrupting = true
+		_ = b.conn.SetReadDeadline(aLongTimeAgo)
+	}
+	b.cond.Broadcast() // wake a Read parked for want of 100 Continue
+	for b.inRead {
+		b.cond.Wait()
+	}
+	if b.interrupting {
+		b.interrupting = false
+		if b.conn != nil {
+			_ = b.conn.SetReadDeadline(time.Time{})
+		}
+	}
+	b.mu.Unlock()
 }

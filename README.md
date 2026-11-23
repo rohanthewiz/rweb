@@ -275,6 +275,56 @@ default logger, `logger.InitLog`'s default level is debug; without `InitLog`
 it is info). The `rweb.RequestInfo` middleware logs one info line per
 request. `SSEHub` has no server and takes its own `SSEHubOptions.Logger`.
 
+## Request Bodies
+
+A request body is read only when a handler asks for it (v0.2.1+). Until then it stays on the
+connection, so a request to an unknown path, or one a handler rejects on its headers, costs
+nothing for its body, however large.
+
+```go
+// The whole body, in memory (read on the first call, kept for later ones):
+data := ctx.Request().Body()
+
+// As a stream, never held whole: copy an upload to disk, decode JSON as it arrives
+s.Post("/upload/:name", func(ctx rweb.Context) error {
+	f, err := os.Create(filepath.Join("uploads", filepath.Base(ctx.Request().Param("name"))))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, ctx.Request().BodyReader())
+	return err
+})
+
+// A cap for some routes, below the server-wide MaxRequestBodySize (default 100 MB)
+api := s.Group("/api", rweb.MaxBody(1<<20))
+```
+
+- `Body()`, `GetPostValue`, `FormValue` and `PostArgs` read the body into memory on first use.
+  A multipart form (`GetFormFile`, `GetFormFiles`, `FormValue`) is parsed straight off the
+  connection, so file parts beyond `MultipartMaxMemory` go to temp files without the upload
+  ever being held in memory.
+- `BodyReader()` yields what `Body()` already buffered, then the rest from the connection.
+  Without an earlier `Body()` call it is a one-shot stream: a later `Body()` returns only what
+  was left unread. Use it on the handler's goroutine, before the handler returns.
+- **A body that cannot be read** (malformed chunking, over the cap, slower than `ReadTimeout`,
+  client gone) is answered by the server (`400`, `408`, `413`) and the connection closed,
+  whatever the handler wrote. `BodyReader()`'s `Read` returns the error (`rweb.ErrBodyTooLarge`
+  for the cap). `Body()` and the other accessors that return no error end the handler instead,
+  by panicking with `rweb.ErrAbortHandler`, so no handler carries on with half a body; deferred
+  functions run, and recovery middleware should re-panic that value. A handler may panic with
+  it itself to drop a request without a response.
+- **What a handler leaves unread** is drained after it returns if it is small (up to 256 KB
+  arriving within 1 s), and the connection is kept. Otherwise the response is sent with
+  `Connection: close`. A client that sent `Expect: 100-continue` is only told to send the body
+  when something reads it, so an upload a handler turns away (`401`, a `MaxBody` cap) is never
+  sent.
+- `rweb.MaxBody(n)` is middleware (`s.Use`, `s.Group`): a `Content-Length` over `n` gets `413`
+  before the rest of the chain runs, a chunked body when it passes `n`. It only lowers the cap;
+  to give one route more room, raise `MaxRequestBodySize` and cap the other groups.
+- `Request().Context()` reports a client disconnect only once the body has been read to its
+  end (the watch reads the connection, where the body is).
+
 ## Connection Limits and Timeouts
 
 Connections are bounded by default. Each limit is a `ServerOptions` field with a matching
@@ -285,7 +335,7 @@ Connections are bounded by default. Each limit is a `ServerOptions` field with a
 | `MaxHeaderBytes` | `WithMaxHeaderBytes` | 1 MB | request line + headers of one request (over: `431`) |
 | `ReadHeaderTimeout` | `WithReadHeaderTimeout` | 30 s | reading a request's head; on a new connection also the TLS handshake (late: `408`) |
 | `IdleTimeout` | `WithIdleTimeout` | 120 s | waiting for the next request on a keep-alive connection (then closed) |
-| `ReadTimeout` | `WithReadTimeout` | off | reading the request body (late: `408`) |
+| `ReadTimeout` | `WithReadTimeout` | off | reading the request body, from the handler's first read of it (late: `408`) |
 | `WriteTimeout` | `WithWriteTimeout` | off | any single stalled write of a response, not the whole response |
 | `SSECfg.WriteTimeout` | `WithSSEWriteTimeout` | 30 s | each flush of an SSE stream, so a client that stops reading is let go |
 
@@ -304,8 +354,9 @@ line folding) or malformed chunked framing gets `400`, and a transfer coding oth
 `chunked` gets `501`; the connection is closed after either.
 
 `Expect: 100-continue` is honoured: an HTTP/1.1 upload that asks for it gets `100 Continue`
-once its head has passed every check, and an oversized one gets `413` without its body ever
-being sent. Other expectations get `417`.
+when a handler starts reading the body, and an oversized one, or one no handler reads, gets its
+answer (`413`, the handler's `401`, ...) without its body ever being sent. Other expectations
+get `417`.
 
 Keep-alive follows RFC 9112: an HTTP/1.1 connection stays open unless the request (or the
 handler's response) says `Connection: close`, and an HTTP/1.0 connection closes after each

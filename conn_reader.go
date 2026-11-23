@@ -74,6 +74,15 @@ func (cr *connReader) reset(conn net.Conn) {
 	cr.done, cr.cancel = nil, nil
 }
 
+// netConn returns the connection, nil for a synthetic request. For the few
+// things besides reading that the body reader does to it: writing
+// 100 Continue, setting and clearing the body's read deadline.
+func (cr *connReader) netConn() net.Conn {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	return cr.conn
+}
+
 // Read implements io.Reader for the connection's bufio.Reader.
 func (cr *connReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {

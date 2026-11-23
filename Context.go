@@ -294,6 +294,13 @@ func (ctx *context) Clean() {
 	if cap(ctx.response.headers) > maxRetainedHeaders {
 		ctx.response.headers = make([]Header, 0, 8)
 	}
+	// The body's reading state is the request's alone: the next request on
+	// the connection starts with nothing to read until serveConn says
+	// otherwise. A lease (Proxy still reading the body from another
+	// goroutine) is ended first, so nothing else is writing these fields.
+	ctx.request.endBodyLease()
+	ctx.request.lazy = lazyBody{}
+
 	// A body stream still pending here was never sent (an error path, or a
 	// synthetic request whose caller never read Body); release it.
 	ctx.response.closeBodyStream()
@@ -829,6 +836,16 @@ func (ctx *context) upgradeWebSocket(opts WSOptions) (*WSConn, error) {
 		return nil, err
 	}
 
+	// A handshake is a GET and carries no body, but one that does must not
+	// have its body bytes read as the first WebSocket frames: whatever is
+	// still unread is buffered first (as it always was, when every body was
+	// read before the handler), which leaves the connection at the first
+	// byte after the request. A body that cannot be read fails the upgrade;
+	// the server then answers for it (settleBody).
+	if err := ctx.request.bufferBody(); err != nil {
+		return nil, err
+	}
+
 	// From here on the connection's reads belong to the WebSocket. Stop the
 	// disconnect watch (if Request().Context() started one) before anything
 	// else: left running, it would race WSConn for the first frame byte. The
@@ -910,7 +927,14 @@ func (ctx *context) IsWebSocketUpgrade() bool {
 // would otherwise read concurrently with the caller and take a byte of
 // theirs), so that context is then cancelled only when the request finishes.
 // For the peer's address, ClientIP needs no connection hand-off.
+//
+// A request body not yet read is read into memory first (it stays available
+// from Body()), so the connection is handed over at the first byte after the
+// request, as it was when bodies were read before the handler ran. If that
+// read fails the connection is returned all the same; the server refuses
+// the request and closes it once the handler returns.
 func (ctx *context) GetConn() net.Conn {
+	_ = ctx.request.bufferBody()
 	ctx.request.releaseConn()
 	return ctx.conn
 }

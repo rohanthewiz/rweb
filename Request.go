@@ -2,9 +2,9 @@ package rweb
 
 import (
 	"bufio"
-	"bytes"
 	stdctx "context" // aliased: this package's own Context interface and context type own the name
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/url"
@@ -51,7 +51,16 @@ type ItfRequest interface {
 	// Returns an error when no multipart form has been parsed or no
 	// files exist under the key.
 	GetFormFiles(string) ([]*multipart.FileHeader, error)
+	// Body returns the whole request body. It is read off the connection on
+	// the first call (bodies are lazy: nothing is read before a handler
+	// asks), and kept for later calls. If the body cannot be read, the
+	// handler is ended with ErrAbortHandler and the server answers the
+	// request; see request_body.go.
 	Body() []byte
+	// BodyReader returns the request body as a stream, read from the
+	// connection as the handler reads it, so an upload need not be held in
+	// memory. See (*request).BodyReader for the rules.
+	BodyReader() io.Reader
 	// Context returns the request's context.Context, the counterpart of
 	// net/http's Request.Context(). It is cancelled when the client closes
 	// the connection while the handler is still running, and in every case
@@ -127,6 +136,35 @@ type request struct {
 	// synthetic Server.Request leaves them false, which writes nothing.
 	http10    bool
 	connClose bool
+
+	// lazy is the reading state of the body still on the connection (see
+	// request_body.go): serveConn records the framing there and reads
+	// nothing; Body, BodyReader and the form accessors read on demand.
+	// body above holds what has been buffered so far.
+	lazy lazyBody
+
+	// bodyGen numbers the requests this pooled struct has served, as far as
+	// body readers are concerned: handleRequest bumps it when the handlers
+	// return, which turns every BodyReader handed out for that request
+	// stale (bodyHandle). Never reset.
+	bodyGen uint32
+
+	// lr reads the lines of the request head, and of a chunked body's
+	// framing, off reader. Per connection (serveConn sets it up), kept
+	// here rather than in serveConn so that a body read from inside a
+	// handler can use it; its scratch buffer is reused across the
+	// connection's requests.
+	lr lineReader
+
+	// lim is the server's resolved connection limits (ReadTimeout for the
+	// body, MaxHeaderBytes for a chunked body's trailers). Set once by
+	// newContext; nil in a request built outside NewServer.
+	lim *connLimits
+
+	// debugLog is the server's logger when ServerOptions.Debug is on, nil
+	// otherwise, for the lines that are now written when the body is first
+	// buffered or its form parsed rather than before the handler.
+	debugLog Logger
 }
 
 // Context returns the request's context.Context, created on first use.
@@ -144,6 +182,11 @@ type request struct {
 //
 // Disconnects are not watched for, so only the "request finished" rule
 // applies, when:
+//   - the request has a body that has not been read to its end. The watch
+//     reads the connection, where the rest of the body still is, so it
+//     starts only once the body has been consumed (Body, a BodyReader read
+//     to EOF, a parsed form). A handler that never reads the body of a
+//     request that has one gets no disconnect notice;
 //   - the client has already sent its next request (HTTP pipelining): it has
 //     committed to reading the responses, and a close it makes after that —
 //     shutting down its write side after its last request — must not cancel
@@ -169,14 +212,32 @@ func (req *request) Context() stdctx.Context {
 			parent = stdctx.Background()
 		}
 		req.reqCtx, req.reqCancel = stdctx.WithCancel(parent)
-		// Buffered() > 0 means the next request is already queued behind this
-		// one: the pipelining case above. A synthetic request's reader is
-		// bufio.NewReader(nil), and its cr has no conn, so startWatch no-ops.
-		if !req.noWatch && req.reader.Buffered() == 0 {
-			req.cr.startWatch(req.reqCancel)
-		}
+		req.startWatchIfIdle()
 	}
 	return req.reqCtx
+}
+
+// startWatchIfIdle starts the disconnect watch if the request's context is
+// in use and the connection has nothing more of this request, or of a next
+// one, to deliver:
+//
+//   - the body has been read to its end. The watch reads one byte ahead,
+//     and with body bytes still to come that byte would be the body's. So
+//     Context() on a request whose body is unread starts nothing, and the
+//     read that reaches the body's end calls this again (afterBodyRead);
+//   - Buffered() == 0. Bytes already buffered are the next request, queued
+//     behind this one: the pipelining case in Context's doc;
+//   - the connection's reads have not been handed elsewhere (noWatch).
+//
+// A synthetic request's reader is bufio.NewReader(nil), and its cr has no
+// conn, so startWatch no-ops.
+func (req *request) startWatchIfIdle() {
+	if req.reqCtx == nil || req.noWatch || !req.bodyComplete() {
+		return
+	}
+	if req.reader.Buffered() == 0 {
+		req.cr.startWatch(req.reqCancel)
+	}
 }
 
 // releaseConn hands the connection's reads to someone else for the rest of
@@ -208,6 +269,10 @@ func (req *request) readAhead() []byte {
 // (it must not outlive the request — the pooled context it points into is
 // about to be reused) and cancels the request context. Idempotent.
 func (req *request) finishContext() {
+	// Proxy's upstream request must have stopped reading the body before
+	// the struct is reused. handleRequest ends the lease after the
+	// response; this covers the paths that never get there (a panic).
+	req.endBodyLease()
 	req.cr.stopWatch()
 	if req.reqCancel != nil {
 		req.reqCancel()
@@ -340,9 +405,8 @@ func (req *request) addParameter(key string, value string) {
 	})
 }
 
-func (req *request) Body() []byte {
-	return req.body
-}
+// Body and BodyReader are in request_body.go, with the lazy reading they
+// sit on.
 
 // GetPostValue retrieves the value of a non-multipart form POST parameter.
 func (req *request) GetPostValue(key string) string {
@@ -355,6 +419,16 @@ func (req *request) PostArgs() *Args {
 	return &req.postArgs
 }
 
+// parsePostArgs parses a urlencoded body into postArgs, on first use.
+//
+// It used to run in handleRequest for every urlencoded request, which was
+// free while the body was already in memory. With a lazy body an eager
+// parse would read the body of every such request before routing, wanted or
+// not, so the parse now waits for the first GetPostValue, PostArgs or
+// FormValue, as the multipart parse already did. Body() does the reading
+// (and ends the handler with ErrAbortHandler if the body cannot be read:
+// these accessors have no error to return), and keeps the bytes, so Body()
+// after a form lookup still returns them.
 func (req *request) parsePostArgs() {
 	if req.parsedPostArgs {
 		return
@@ -364,8 +438,11 @@ func (req *request) parsePostArgs() {
 		return
 	}
 
-	req.postArgs.ParseBytes(req.body)
+	req.postArgs.ParseBytes(req.Body())
 	req.parsedPostArgs = true
+	if req.debugLog != nil {
+		req.debugLog.Debug("rweb: form args", "path", req.path, "args", req.postArgs.String())
+	}
 }
 
 // ParseMultipartForm parses the request body as a multipart form.
@@ -415,9 +492,15 @@ func (req *request) ParseMultipartForm() error {
 		maxMem = defaultMultipartMaxMemory
 	}
 
-	// req.body is already buffered, so wrapping with bytes.NewReader is cheap
-	// and lets us re-read if needed (it isn't, currently — caching prevents that).
-	reader := multipart.NewReader(bytes.NewReader(req.body), boundary)
+	// The form is parsed from the body as a stream (BodyReader): what
+	// Body() has already buffered, if a handler or middleware called it
+	// first, and otherwise straight off the connection. In the second case
+	// an upload is never held in memory whole: ReadForm keeps up to maxMem
+	// of file data and spills the rest to temp files as it reads. The body
+	// is consumed by this, so a Body() call after the parse returns only
+	// what Body() had buffered before it (nothing, usually). A body that
+	// cannot be read surfaces as ReadForm's error, cached like any other.
+	reader := multipart.NewReader(req.BodyReader(), boundary)
 	form, err := reader.ReadForm(maxMem)
 	if err != nil {
 		req.multipartParseErr = err
@@ -504,6 +587,13 @@ func (req *request) FormValue(key string) string {
 		// here (the caller asked for a value, not an error); use GetFormFile
 		// when the underlying parse error matters.
 		if err := req.ParseMultipartForm(); err != nil || req.multipartForm == nil {
+			// A form that does not parse reads as "no such value", as it
+			// always has. A body that did not arrive is another matter:
+			// "" would let the handler act on a request it only half
+			// received, so it ends the handler, as Body() does.
+			if req.bodyFailed() {
+				panic(ErrAbortHandler)
+			}
 			return ""
 		}
 		if values := req.multipartForm.Value[key]; len(values) > 0 {

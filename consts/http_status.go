@@ -40,6 +40,10 @@ const ( // HTTP status codes
 	StatusExpectationFailed   = 417
 	StatusUpgradeRequired     = 426
 
+	// StatusRequestEntityTooLarge keeps the reason phrase rweb has always
+	// sent for 413 (HTTPPayloadTooLarge); RFC 9110 now calls it Content
+	// Too Large.
+	StatusRequestEntityTooLarge       = 413
 	StatusRequestHeaderFieldsTooLarge = 431
 
 	StatusInternalServerError     = 500
@@ -89,6 +93,7 @@ var StatusTextFromCode = map[int]string{
 	StatusExpectationFailed:   "Expectation Failed",
 	StatusUpgradeRequired:     "Upgrade Required",
 
+	StatusRequestEntityTooLarge:       "Request Entity Too Large",
 	StatusRequestHeaderFieldsTooLarge: "Request Header Fields Too Large",
 
 	StatusInternalServerError:     "Internal Server Error",

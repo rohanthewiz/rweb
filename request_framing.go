@@ -1,11 +1,8 @@
 package rweb
 
 import (
-	"bufio"
 	"errors"
-	"io"
 	"math"
-	"slices"
 	"strings"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -81,8 +78,9 @@ func transferEncodingReply(v string) string {
 var errBadChunk = errors.New("rweb: malformed chunked request body")
 
 // errChunkTooLarge reports a chunked body over the size cap; it is answered
-// 413.
-var errChunkTooLarge = errors.New("rweb: chunked request body too large")
+// 413. It is ErrBodyTooLarge (request_body.go) under its older name: the
+// cap is one rule, whichever framing meets it.
+var errChunkTooLarge = ErrBodyTooLarge
 
 // parseChunkSizeLine returns the size from a chunk-size line:
 //
@@ -125,19 +123,33 @@ func parseChunkSizeLine(line string) (int64, error) {
 }
 
 // chunkExcessMax is how far chunk framing may run ahead of chunk data. See
-// readChunkedBody.
+// nextChunk.
 const chunkExcessMax = 16 << 10
 
-// readChunkedBody reads a chunked body (RFC 9112 §7.1) off r and appends it
-// to *body:
+// nextChunk reads the framing that sits between two runs of chunk data in a
+// chunked body (RFC 9112 §7.1), leaving the connection at the first data
+// byte of the next chunk, whose size it stores in lazy.remain:
 //
 //	chunk-size [ chunk-ext ] CRLF   chunk-data CRLF   ...   "0" [ chunk-ext ] CRLF
 //	trailer-field CRLF ...   CRLF
+//	                                          ▲────────────────────────────▲
+//	                                          one call reads: the CRLF closing
+//	                                          the previous chunk's data (if
+//	                                          any), then the next size line
 //
-// lr reads the size and trailer lines: each size line within chunkLineMax,
-// the trailer section within maxTrailer (the head's MaxHeaderBytes, since
-// trailer fields are header fields; they are read and discarded). maxBody is
-// the resolved body cap, <= 0 for none.
+// For the last chunk (size 0) it also reads the trailer section up to its
+// empty line and reports last: the body is complete and the connection is
+// at the next request.
+//
+// This is the decoder that readChunkedBody used to run as one loop over the
+// whole body, into memory, before the handler. The body is now read on
+// demand (request_body.go), so the loop is cut at the chunk boundary: the
+// data in between is read by readBodyRaw straight into the caller's buffer.
+// Every check is the same.
+//
+// req.lr reads the size and trailer lines: each size line within
+// chunkLineMax, the trailer section within the head's MaxHeaderBytes, since
+// trailer fields are header fields (they are read and discarded).
 //
 // Extensions are allowed but bounded by an overhead allowance taken from
 // net/http's chunked reader: framing bytes accrue as excess, each chunk
@@ -146,75 +158,82 @@ const chunkExcessMax = 16 << 10
 // stay within it; a long extension on every small chunk does not, so the
 // cap on body size cannot be dodged by sending framing instead of data.
 //
-// Errors: errBadChunk (400), errChunkTooLarge (413), errHeaderTooLarge from
+// Errors: errBadChunk (400), ErrBodyTooLarge (413), errHeaderTooLarge from
 // the trailers (431), or the connection's own error (a deadline, EOF).
-func readChunkedBody(r *bufio.Reader, lr *lineReader, body *[]byte, maxBody int64, maxTrailer int) error {
-	var excess int64
-	var crlf [2]byte
-	for {
-		lr.reset(chunkLineMax)
-		line, err := lr.readLine()
-		if err != nil {
-			if errors.Is(err, errHeaderTooLarge) {
-				return errBadChunk // a size line no client would send
+func (req *request) nextChunk() (last bool, err error) {
+	lb := &req.lazy
+	r, lr := req.reader, &req.lr
+
+	// The previous chunk's data must end in exactly CRLF. Skipping to the
+	// next LF, as rweb once did, let "5\r\nhelloXX..." pass, with the bytes
+	// before the LF read by rweb as junk and by another parser as the next
+	// chunk. Two ReadByte calls rather than ReadFull into a local array,
+	// which would escape to the heap once per chunk.
+	if lb.inChunk {
+		for _, want := range [2]byte{'\r', '\n'} {
+			c, err := r.ReadByte()
+			if err != nil {
+				return false, err
 			}
-			return err
-		}
-		size, err := parseChunkSizeLine(line)
-		if err != nil {
-			return err
-		}
-
-		excess += int64(len(line)) + 2            // the size line, and the CRLF after the data
-		excess -= 16 + 2*min(size, math.MaxInt32) // min: 2*size must not overflow
-		if excess < 0 {
-			excess = 0
-		}
-		if excess > chunkExcessMax {
-			return errBadChunk
-		}
-
-		if size == 0 { // last chunk: then trailers, up to an empty line
-			lr.reset(maxTrailer)
-			for {
-				line, err := lr.readLine()
-				if err != nil {
-					return err
-				}
-				if isBlankLine(line) { // "\r\n" or a bare "\n", as for the head
-					return nil
-				}
+			if c != want {
+				return false, errBadChunk
 			}
 		}
+		lb.inChunk = false
+	}
 
-		// The cap is checked as "size fits in what is left" rather than
-		// "len + size <= cap", which a size near MaxInt64 would overflow
-		// into a negative sum and pass. With no cap, a size that cannot be
-		// added to the body at all is malformed.
-		have := int64(len(*body))
-		if maxBody > 0 {
-			if size > maxBody-have {
-				return errChunkTooLarge
+	lr.reset(chunkLineMax)
+	line, err := lr.readLine()
+	if err != nil {
+		if errors.Is(err, errHeaderTooLarge) {
+			return false, errBadChunk // a size line no client would send
+		}
+		return false, err
+	}
+	size, err := parseChunkSizeLine(line)
+	if err != nil {
+		return false, err
+	}
+
+	lb.excess += int64(len(line)) + 2            // the size line, and the CRLF after the data
+	lb.excess -= 16 + 2*min(size, math.MaxInt32) // min: 2*size must not overflow
+	if lb.excess < 0 {
+		lb.excess = 0
+	}
+	if lb.excess > chunkExcessMax {
+		return false, errBadChunk
+	}
+
+	if size == 0 { // last chunk: then trailers, up to an empty line
+		maxTrailer := 0
+		if req.lim != nil {
+			maxTrailer = req.lim.maxHeaderBytes
+		}
+		lr.reset(maxTrailer)
+		for {
+			line, err := lr.readLine()
+			if err != nil {
+				return false, err
 			}
-		} else if size > math.MaxInt-have {
-			return errBadChunk
-		}
-
-		// Read chunk data directly into the pooled body buffer
-		start := len(*body)
-		*body = slices.Grow(*body, int(size))[:start+int(size)]
-		if _, err := io.ReadFull(r, (*body)[start:]); err != nil {
-			return err
-		}
-
-		// The data must end in exactly CRLF. Skipping to the next LF, as
-		// before, let "5\r\nhelloXX..." pass, with the bytes before the LF
-		// read by rweb as junk and by another parser as the next chunk.
-		if _, err := io.ReadFull(r, crlf[:]); err != nil {
-			return err
-		}
-		if crlf != [2]byte{'\r', '\n'} {
-			return errBadChunk
+			if isBlankLine(line) { // "\r\n" or a bare "\n", as for the head
+				return true, nil
+			}
 		}
 	}
+
+	// The cap is checked as "size fits in what is left" rather than
+	// "read + size <= cap", which a size near MaxInt64 would overflow into
+	// a negative sum and pass. With no cap, a size that cannot be added to
+	// the count at all is malformed.
+	if lb.max > 0 {
+		if size > lb.max-lb.read {
+			return false, ErrBodyTooLarge
+		}
+	} else if size > math.MaxInt64-lb.read {
+		return false, errBadChunk
+	}
+
+	lb.remain = size
+	lb.inChunk = true
+	return false, nil
 }

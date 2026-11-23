@@ -82,7 +82,7 @@ default and a negative value disables it**.
 | `MaxHeaderBytes` | 1 MB | request line + all headers of one request | `431`, close |
 | `ReadHeaderTimeout` | 30 s | first byte of a request → end of its headers (new conn: also the TLS handshake and the wait for the first byte) | `408`, close (silent close if nothing arrived) |
 | `IdleTimeout` | 120 s | wait for the next request on a keep-alive conn | silent close |
-| `ReadTimeout` | off | reading the request body | `408`, close |
+| `ReadTimeout` | off | reading the request body, from the handler's first read of it | `408`, close |
 | `WriteTimeout` | off | any single stalled write (each ≤ 1 MB piece), **not** the whole response | response ends, close |
 | `SSECfg.WriteTimeout` | 30 s | each flush of an event stream (on even when `WriteTimeout` is off) | stream ends, cleanup runs |
 | `ProxyResponseHeaderTimeout` | 60 s | a `Proxy` route's wait for the upstream's response headers (not the body) | `504` (see Reverse Proxy) |
@@ -181,9 +181,10 @@ lines and trailers. The one exception is the end of chunk data, which must be
 exactly CRLF.
 
 `Expect: 100-continue` on an HTTP/1.1 request with a body gets
-`HTTP/1.1 100 Continue` just before the body is read, after the framing and
-`MaxRequestBodySize` checks, so a request that will be refused (e.g. `413`) never
-has its body sent. Any other `Expect` value gets `417` and a close. HTTP/1.0
+`HTTP/1.1 100 Continue` when a handler first reads the body, so a request that is
+refused (`413` over `MaxRequestBodySize` or `MaxBody`) or whose handler never reads
+the body (a `401`, an unknown path) never has its body sent; the connection closes
+after such a response. Any other `Expect` value gets `417` and a close. HTTP/1.0
 requests get no `100`.
 
 ### Keep-Alive and `Connection: close` (v0.2.1+)
@@ -673,6 +674,46 @@ s.StaticFilesWithOptions("/assets/", "dist/assets", 1, rweb.StaticOptions{
   them), and a POST to an unknown path gets 405.
 - An invalid `Index` or `SPAFallback` is refused at registration (a message is printed and
   no route is added).
+
+## Request Bodies (v0.2.1+: read on demand)
+
+Nothing of a body is read before a handler asks. `Body()` reads it whole on first use;
+`BodyReader()` streams it; a multipart form is parsed straight off the connection.
+
+```go
+data := ctx.Request().Body()                       // whole body, in memory
+
+s.Post("/upload/:name", func(ctx rweb.Context) error { // streamed, never held whole
+    f, err := os.Create(filepath.Join("uploads", filepath.Base(ctx.Request().Param("name"))))
+    if err != nil {
+        return err
+    }
+    defer f.Close()
+    _, err = io.Copy(f, ctx.Request().BodyReader())
+    return err // a body that could not be read: the server answers 400/408/413 itself
+})
+
+api := s.Group("/api", rweb.MaxBody(1<<20))         // per-group cap, 413 over it
+```
+
+- `BodyReader()` yields what `Body()` has buffered, then the rest from the connection. With no
+  earlier `Body()` it is one-shot: a later `Body()` returns only what was left. Handler
+  goroutine only, and not after the handler returns (`rweb.ErrBodyReadAfterHandler`).
+- A body that cannot be read (malformed chunks, over the cap, past `ReadTimeout`, client gone)
+  is answered by the server (`400`/`408`/`413`) and the connection closed, replacing whatever
+  the handler wrote. `BodyReader()`'s `Read` returns the error (`rweb.ErrBodyTooLarge` for the
+  cap); `Body()`, `GetPostValue`, `PostArgs` and `FormValue` end the handler by panicking with
+  `rweb.ErrAbortHandler` (deferred functions run; recovery middleware must re-panic it). A
+  handler may panic with it to drop a request with no response.
+- An unread remainder is drained after the handler when small (≤ 256 KB within 1 s), keeping
+  the connection; otherwise the response carries `Connection: close`. `100 Continue` is sent
+  only when something reads the body.
+- `rweb.MaxBody(n)` (for `s.Use` / `s.Group`) only lowers the cap below `MaxRequestBodySize`.
+  A `Content-Length` over `n` is refused before the rest of the chain; a chunked body when it
+  passes `n`.
+- `Request().Context()` sees a client disconnect only after the body has been read to its end.
+- After a multipart form has been parsed from the connection, `Body()` is empty; call `Body()`
+  first if both are needed.
 
 ## File Uploads
 
@@ -1273,7 +1314,11 @@ From v0.2.1:
   the upstream sends them. An upstream `Content-Length` is kept; an unknown length goes chunked
   (unframed, ended by close, to an HTTP/1.0 client). An upstream that ends short closes the
   client's connection, so a truncated body never looks complete. HEAD, 204 and 304 are sent
-  without a body. The **request** body is still read in full before the upstream call.
+  without a body. A **request** body up to 256 KB is buffered and sent with a Content-Length;
+  a larger one is streamed to the upstream as the client sends it (chunked if the client sent
+  it chunked), with the client's `Expect: 100-continue` passed on. An upstream that answers
+  before reading the whole upload has its answer relayed and the client's connection closed.
+  Streamed requests are not retried on a stale upstream connection (a 502); buffered ones are.
 - **Hop-by-hop headers are dropped both ways**: `Connection` and every header it names,
   `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`,
   `Proxy-Authenticate`, `Proxy-Authorization`; also the request's `Expect` (rweb already
@@ -1329,7 +1374,8 @@ req.Query()               // Raw query string: "page=2&sort=name"
 req.QueryParam("page")    // Single query parameter
 req.PathParam("id")       // Route parameter
 req.Header("Authorization") // Request header
-req.Body()                // Raw request body bytes
+req.Body()                // Raw request body bytes (read on first call; see Request Bodies)
+req.BodyReader()          // The body as an io.Reader, streamed from the connection (v0.2.1+)
 req.FormValue("field")    // Form field value
 req.GetPostValue("field") // POST form value
 req.Context()             // context.Context, cancelled when the client disconnects (v0.2.0+)

@@ -70,11 +70,17 @@ type ServerOptions struct {
 	MultipartMaxMemory int64
 
 	// MaxRequestBodySize caps the request body size in bytes, for both
-	// Content-Length and chunked bodies. Without a cap, a single request
-	// claiming an enormous Content-Length forces an equally enormous
-	// allocation. Requests over the cap receive 413 Request Entity Too Large
-	// and the connection is closed. 0 selects the default (100 MB);
-	// a negative value disables the cap entirely.
+	// Content-Length and chunked bodies. Requests over the cap receive 413
+	// Request Entity Too Large and the connection is closed: a
+	// Content-Length over it before any handler runs, a chunked body when
+	// the read of it passes the cap. 0 selects the default (100 MB); a
+	// negative value disables the cap entirely.
+	//
+	// The body is read only when a handler asks for it (Body, BodyReader,
+	// the form accessors), so the cap bounds what Body() may hold in memory
+	// and what any reader may be made to process; a body nobody reads costs
+	// nothing whatever its size. rweb.MaxBody lowers the cap for the routes
+	// it is put in front of.
 	MaxRequestBodySize int64
 
 	// StaticContainSymlinks makes StaticFiles / StaticFilesAbs refuse (404) a
@@ -115,10 +121,13 @@ type ServerOptions struct {
 	// response. Default 120 s.
 	IdleTimeout time.Duration
 
-	// ReadTimeout bounds reading a request's body, from the end of the head.
-	// A body that does not arrive in time gets 408. Off by default: large
-	// uploads on slow links are legitimate, and MaxRequestBodySize already
-	// bounds the size.
+	// ReadTimeout bounds reading a request's body: the whole body must have
+	// arrived within it, counted from the handler's first read of the body
+	// (the body is read on demand, so time the handler spends before asking
+	// for it is not charged to the client; time it spends between reads
+	// is). A body that does not arrive in time gets 408. Off by default:
+	// large uploads on slow links are legitimate, and MaxRequestBodySize
+	// already bounds the size.
 	ReadTimeout time.Duration
 
 	// WriteTimeout bounds any single stalled write of a response: each piece
@@ -390,8 +399,8 @@ func WithIdleTimeout(d time.Duration) ServerOption {
 	}
 }
 
-// WithReadTimeout bounds reading a request's body. Off by default (0 or
-// negative).
+// WithReadTimeout bounds reading a request's body, from the handler's first
+// read of it. Off by default (0 or negative).
 func WithReadTimeout(d time.Duration) ServerOption {
 	return func(opts *ServerOptions) {
 		opts.ReadTimeout = d
@@ -1146,8 +1155,18 @@ func (s *Server) WebSocketWithOptions(path string, opts WSOptions, handler WebSo
 //     3xx included: redirects are not followed by the proxy. An absolute
 //     Location or Content-Location on the target's own host is mapped under
 //     pathPrefix; relative ones pass through (see proxyRedirect in proxy.go).
-//   - The response body is streamed (rweb.Stream), not read into memory; the
-//     request body is still read in full before the upstream call.
+//   - The response body is streamed (rweb.Stream), not read into memory.
+//   - A request body up to 256 KB is read first and sent to the upstream
+//     with a Content-Length. A larger one is streamed to the upstream as
+//     the client sends it, never held in memory: with the client's
+//     Content-Length, or chunked if the client sent it chunked. For a
+//     streamed upload the client's "Expect: 100-continue" is passed on, so
+//     an upstream that refuses on the headers stops the upload at the
+//     client. If the upstream answers before it has read the whole upload,
+//     the client gets that answer and its connection is closed after it.
+//     A streamed request cannot be replayed, so it is not retried when the
+//     upstream closes a kept-alive connection under it (a 502); buffered
+//     ones are.
 //   - Hop-by-hop headers (Connection and the headers it names, Keep-Alive,
 //     TE, Trailer, Transfer-Encoding, Upgrade, Proxy-*) are dropped in both
 //     directions. X-Forwarded-For gets the client's IP appended;
@@ -1256,14 +1275,74 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			}
 		}()
 
-		if ctxReq.Body() != nil {
-			buf := bytes.NewBuffer(ctxReq.Body())
-			req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, buf)
-		} else {
-			req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, nil)
+		// A WebSocket handshake is told apart here, ahead of the body: it
+		// decides how the body is passed (below) as well as which headers
+		// are put back (further down).
+		wsUpgrade := ctx.IsWebSocketUpgrade()
+
+		// The request body (N-057). Small bodies are buffered and sent as
+		// before; large ones are streamed from the client's connection:
+		//
+		//	Content-Length ≤ 256 KB       buffered (Body), replayable
+		//	chunked, ends within 256 KB   buffered, sent with a Content-Length
+		//	Content-Length > 256 KB       streamed, same Content-Length
+		//	chunked, longer               first 256 KB from memory, the rest
+		//	                              streamed; sent chunked
+		//	WebSocket handshake           buffered, whatever its size, so the
+		//	                              tunnel starts at the right byte
+		//
+		// proxyBufferBodyMax (proxy.go) says why small bodies stay buffered.
+		// A body that fails while being buffered ends the handler quietly:
+		// the server answers such a request itself (settleBody).
+		rq, _ := ctxReq.(*request) // nil only for a foreign ItfRequest, which is buffered as before
+		wholeBody := true
+		if rq != nil && !wsUpgrade {
+			if rq.lazy.kind == bodySized && rq.lazy.err == nil && rq.lazy.remain > proxyBufferBodyMax {
+				wholeBody = false // known to be large: not a byte is buffered
+			} else {
+				whole, err := rq.bufferBodyUpTo(proxyBufferBodyMax)
+				if err != nil {
+					return nil
+				}
+				wholeBody = whole
+			}
 		}
-		if err != nil {
-			return err
+
+		// upBody is the streaming body, nil when the body is buffered.
+		var upBody *proxyRequestBody
+		if wholeBody {
+			if ctxReq.Body() != nil {
+				buf := bytes.NewBuffer(ctxReq.Body())
+				req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, buf)
+			} else {
+				req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, nil)
+			}
+			if err != nil {
+				return err
+			}
+		} else {
+			// What bufferBodyUpTo read (a chunked body's first 256 KB) goes
+			// first, from memory; the rest comes off the connection through
+			// proxyRequestBody, which the Transport reads on its own
+			// goroutine. The length is passed on when the client gave one;
+			// otherwise the Transport sends the body chunked.
+			upBody = newProxyRequestBody(rq)
+			var upstream io.Reader = upBody
+			length := int64(-1)
+			if rq.lazy.kind == bodySized {
+				length = int64(len(rq.body)) + rq.lazy.remain
+			}
+			if len(rq.body) > 0 {
+				upstream = io.MultiReader(bytes.NewReader(rq.body), upBody)
+			}
+			req, err = http.NewRequestWithContext(upCtx, ctx.Request().Method(), proxyURL, upstream)
+			if err != nil {
+				return err
+			}
+			req.ContentLength = length
+			// From here until the lease ends (settleBody, or below on an
+			// error), the body's reading state belongs to the Transport.
+			rq.lazy.lease = upBody
 		}
 
 		// Take the original headers too. Add, not Set: a header the client
@@ -1276,12 +1355,22 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 			req.Header.Add(hdr.Key, hdr.Value)
 		}
 		removeHopByHop(req.Header)
-		// The client's 100-continue expectation was answered by this server
-		// (serveConn sent 100 Continue before reading the body), and the
-		// body is already in memory. Passing it on would only hold the
-		// upload back for a round trip, or for the transport's
+		// The client's 100-continue expectation. For a buffered body it
+		// has been answered by this server (100 Continue went out when the
+		// body was read) and the body is in memory: passing it on would only
+		// hold the upload back for a round trip, or for the transport's
 		// ExpectContinueTimeout (1 s) on an upstream that ignores it.
-		req.Header.Del(consts.HeaderExpect)
+		//
+		// For a streamed body that nobody has started reading, the client
+		// is still waiting, and the expectation is passed on: the Transport
+		// then reads the body (which is what sends the client its 100
+		// Continue) only once the upstream has said 100 Continue itself, or
+		// let that 1 s pass. An upstream that turns the request down on its
+		// headers (401, 413) thus stops the upload at the client, which is
+		// what the expectation is for.
+		if upBody == nil || !rq.lazy.continueOwed {
+			req.Header.Del(consts.HeaderExpect)
+		}
 		setForwardedHeaders(req.Header, ctx)
 
 		// A WebSocket handshake keeps its upgrade (N-066). removeHopByHop
@@ -1295,14 +1384,31 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		// -Extensions pass as they are: the handshake, subprotocol and
 		// compression are agreed between the client and the upstream, and
 		// this hop only copies bytes.
-		wsUpgrade := ctx.IsWebSocketUpgrade()
 		if wsUpgrade {
 			req.Header.Set(consts.HeaderConnection, consts.HeaderUpgrade)
 			req.Header.Set(consts.HeaderUpgrade, "websocket")
 		}
 
 		resp, err := client.Do(req)
+		if upBody != nil {
+			// The handler is answering from here on: no 100 Continue and
+			// no disconnect watch may start from the upload any more.
+			upBody.responded()
+		}
 		if err != nil {
+			if upBody != nil {
+				// The upstream call is over, but the Transport may still
+				// be inside a read of the client's body; take the body
+				// back before looking at it. If reading it is what failed
+				// (malformed chunk, over the cap, timed out, client gone),
+				// that is the client's request failing, not the upstream:
+				// no 502 and no error log, the server answers it as it
+				// does for any unreadable body (settleBody).
+				rq.endBodyLease()
+				if rq.bodyFailed() {
+					return nil
+				}
+			}
 			if reqCtx.Err() != nil {
 				return clientGone(ctx)
 			}
@@ -1327,6 +1433,12 @@ func (s *Server) proxy(pathPrefix string, targetURL string, prefixTokensToRemove
 		// from the upstream's origin check, a 400, a redirect) goes to the
 		// client below like any response.
 		if resp.StatusCode == http.StatusSwitchingProtocols {
+			// A handshake's body is buffered, so there is no lease here
+			// unless the upstream switched protocols unasked, which
+			// relayProxiedUpgrade answers with 502.
+			if upBody != nil {
+				rq.endBodyLease()
+			}
 			return s.relayProxiedUpgrade(ctx, resp, wsUpgrade)
 		}
 
@@ -2158,7 +2270,14 @@ func (s *Server) serveConn(tc *trackedConn) {
 	// (lineReader), and every read phase runs under its own deadline (rd).
 	// The life of those deadlines across requests is drawn in conn_limits.go.
 	lim := &s.limits
-	lr := lineReader{r: ctx.reader}
+	// The line reader lives in the request, not here: a chunked body is
+	// now read from inside the handler (request_body.go), and its size and
+	// trailer lines go through the same reader and scratch buffer. Reset
+	// for this connection, and dropped with it below so a pooled context
+	// does not hold a scratch buffer grown by a long header line.
+	ctx.request.lr = lineReader{r: ctx.reader}
+	lr := &ctx.request.lr
+	defer func() { ctx.request.lr = lineReader{} }()
 	rd := readDeadline{conn: conn}
 	firstRequest := true
 
@@ -2498,15 +2617,26 @@ func (s *Server) serveConn(tc *trackedConn) {
 			maxBody = defaultMaxRequestBodySize
 		}
 
-		// The head is in. The body, if any, is read under ReadTimeout (or no
-		// deadline, the default): the head's deadline must not carry over, or
-		// an upload would have to finish within ReadHeaderTimeout of its
-		// first byte.
-		if contentLen > 0 || isChunked {
-			rd.set(lim.read)
-		}
-
-		// Read the request body if present
+		// The head is in. The body, if any, is NOT read here (N-057): its
+		// framing is recorded in ctx.request.lazy and the bytes stay on the
+		// connection until a handler asks for them (Body, BodyReader, a
+		// form accessor), or handleRequest settles what nobody asked for
+		// (settleBody). See request_body.go for the whole picture.
+		//
+		// What is still decided here, before any handler:
+		//   - a Content-Length over the server-wide cap is refused (413)
+		//     without reading or allocating anything, and without 100
+		//     Continue, so the client never sends it;
+		//   - the body of a HEAD or TRACE is consumed and discarded, as
+		//     before: it is ignored for these methods, and discarding it
+		//     here keeps Body() empty for them.
+		//
+		// 100 Continue, which used to go out just below, is now sent with
+		// the first read of the body (startBody). The reason given above
+		// for holding it back until every check has passed extends
+		// naturally: the handler's own checks (auth, a per-route MaxBody)
+		// are checks too, and a request they turn away never has its body
+		// sent.
 		if contentLen > 0 {
 			// Reject oversized bodies before allocating anything — the
 			// client-supplied Content-Length must not dictate our memory use.
@@ -2515,11 +2645,16 @@ func (s *Server) serveConn(tc *trackedConn) {
 				return
 			}
 
-			if sendContinue && !writeContinue() {
-				return
-			}
-
 			if method == consts.MethodHead || method == consts.MethodTrace {
+				// Read under ReadTimeout (or no deadline, the default): the
+				// head's deadline must not carry over, or the body would
+				// have to finish within ReadHeaderTimeout of its first byte.
+				rd.set(lim.read)
+
+				if sendContinue && !writeContinue() {
+					return
+				}
+
 				// Body is ignored for these methods; consume without buffering
 				// so the connection stays aligned for the next request.
 				_, err = io.CopyN(io.Discard, ctx.reader, contentLen)
@@ -2528,51 +2663,34 @@ func (s *Server) serveConn(tc *trackedConn) {
 					return
 				}
 			} else {
-				// Read directly into the pooled body buffer — no intermediate
-				// allocation + copy.
-				start := len(ctx.request.body)
-				ctx.request.body = slices.Grow(ctx.request.body, int(contentLen))[:start+int(contentLen)]
-				_, err = io.ReadFull(ctx.reader, ctx.request.body[start:])
-				if err != nil {
-					if s.options.Debug { // the client's doing: it stopped sending
-						s.log.Debug("rweb: reading request body", "path", ctx.request.path, "error", err)
-					}
-					headFailed(err)
-					return
+				ctx.request.lazy = lazyBody{
+					kind:         bodySized,
+					remain:       contentLen,
+					declared:     contentLen,
+					max:          maxBody,
+					continueOwed: sendContinue,
 				}
 			}
 
 		} else if isChunked {
 			// Chunked encoding: size lines, data, CRLFs and trailers are all
-			// checked as they are read (see readChunkedBody), and the body
-			// cap applies to the accumulated data. A chunked body's size is
-			// unknown up front, so 100 Continue cannot wait for the cap check.
-			if sendContinue && !writeContinue() {
-				return
-			}
-			err = readChunkedBody(ctx.reader, &lr, &ctx.request.body, maxBody, lim.maxHeaderBytes)
-			switch {
-			case err == nil:
-			case errors.Is(err, errBadChunk):
-				refuse(consts.HTTPBadRequest)
-				return
-			case errors.Is(err, errChunkTooLarge):
-				refuse(consts.HTTPPayloadTooLarge)
-				return
-			default: // over the trailer budget, a deadline, or the client left
-				headFailed(err)
-				return
+			// checked as they are read (nextChunk, request_framing.go), and
+			// the body cap applies to the data as it accumulates, since a
+			// chunked body's size is unknown up front.
+			ctx.request.lazy = lazyBody{
+				kind:         bodyChunked,
+				declared:     -1,
+				max:          maxBody,
+				continueOwed: sendContinue,
 			}
 		}
 
 		// From here the conn's reads belong to the handler and whatever it
-		// starts: the disconnect watch, a WebSocket, GetConn. None of them is
-		// reading a request, so no request deadline may reach them.
+		// starts: the body reader (which arms ReadTimeout itself, from its
+		// first read, and clears it at the body's end), the disconnect
+		// watch, a WebSocket, GetConn. The head's deadline must not reach
+		// any of them.
 		rd.set(0)
-
-		if s.options.Debug && len(ctx.request.body) > 0 {
-			s.log.Debug("rweb: request body", "path", ctx.request.path, "body", string(ctx.request.body))
-		}
 
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
@@ -2696,7 +2814,7 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	}
 	if s.options.Debug {
 		s.log.Debug("rweb: handling request", "method", method, "contentType", string(ctx.ContentType),
-			"bodyLength", len(ctx.request.body), "scheme", ctx.scheme, "host", ctx.host,
+			"bodyLength", ctx.request.declaredBodyLen(), "scheme", ctx.scheme, "host", ctx.host,
 			"path", ctx.path, "query", ctx.query)
 	}
 
@@ -2712,16 +2830,12 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	// result or the error is cached for the rest of the request), and
 	// Clean removes any temp files as before.
 	//
-	// urlencoded bodies are still parsed eagerly: that is an in-memory scan
-	// of a body already read, with no disk cost, and Debug prints the args.
-	if len(ctx.request.body) > 0 {
-		if hasContentTypePrefix(ctx.ContentType, consts.BytFormData) {
-			ctx.request.parsePostArgs()
-			if s.options.Debug {
-				s.log.Debug("rweb: form args", "path", ctx.path, "args", ctx.request.postArgs.String())
-			}
-		}
-	}
+	// urlencoded bodies are parsed on first use as well (parsePostArgs,
+	// Request.go), since N-057: the body is no longer in memory at this
+	// point, and parsing it here would read the body of every urlencoded
+	// request before routing, wanted or not. Under Debug the args are
+	// logged when they are parsed, and the body when it is buffered
+	// (logBufferedBody), rather than here.
 
 	// Call the first handler in the chain
 	// (which will call any subsequent handlers)
@@ -2729,9 +2843,20 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	// A panic in any handler is recovered here and routed through the
 	// error handler as a 500 — one bad handler must not take down the
 	// whole process (or even the connection).
+	//
+	// One panic value is not a failure: ErrAbortHandler ends the handler
+	// on purpose, raised by Body() and the other error-less body accessors
+	// when the body cannot be read, or by the application to drop a
+	// request (see ErrAbortHandler, request_body.go). It is noted and
+	// swallowed here; settleBody below decides what the client gets.
+	aborted := false
 	err := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
+				if e, ok := r.(error); ok && errors.Is(e, ErrAbortHandler) {
+					aborted = true
+					return
+				}
 				err = fmt.Errorf("panic in handler for %q: %v\n%s", ctx.path, r, debug.Stack())
 			}
 		}()
@@ -2747,6 +2872,15 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 		if !isWebSocketSessionEnd(err) {
 			s.log.Error("rweb: WebSocket handler failed", "path", ctx.path, "error", err)
 		}
+	case err != nil && ctx.request.lazy.lease == nil && ctx.request.bodyFailed():
+		// The handler returned an error and the request body could not be
+		// read: almost always the same event (a BodyReader read failed and
+		// the handler passed the error on). settleBody answers such a
+		// request itself, with the 400/408/413 the failure calls for, so
+		// the error handler's page would be thrown away, and its error log
+		// line would blame the application for a client's broken upload.
+		// (With a lease the body state is not readable here; Proxy ends
+		// its lease itself before returning an error.)
 	case err != nil:
 		// An error response replaces a stream the handler attached before
 		// failing (rweb.Stream, SendFile). The error handler writes its
@@ -2770,9 +2904,40 @@ func (s *Server) handleRequest(ctx *context, method string, url string, respWrit
 	// sendSSE starts its own reader on the conn in writeResponse, and two
 	// readers would split the stream between them. The context stays live
 	// (it is only cancelled by the defer), so SSE producers keep running.
+	//
+	// noWatch goes up first: the connection's reads are the server's from
+	// here (the drain below, then the next request), so a body read that
+	// reaches the end in settleBody must not start a watch either.
+	// bodyGen turns the BodyReaders handed out for this request stale.
+	ctx.request.noWatch = true
 	ctx.request.cr.stopWatch()
+	ctx.request.bodyGen++
+
+	// Settle the request body: nothing to do when it was read (or there
+	// was none); otherwise drain a small remainder, or mark the connection
+	// to close after the response, or, for a body that could not be read,
+	// answer in the handler's place. A WebSocket upgrade buffered the body
+	// before taking the connection over, and writes nothing more.
+	if !ctx.wsUpgraded {
+		if !s.settleBody(ctx, respWriter, aborted) {
+			return
+		}
+	}
 
 	s.writeResponse(ctx, respWriter)
+
+	// Proxy's upstream request may have gone on reading the request body
+	// while the response was relayed; stop it now, before anything else
+	// touches the connection's reader.
+	ctx.request.endBodyLease()
+
+	// The response is out and body bytes were left unread (settleBody):
+	// shut the write side and discard what the client still sends for a
+	// moment, so it reads the response rather than a reset. The request
+	// loop closes the connection next (connClose is set).
+	if ctx.request.lazy.linger && ctx.conn != nil && !ctx.wsUpgraded {
+		lingerClose(ctx.conn)
+	}
 }
 
 // writeWebSocketUpgradeResponse writes the WebSocket upgrade response immediately
@@ -3705,6 +3870,8 @@ func (s *Server) newContext() *context {
 			headers:         make([]Header, 0, 8),
 			params:          make([]rtr.Parameter, 0, 8),
 			multipartMaxMem: s.options.MultipartMaxMemory,
+			lim:             &s.limits,
+			debugLog:        s.requestDebugLog(),
 		},
 		response: response{
 			body:    make([]byte, 0, 1024),
@@ -3714,6 +3881,17 @@ func (s *Server) newContext() *context {
 		},
 		data: make(map[string]any),
 	}
+}
+
+// requestDebugLog is the logger a request writes its Debug lines to (the
+// body when buffered, the form args when parsed): the server's under
+// ServerOptions.Debug, nil otherwise, so the request tests one pointer and
+// builds no arguments when Debug is off.
+func (s *Server) requestDebugLog() Logger {
+	if s.options.Debug {
+		return s.log
+	}
+	return nil
 }
 
 // GetListenAddr returns the address of the listener the server is serving

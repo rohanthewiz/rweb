@@ -27,12 +27,17 @@ import (
 //	  │  │ head   read deadline = now+ReadHeaderTimeout, from the first byte          │
 //	  │  │        request line + headers, charged to the MaxHeaderBytes budget        │
 //	  │  │        timeout → 408, over budget → 431, then lingerClose                 │
-//	  │  │ body   read deadline = now+ReadTimeout, or none   (only if there is one)   │
-//	  │  │        timeout → 408, then lingerClose                                    │
 //	  │  │ run    read deadline cleared ──────────────────────────────────────────┐   │
 //	  │  │        handler; disconnect watch, WebSocket and GetConn read the conn  │   │
 //	  │  │        with no deadline of ours in the way (the watch's own stopWatch  │   │
 //	  │  │        sets and clears a past deadline, see conn_reader.go)            │   │
+//	  │  │   body   read inside the handler, on demand (request_body.go):         │   │
+//	  │  │          read deadline = now+ReadTimeout, or none, from the first      │   │
+//	  │  │          read of the body; cleared at the body's end, before the       │   │
+//	  │  │          watch may start. timeout → 408 after the handler, lingerClose │   │
+//	  │  │   settle after the handler: an unread remainder is drained under its   │   │
+//	  │  │          own 1 s deadline (cleared again), or left for a lingerClose   │   │
+//	  │  │          after the response                                            │   │
 //	  │  │ write  write deadline = now+WriteTimeout before every write of ≤ 1 MB  │   │
 //	  │  │        (SSE: SSECfg.WriteTimeout before every flush); cleared at the   │   │
 //	  │  │        end, so a WebSocket upgrade on the next request writes freely   │   │
@@ -45,6 +50,13 @@ import (
 // what reads the conn from there on (the disconnect watch above all, which
 // takes any deadline error it did not cause for a vanished client) is not
 // part of reading a request.
+//
+// The one read deadline inside the handler phase is the body's. The body is
+// read on demand since N-057, so its deadline is armed by the body reader
+// (startBody) rather than by serveConn, and it never meets the watch: the
+// watch starts only once the body has been read to its end, by which point
+// the deadline is cleared. The body of a HEAD or TRACE, discarded by
+// serveConn before the handler, still runs under ReadTimeout there.
 
 const (
 	defaultMaxHeaderBytes    = 1 << 20 // 1 MB
@@ -188,6 +200,12 @@ func isTimeout(err error) bool {
 // an early refusal (a 400, 408, 413, 417, 431 or 501 written by serveConn
 // before any handler ran), then reads and discards whatever the client still
 // sends, for at most lingerTimeout. The caller's deferred Close follows.
+//
+// It also ends a connection whose request body was not read to its end
+// (settleBody, request_body.go): after the server's refusal of a body that
+// could not be read, and after a handler's own response when the rest of
+// the body was too large to drain. The client is in the same position in
+// all of these, possibly still sending while its answer is on the way.
 //
 // Why: the refusal often goes out while the client is still sending: the
 // rest of an oversized head (431), a body over the cap (413), the body that
