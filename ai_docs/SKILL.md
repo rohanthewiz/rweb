@@ -1158,6 +1158,20 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
 - A ping, pong or close frame longer than 125 bytes, or without FIN, fails the
   connection: `ReadMessage` returns `rweb.ErrWebSocketBadControlFrame`, a close
   frame with code 1002 is sent and the connection is closed (RFC 6455 §5.5).
+- Messages must follow the fragmentation sequence and text must be UTF-8
+  (v0.2.1+), on the server and in `DialWebSocket` alike. A text or binary frame
+  that arrives while a fragmented message is still open, or a continuation
+  frame with no message to continue, fails the connection with 1002
+  (`rweb.ErrWebSocketBadFragment`; RFC 6455 §5.4). A text message that is not
+  valid UTF-8 fails it with 1007 (`rweb.ErrWebSocketInvalidUTF8`; §8.1),
+  checked on the whole message after reassembly and inflating, so a multi-byte
+  character split across fragments is fine. Binary messages are not checked.
+  ```go
+  msg, err := ws.ReadMessage()
+  if errors.Is(err, rweb.ErrWebSocketInvalidUTF8) {
+      // the peer was sent 1007 and the connection is closed; just return
+  }
+  ```
 
 ### Message Types
 

@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rohanthewiz/rweb/consts"
 )
@@ -62,6 +63,16 @@ var (
 	// 125 bytes or without FIN (RFC 6455 §5.5). The connection is failed
 	// with close code 1002 when ReadMessage returns it.
 	ErrWebSocketBadControlFrame = errors.New("websocket control frame longer than 125 bytes or fragmented")
+	// ErrWebSocketBadFragment: a data frame out of place in the message
+	// sequence (RFC 6455 §5.4): a continuation frame with no fragmented
+	// message in progress, or a text or binary frame starting a new message
+	// before the one in progress has had its final fragment. The connection
+	// is failed with close code 1002 when ReadMessage returns it.
+	ErrWebSocketBadFragment = errors.New("websocket data frame out of sequence")
+	// ErrWebSocketInvalidUTF8: a text message whose payload, reassembled and
+	// inflated, is not valid UTF-8 (RFC 6455 §5.6, §8.1). The connection is
+	// failed with close code 1007 when ReadMessage returns it.
+	ErrWebSocketInvalidUTF8 = errors.New("websocket text message is not valid UTF-8")
 	// ErrWebSocketOriginNotAllowed is returned by UpgradeWebSocket for a
 	// handshake from an origin the route does not accept. The response is
 	// already set to 403 when it is returned; a handler that returns nil
@@ -218,7 +229,13 @@ type WSConn struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	// for managing fragmented messages
+	// For managing fragmented messages. fragmenting is the state: true from
+	// a text or binary frame with FIN=0 until the continuation with FIN=1.
+	// It is a flag of its own rather than "fragmentedMessage != nil" because
+	// a first fragment may be empty, and appending nothing to a nil slice
+	// leaves it nil: the message's continuation was then refused as having no
+	// message to continue. Holder of readSem only, as for every read field.
+	fragmenting          bool
 	fragmentedMessage    []byte
 	fragmentedType       MessageType
 	fragmentedCompressed bool // the first fragment had RSV1 (permessage-deflate)
@@ -700,8 +717,34 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			return nil, ErrWebSocketBadRSV
 		}
 
+		// The data frames of a connection follow one sequence (RFC 6455
+		// §5.4): each message is a text or binary frame, then, if that frame
+		// had FIN=0, continuation frames up to one with FIN=1. Control frames
+		// may come between fragments; another message's frames may not.
+		//
+		//	           text/binary FIN=1 ──► message returned
+		//	  idle ───┤
+		//	   ▲       text/binary FIN=0 ──► fragmenting ──┬─ continuation FIN=0 ─► (stays)
+		//	   │                                           └─ continuation FIN=1 ─► message returned
+		//	   └────────────────────────────────────────────────────────────────────────┘
+		//
+		//	  idle + continuation             ─► fail, 1002 (nothing to continue)
+		//	  fragmenting + text/binary       ─► fail, 1002 (messages interleaved)
+		//
+		// Before these checks a text or binary frame mid-message silently
+		// replaced the partial message (FIN=0), or was returned with the stale
+		// fragments left for the next continuation to append to (FIN=1): a
+		// misbehaving peer got garbled messages instead of a protocol error.
 		switch frameType {
 		case wsText, wsBinary:
+			if ws.fragmenting {
+				ws.failConnection(wsCloseProtocolError)
+				kind := "text"
+				if frameType == wsBinary {
+					kind = "binary"
+				}
+				return nil, fmt.Errorf("%w: a %s frame while a fragmented message is in progress", ErrWebSocketBadFragment, kind)
+			}
 			if fin {
 				// Unfragmented message — the common fast path
 				if rsv1 {
@@ -709,38 +752,39 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 						return nil, err
 					}
 				}
-				return &WSMessage{
-					Type: MessageType(frameType),
-					Data: data,
-				}, nil
+				return ws.dataMessage(MessageType(frameType), data)
 			}
 			// Start of a fragmented message (FIN=0 on first frame per RFC 6455 §5.4)
+			ws.fragmenting = true
 			ws.fragmentedType = MessageType(frameType)
 			ws.fragmentedCompressed = rsv1
 			ws.fragmentedMessage = append(ws.fragmentedMessage[:0], data...)
 
 		case wsContinuation:
 			// Continuation without a preceding text/binary start frame is a protocol error
-			if ws.fragmentedMessage == nil {
-				return nil, errors.New("unexpected continuation frame")
+			if !ws.fragmenting {
+				ws.failConnection(wsCloseProtocolError)
+				return nil, fmt.Errorf("%w: unexpected continuation frame (no fragmented message in progress)", ErrWebSocketBadFragment)
 			}
 			ws.fragmentedMessage = append(ws.fragmentedMessage, data...)
 			// The per-frame size check sees one fragment at a time; the
 			// message as a whole is held to the same limit.
 			if int64(len(ws.fragmentedMessage)) > ws.maxMessageSize.Load() {
+				ws.fragmenting = false
 				ws.fragmentedMessage = nil
 				return nil, ErrWebSocketPayloadTooLarge
 			}
 			if fin {
 				// Final fragment — assemble and return the complete message
 				data := ws.fragmentedMessage
+				ws.fragmenting = false
 				ws.fragmentedMessage = nil
 				if ws.fragmentedCompressed {
 					if data, err = ws.deflate.decompress(data, ws.maxMessageSize.Load()); err != nil {
 						return nil, err
 					}
 				}
-				return &WSMessage{Type: ws.fragmentedType, Data: data}, nil
+				return ws.dataMessage(ws.fragmentedType, data)
 			}
 			// More fragments expected — keep reading
 
@@ -788,6 +832,33 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			return nil, fmt.Errorf("%w: %d", ErrWebSocketInvalidOpcode, frameType)
 		}
 	}
+}
+
+// dataMessage is the last step of ReadMessage for a complete data message
+// (unfragmented, or reassembled, and inflated if it was compressed): a text
+// message must be valid UTF-8 (RFC 6455 §5.6), and one that is not fails the
+// connection with 1007, the code for data inconsistent with its message type
+// (§8.1, §7.4.1). Binary messages are returned as they are.
+//
+// The check runs once on the whole message, not frame by frame. A sender may
+// split a message at any byte, so a fragment can end mid-character and only
+// the reassembled text can be judged. A compressed message is judged after
+// inflating: UTF-8 is a property of the text, not of its deflate stream.
+// Waiting for the whole message lets a peer make this side buffer invalid
+// text up to the message limit before it is refused, which any valid message
+// of that size can do too.
+//
+// The cost is one utf8.Valid pass over each text payload, which stops at
+// the first bad byte and runs eight bytes at a time over ASCII. Measured on
+// BenchmarkWSEcho (medians of 8 runs interleaved with the code before the
+// check): text16 +0.2 %, text1K +0.8 %, text16x64 +0.7 %, each inside the
+// runs' own spread, and no allocation.
+func (ws *WSConn) dataMessage(typ MessageType, data []byte) (*WSMessage, error) {
+	if typ == TextMessage && !utf8.Valid(data) {
+		ws.failConnection(wsCloseInvalidFramePayloadData)
+		return nil, ErrWebSocketInvalidUTF8
+	}
+	return &WSMessage{Type: typ, Data: data}, nil
 }
 
 // runControlHandler calls the app's ping or pong handler with the read side

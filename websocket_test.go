@@ -131,6 +131,10 @@ func TestWebSocketUnexpectedContinuation(t *testing.T) {
 	defer server.conn.Close()
 	defer client.conn.Close()
 
+	// The server fails the connection with a close frame, which the client
+	// side must read: on net.Pipe an unread write blocks its writer.
+	code := closeCodeFrom(client)
+
 	// Send a continuation frame without a preceding text/binary start frame
 	go func() {
 		writeRawFrame(client.conn, wsContinuation, true, true, []byte("orphan"))
@@ -140,9 +144,9 @@ func TestWebSocketUnexpectedContinuation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unexpected continuation frame, got nil")
 	}
-	if err.Error() != "unexpected continuation frame" {
-		t.Errorf("unexpected error: %v", err)
-	}
+	// Since N-081 a sentinel (it was a bare errors.New, matched by text),
+	// and the connection is failed with 1002 rather than left open.
+	expectFailed(t, server, err, ErrWebSocketBadFragment, code, wsCloseProtocolError)
 }
 
 func TestWebSocketCloseHandshake(t *testing.T) {

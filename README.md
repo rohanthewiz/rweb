@@ -510,6 +510,11 @@ single-owner: a `Close` from a hub never reads alongside the handler's `ReadMess
 returns the peer's answering close frame), and two `ReadMessage` callers take turns.
 
 Control frames over 125 bytes or without FIN fail the connection with close code 1002.
+So does a data frame out of sequence: a new message before a fragmented one has ended, or a
+continuation with no message to continue (`ReadMessage` returns `rweb.ErrWebSocketBadFragment`).
+A text message that is not valid UTF-8 fails it with 1007 (`rweb.ErrWebSocketInvalidUTF8`);
+it is checked whole, after reassembly and inflating, so a character split across fragments is
+fine. Both rules hold for the client (`DialWebSocket`) too.
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
 connection, reset).

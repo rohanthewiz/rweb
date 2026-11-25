@@ -194,8 +194,13 @@ func TestDeflateFragmentedMessage(t *testing.T) {
 		_ = writeRawFrame(client.conn, wsContinuation, true, true, comp[half:])
 	}()
 	got, err := server.ReadMessage()
-	if err != nil || !bytes.Equal(got.Data, want) {
-		t.Fatalf("got %q, %v", got.Data, err)
+	// err checked on its own first: got is nil with it, and dereferencing
+	// it in the message panicked the test binary, hiding every later test.
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if !bytes.Equal(got.Data, want) {
+		t.Fatalf("got %q", got.Data)
 	}
 }
 
