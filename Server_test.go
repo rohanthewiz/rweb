@@ -430,12 +430,23 @@ func TestStaticFilesPathTraversal(t *testing.T) {
 }
 
 func TestUnavailablePort(t *testing.T) {
-	const testPort = ":8080"
-
-	listener, err := net.Listen(consts.ProtocolTCP, testPort)
+	// Occupy a port the OS picks (":0") rather than a fixed one such as
+	// :8080: a fixed port makes the test depend on the machine — any dev
+	// server already on it fails the test's own Listen before the server
+	// under test is reached. Both listens are on the wildcard address, so the
+	// second is a true conflict (a specific-address holder would not block a
+	// wildcard bind on BSD/macOS, where Go sets SO_REUSEADDR).
+	listener, err := net.Listen(consts.ProtocolTCP, ":0")
 	assert.Nil(t, err)
 	defer listener.Close()
 
+	testPort := fmt.Sprintf(":%d", listener.Addr().(*net.TCPAddr).Port)
+
+	// Run must return the bind error at once rather than serve or block
+	// waiting for a signal.
 	s := rweb.NewServer(rweb.ServerOptions{Verbose: true, Address: testPort})
-	_ = s.Run()
+	err = s.Run()
+	if err == nil {
+		t.Fatalf("Run on occupied port %s returned nil, want a bind error", testPort)
+	}
 }
