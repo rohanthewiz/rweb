@@ -17,7 +17,8 @@ Thanks and credit to Akyoto, especially for the radix tree!
 - Server Sent Events
 - Request cancellation: `ctx.Request().Context()` is cancelled when the client disconnects (see below)
 - Graceful shutdown: `s.Shutdown(ctx)` drains in-flight requests; `Run` does it on SIGINT/SIGTERM; `s.Serve(listener)` for your own listener
-- WebSockets, with optional permessage-deflate compression (`s.WebSocketWithOptions`)
+- WebSockets, with optional permessage-deflate compression (`s.WebSocketWithOptions`), and a
+  client (`rweb.DialWebSocket`)
 - Flexible static files handling
 - Scales incredibly well with the number of routes
 - Route grouping with middleware support
@@ -512,6 +513,29 @@ Control frames over 125 bytes or without FIN fail the connection with close code
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
 connection, reset).
+
+### WebSocket client
+
+`rweb.DialWebSocket` connects to any WebSocket server and returns the same `*rweb.WSConn`
+a handler gets:
+
+```go
+ws, resp, err := rweb.DialWebSocket(ctx, "wss://example.com/ws", rweb.WSDialOptions{
+	Header: http.Header{"Authorization": {"Bearer " + token}},
+})
+if err != nil {
+	return err // a refusal wraps rweb.ErrWebSocketBadHandshake; resp has its status and body
+}
+defer ws.Close(1000, "")
+_ = ws.WriteMessage(rweb.TextMessage, []byte("hello"))
+msg, err := ws.ReadMessage()
+```
+
+`ctx` bounds the dial and handshake only (`HandshakeTimeout`, default 30 s, also applies).
+`WSDialOptions` adds request headers, subprotocols, permessage-deflate, a TLS config and a
+custom dialer; write timeout, pings and the dead-peer read deadline default as on the
+server. Call `ws.Close` when done, also after a read error. See
+`examples/websocket_client`.
 
 ## Route Groups
 

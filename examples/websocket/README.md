@@ -8,6 +8,8 @@ This example demonstrates WebSocket support in the RWeb framework.
 - **Chat Server** (`/ws/chat`): Multi-client chat room with broadcasting
 - **Web Client**: HTML/JavaScript client for testing both endpoints
 - **Status Endpoint** (`/status`): JSON API to check server status
+- **Go client**: `../websocket_client` talks to the echo endpoint from a terminal
+  with `rweb.DialWebSocket` (`cd ../websocket_client && go run .`)
 
 ## Running the Example
 

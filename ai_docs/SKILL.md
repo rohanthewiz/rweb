@@ -1,6 +1,6 @@
 ---
 name: rweb-light-go-webserver
-description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, SSE Hub (multi-client broadcast), WebSockets, static files, proxying, and file uploads.
+description: Build HTTP web servers with the light and low-dependency RWeb Go framework. Covers routing, middleware, cookies, groups, SSE, SSE Hub (multi-client broadcast), WebSockets (server and client), static files, proxying, and file uploads.
 ---
 
 # RWeb Framework Skill
@@ -1314,6 +1314,72 @@ s.Get("/ws/custom", func(ctx rweb.Context) error {
     return nil
 })
 ```
+
+### WebSocket Client (v0.2.1+)
+
+`rweb.DialWebSocket` connects to any WebSocket server (rweb or not) and returns
+the same `*rweb.WSConn` a server handler gets, so everything above applies:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+ws, resp, err := rweb.DialWebSocket(ctx, "wss://example.com/ws", rweb.WSDialOptions{
+    Header:       http.Header{"Authorization": {"Bearer " + token}},
+    Subprotocols: []string{"chat.v2", "chat.v1"}, // optional, in preference order
+    Compression:  true,                           // optional permessage-deflate offer
+})
+if errors.Is(err, rweb.ErrWebSocketBadHandshake) && resp != nil {
+    // The server answered but refused: resp.StatusCode, resp.Body (≤ 64 KB of it)
+}
+if err != nil {
+    return err
+}
+defer ws.Close(1000, "")
+
+go func() { // one goroutine reads; pings are answered and close frames replied to inside
+    for {
+        msg, err := ws.ReadMessage()
+        if err != nil || msg.Type == rweb.CloseMessage {
+            return
+        }
+        handle(msg)
+    }
+}()
+_ = ws.WriteMessage(rweb.TextMessage, []byte("hello")) // writes from any goroutine
+```
+
+- **URL**: `ws://`, `wss://` (also `http://`, `https://`); IPv6 literals work
+  (`ws://[::1]:8080/ws`); `wss://user:pass@host/` sends Basic auth unless
+  `Header` has an `Authorization`.
+- **ctx bounds the dial and handshake only**, as `net.Dialer.DialContext` does;
+  `HandshakeTimeout` (default 30 s, negative = ctx only) bounds them too. A
+  timeout or cancel gives an error wrapping `context.DeadlineExceeded` /
+  `context.Canceled`. After that the connection lives until `Close`, a close
+  frame or an I/O error. **Call `ws.Close` when done, also after a read error**:
+  it stops the ping goroutine and closes the socket.
+- **Keepalive defaults match the server's** (`WriteTimeout` 10 s, `PingInterval`
+  30 s, `PongTimeout` 10 s; negative disables): the client pings, and a server
+  that sends nothing at all (not even a pong) for 40 s fails `ReadMessage` with
+  a timeout instead of hanging. Pongs are processed inside `ReadMessage`, so
+  keep a reader running.
+- **`Header`** adds request headers (`Origin`, `Cookie`, `User-Agent`, …); `Host`
+  may name a virtual host. The handshake's own headers (`Upgrade`, `Connection`,
+  `Sec-WebSocket-*`) and `Content-Length`/`Transfer-Encoding` are refused, as is
+  any name that is not a token or a value with a control byte (CR/LF injection);
+  nothing is dialed then.
+- **`TLSConfig`** for `wss://` (cloned; `ServerName` defaults to the URL host;
+  `h2` is dropped from `NextProtos`). **`NetDialContext`** replaces the TCP dial
+  (a SOCKS or CONNECT tunnel; no `HTTP_PROXY` support otherwise).
+- **The 101 is checked** (RFC 6455 §4.1): status, `Upgrade`/`Connection` tokens,
+  `Sec-WebSocket-Accept` for the key sent, a subprotocol that was offered, and
+  for compression only parameters this client can honour. Anything else fails
+  with `ErrWebSocketBadHandshake`. The response head is capped at 1 MB.
+- **Frames the server sends straight after its 101** (a greeting) are kept, not
+  lost with the handshake's read buffer.
+- **`Close` means "done now"**: once its close frame is out, messages still in
+  flight are dropped until the server's close frame (≤ 2 s wait).
+
+Runnable example: `examples/websocket_client` (talks to `examples/websocket`).
 
 ## Reverse Proxy
 

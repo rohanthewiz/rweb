@@ -53,8 +53,11 @@ var (
 	ErrWebSocketAlreadyClosed   = errors.New("websocket connection already closed")
 	ErrWebSocketInvalidOpcode   = errors.New("invalid websocket opcode")
 	ErrWebSocketPayloadTooLarge = errors.New("websocket payload too large")
-	ErrWebSocketBadMask         = errors.New("websocket frame not masked")
-	ErrWebSocketBadRSV          = errors.New("websocket frame has a reserved bit set that no extension negotiated")
+	// ErrWebSocketBadMask: a frame masked wrongly for its direction (RFC
+	// 6455 §5.1): a client frame without a mask on a server connection, or
+	// a masked server frame on a client one (DialWebSocket).
+	ErrWebSocketBadMask = errors.New("websocket frame masked wrongly for its direction (client frames must be masked, server frames must not)")
+	ErrWebSocketBadRSV  = errors.New("websocket frame has a reserved bit set that no extension negotiated")
 	// ErrWebSocketBadControlFrame: a ping, pong or close frame longer than
 	// 125 bytes or without FIN (RFC 6455 §5.5). The connection is failed
 	// with close code 1002 when ReadMessage returns it.
@@ -68,6 +71,16 @@ var (
 
 // WebSocket GUID as per RFC 6455
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+// wsAcceptKey is the Sec-WebSocket-Accept value for a Sec-WebSocket-Key:
+// base64(SHA-1(key + GUID)) (RFC 6455 §4.2.2). The server sends it
+// (performHandshake); a client checks it (DialWebSocket), which proves the
+// 101 was written by a WebSocket server for this very request rather than
+// replayed or made up by something in between.
+func wsAcceptKey(key string) string {
+	h := sha1.Sum([]byte(key + wsGUID))
+	return base64.StdEncoding.EncodeToString(h[:])
+}
 
 // Default WebSocket configuration values
 const (
@@ -592,16 +605,11 @@ func performHandshake(ctx *context, opts WSOptions) (deflate *wsDeflate, subprot
 		return nil, "", errors.New("unsupported WebSocket version")
 	}
 
-	// Calculate the accept key
-	h := sha1.New()
-	h.Write([]byte(key + wsGUID))
-	acceptKey := base64.StdEncoding.EncodeToString(h.Sum(nil))
-
 	// Set response headers for successful upgrade
 	ctx.response.SetStatus(101) // Switching Protocols
 	ctx.response.SetHeader("Upgrade", "websocket")
 	ctx.response.SetHeader("Connection", "Upgrade")
-	ctx.response.SetHeader("Sec-WebSocket-Accept", acceptKey)
+	ctx.response.SetHeader("Sec-WebSocket-Accept", wsAcceptKey(key))
 
 	// Subprotocol: only one the route lists may be named in the 101. The
 	// first offered protocol used to be echoed back unchecked, which told the
