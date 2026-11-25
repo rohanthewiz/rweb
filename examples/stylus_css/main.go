@@ -36,5 +36,9 @@ func main() {
 <div class="banner">Styled by Stylus, compiled by go-styl</div>`)
 	})
 
-	log.Fatal(s.Run())
+	// Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM), so only a
+	// real error, such as the port being taken, is fatal.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }

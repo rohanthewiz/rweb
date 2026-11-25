@@ -119,5 +119,9 @@ func main() {
 	fmt.Println("  curl -H 'Authorization: Bearer user-token' http://localhost:8080/profile")
 	fmt.Println("  curl -H 'Authorization: Bearer admin-token' http://localhost:8080/admin")
 
-	log.Fatal(s.Run())
+	// Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM), so only a
+	// real error, such as the port being taken, is fatal.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }

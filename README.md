@@ -237,7 +237,11 @@ func main() {
 		}
 	*/
 
-	log.Fatal(s.Run())
+	// Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM), so only a
+	// real error, such as the port being taken, is fatal.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
@@ -428,9 +432,12 @@ returns (a WebSocket peer leaving shows up as a `ReadMessage` error). A pipeline
 ## Graceful Shutdown
 
 `s.Run()` serves until the process gets SIGINT or SIGTERM, then shuts down gracefully and
-returns. It waits up to `ShutdownTimeout` (`WithShutdownTimeout`; default 10 s, negative =
-close everything at once) for requests in progress, and stops listening for those signals
-before it returns, so a later SIGTERM ends the process as usual. `RunWithHttpsRedirect()`
+returns nil, so check its error rather than passing it straight to `log.Fatal`
+(`if err := s.Run(); err != nil { log.Fatal(err) }`); `log.Fatal(s.Run())` prints `<nil>`
+and exits 1 on every clean stop. It waits up to `ShutdownTimeout` (`WithShutdownTimeout`;
+default 10 s, negative = close everything at once) for requests in progress, and stops
+listening for those signals before it returns, so a later SIGTERM ends the process as
+usual. `RunWithHttpsRedirect()`
 does the same for the HTTPS server and its plain-HTTP redirector together; an error on
 either side stops both.
 

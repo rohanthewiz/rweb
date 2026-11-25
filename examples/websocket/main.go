@@ -259,7 +259,11 @@ func main() {
 
 	fmt.Println("WebSocket server starting on :8080")
 	fmt.Println("Open http://localhost:8080 in your browser to test")
-	log.Fatal(s.Run())
+	// Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM), so only a
+	// real error, such as the port being taken, is fatal.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // buildPage generates the demo UI using the element builder.

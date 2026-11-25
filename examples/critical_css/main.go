@@ -58,7 +58,11 @@ func main() {
 		return ctx.WriteHTML(b.String())
 	})
 
-	log.Fatal(s.Run())
+	// Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM), so only a
+	// real error, such as the port being taken, is fatal.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 // page renders the shared layout; body fills in per-page content.

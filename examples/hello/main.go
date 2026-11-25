@@ -270,7 +270,11 @@ func main() {
 	*/
 
 	// Start the HTTP server
-	// This blocks until the server is shut down
-	// log.Fatal ensures any startup errors are logged before exiting
-	log.Fatal(s.Run())
+	// This blocks until the server is shut down (Ctrl-C / SIGTERM)
+	// Run returns nil after that graceful shutdown, so only a real error,
+	// such as the port being taken, is logged as fatal. log.Fatal(s.Run())
+	// would print "<nil>" and exit 1 on every clean stop.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }

@@ -98,6 +98,10 @@ func main() {
 	})
 
 	// Start the server and log any fatal errors
-	// The server will block here and handle incoming requests
-	log.Fatal(s.Run())
+	// The server will block here and handle incoming requests until Ctrl-C /
+	// SIGTERM; Run returns nil after that graceful shutdown, so only a real
+	// error, such as the port being taken, is fatal.
+	if err := s.Run(); err != nil {
+		log.Fatal(err)
+	}
 }

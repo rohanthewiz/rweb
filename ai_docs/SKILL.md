@@ -31,7 +31,10 @@ func main() {
         return ctx.WriteString("Hello, World!")
     })
 
-    log.Fatal(s.Run())
+    // Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM)
+    if err := s.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -69,7 +72,9 @@ s := rweb.NewServer(rweb.ServerOptions{
 })
 // Serve HTTP-01 challenges and redirect everything else to HTTPS
 go http.ListenAndServe(":80", m.HTTPHandler(nil))
-log.Fatal(s.Run())
+if err := s.Run(); err != nil { // nil after a graceful shutdown
+    log.Fatal(err)
+}
 ```
 
 ### Connection Limits and Timeouts (v0.2.1+)
@@ -119,6 +124,8 @@ nil. It waits up to `ShutdownTimeout` for requests in progress (`WithShutdownTim
 0 = default 10 s, negative = close everything at once; if the timeout runs out
 Run returns an error wrapping `context.DeadlineExceeded`). It calls
 `signal.Stop` before returning, so a later SIGTERM ends the process normally.
+Because a clean stop returns nil, write `if err := s.Run(); err != nil { log.Fatal(err) }`,
+not `log.Fatal(s.Run())`, which prints `<nil>` and exits 1 on every Ctrl-C.
 `RunWithHttpsRedirect()` shuts down the HTTPS server and its redirector together;
 an error on either side stops both.
 
@@ -957,7 +964,10 @@ func main() {
         }
     }()
 
-    log.Fatal(s.Run())
+    // Run returns nil after a graceful shutdown (Ctrl-C / SIGTERM)
+    if err := s.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
