@@ -1172,6 +1172,16 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
       // the peer was sent 1007 and the connection is closed; just return
   }
   ```
+- Close frames from the peer are checked too (v0.2.1+), server and client
+  alike. A close frame with no body (what a browser's `ws.close()` with no
+  arguments sends) is answered with a close frame with no body; `OnClose`
+  handlers get code 1005 for it, and `ws.Close(1005, "")` (echoing that code
+  from a handler) also sends no body, since 1005 itself may not be sent. A
+  close frame with a 1-byte body or a code that may not be sent (1005, 1006,
+  1015, below 1000, 1004, unassigned 1016–2999, 5000 and up) fails the
+  connection with 1002, and one whose reason is not UTF-8 with 1007:
+  `ReadMessage` returns `rweb.ErrWebSocketBadClose` and no `OnClose` handler
+  runs. Codes 1000–1003, 1007–1014 and 3000–4999 are accepted and echoed.
 
 ### Message Types
 

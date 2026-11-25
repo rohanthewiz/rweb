@@ -515,6 +515,10 @@ continuation with no message to continue (`ReadMessage` returns `rweb.ErrWebSock
 A text message that is not valid UTF-8 fails it with 1007 (`rweb.ErrWebSocketInvalidUTF8`);
 it is checked whole, after reassembly and inflating, so a character split across fragments is
 fine. Both rules hold for the client (`DialWebSocket`) too.
+A close frame with no body (a browser's `ws.close()`) is answered with one with no body
+(`OnClose` reports it as 1005, which is never sent on the wire). A close frame with a 1-byte
+body or a code that may not be sent (1005, 1006, 1015, unassigned) fails the connection with
+1002, and one whose reason is not UTF-8 with 1007 (`rweb.ErrWebSocketBadClose`).
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
 connection, reset).

@@ -73,6 +73,13 @@ var (
 	// inflated, is not valid UTF-8 (RFC 6455 §5.6, §8.1). The connection is
 	// failed with close code 1007 when ReadMessage returns it.
 	ErrWebSocketInvalidUTF8 = errors.New("websocket text message is not valid UTF-8")
+	// ErrWebSocketBadClose: a close frame from the peer that RFC 6455 does
+	// not allow (§5.5.1, §7.4): a 1-byte body (a body starts with a 2-byte
+	// status code), a status code that may not be sent (see validCloseCode:
+	// 1005, 1006, 1015, unassigned or out of range), or a reason that is not
+	// valid UTF-8. The connection is failed with close code 1002 (1007 for
+	// the reason) when ReadMessage returns it, and no OnClose handler runs.
+	ErrWebSocketBadClose = errors.New("websocket close frame malformed")
 	// ErrWebSocketOriginNotAllowed is returned by UpgradeWebSocket for a
 	// handshake from an origin the route does not accept. The response is
 	// already set to 403 when it is returned; a handler that returns nil
@@ -790,16 +797,21 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 
 		case wsClose:
 			// Recorded before readSem is given up (on return), so a Close
-			// waiting for it sees the handshake completed (see Close).
+			// waiting for it sees the handshake completed (see Close). Also
+			// for a malformed close frame: the peer has sent its close frame
+			// either way, so there is nothing left to wait for from it, and a
+			// later ReadMessage returns ErrWebSocketAlreadyClosed.
 			ws.closeRcvd.Store(true)
-			// Handle close frame
-			code := wsCloseNoStatusReceived
-			text := ""
-			if len(data) >= 2 {
-				code = int(binary.BigEndian.Uint16(data[:2]))
-				if len(data) > 2 {
-					text = string(data[2:])
-				}
+			code, text, failCode, err := parseCloseBody(data)
+			if err != nil {
+				// A close frame that breaks the rules fails the connection
+				// like any other protocol error (RFC 6455 §7.1.7): no echo, and
+				// no OnClose handlers, so a handler only ever sees a code that
+				// may be sent (or 1005 for none) and a UTF-8 reason. Before
+				// this, a bad code was echoed back as is and a non-UTF-8 reason
+				// reached the handlers (N-082).
+				ws.failConnection(failCode)
+				return nil, err
 			}
 			ws.handleClose(code, text)
 			return &WSMessage{Type: CloseMessage, Data: data}, nil
@@ -859,6 +871,98 @@ func (ws *WSConn) dataMessage(typ MessageType, data []byte) (*WSMessage, error) 
 		return nil, ErrWebSocketInvalidUTF8
 	}
 	return &WSMessage{Type: typ, Data: data}, nil
+}
+
+// parseCloseBody reads the body of a close frame from the peer (RFC 6455
+// §5.5.1): empty, or a 2-byte status code followed by a UTF-8 reason.
+//
+//	body     meaning                  result
+//	0 bytes  no status code           code 1005 (wsCloseNoStatusReceived), reason ""
+//	1 byte   half a status code       fail with 1002
+//	≥ 2      code, then reason        code not validCloseCode → fail with 1002
+//	                                  reason not UTF-8        → fail with 1007
+//
+// 1005 for an empty body is how an API reports "no status code" (§7.1.5; a
+// browser's CloseEvent says the same); it is never sent on the wire, which
+// closeFramePayload sees to. failCode is the code to fail the connection with
+// when err is not nil; err wraps ErrWebSocketBadClose with what was wrong.
+//
+// The reason is checked with utf8.Valid on its own (§5.5.1: "the data MUST
+// be UTF-8"), and 1007 is the code for data not consistent with its type
+// (§7.4.1), as for a text message (dataMessage).
+func parseCloseBody(data []byte) (code int, reason string, failCode int, err error) {
+	switch {
+	case len(data) == 0:
+		return wsCloseNoStatusReceived, "", 0, nil
+	case len(data) == 1:
+		return 0, "", wsCloseProtocolError,
+			fmt.Errorf("%w: a 1-byte body (a body starts with a 2-byte status code)", ErrWebSocketBadClose)
+	}
+	code = int(binary.BigEndian.Uint16(data[:2]))
+	if !validCloseCode(code) {
+		return 0, "", wsCloseProtocolError,
+			fmt.Errorf("%w: status code %d may not be sent", ErrWebSocketBadClose, code)
+	}
+	if !utf8.Valid(data[2:]) {
+		return 0, "", wsCloseInvalidFramePayloadData,
+			fmt.Errorf("%w: the reason is not valid UTF-8", ErrWebSocketBadClose)
+	}
+	return code, string(data[2:]), 0, nil
+}
+
+// validCloseCode reports whether code may appear in a close frame on the
+// wire (RFC 6455 §7.4.1, §7.4.2, and the IANA "WebSocket Close Code Number"
+// registry):
+//
+//	code         meaning                                          sendable
+//	0–999        not used                                          no
+//	1000–1003    normal, going away, protocol error, unsupported   yes
+//	1004         reserved                                          no
+//	1005, 1006   no status, abnormal closure: an API reports them   no
+//	1007–1011    defined by RFC 6455                               yes
+//	1012–1014    registered since: service restart, try again       yes
+//	             later, bad gateway
+//	1015         TLS handshake failure: an API reports it           no
+//	1016–2999    reserved for future standards, unassigned         no
+//	3000–3999    registered by libraries and frameworks            yes
+//	4000–4999    private use, by agreement of the two ends         yes
+//	5000–65535   out of range                                      no
+//
+// 1012–1014 are accepted although RFC 6455 does not define them: they are
+// registered, for a server that is restarting (1012), overloaded (1013) or
+// a gateway whose upstream failed (1014), so refusing them would fail
+// exactly the close a client should act on by reconnecting later.
+// Unassigned codes in 1016–2999 are refused, as the Autobahn test suite
+// expects: there is no meaning to hand an app.
+func validCloseCode(code int) bool {
+	switch {
+	case code >= 1000 && code <= 1003:
+		return true
+	case code >= 1007 && code <= 1014:
+		return true
+	case code >= 3000 && code <= 4999:
+		return true
+	}
+	return false
+}
+
+// closeFramePayload is the body of a close frame this side sends: the code,
+// then the reason. wsCloseNoStatusReceived (1005) means "no status code"
+// and may not be sent (RFC 6455 §7.4.1), so it gives an empty body, with
+// no reason either: a reason cannot go without a code (§5.5.1).
+//
+// handleClose uses it to answer an empty close frame with an empty one
+// instead of with 1005 on the wire (N-082), and Close uses it so an OnClose
+// handler that answers with the code it was given (1005 for an empty close
+// frame) gets the same.
+func closeFramePayload(code int, reason string) []byte {
+	if code == wsCloseNoStatusReceived {
+		return nil
+	}
+	data := make([]byte, 2+len(reason))
+	binary.BigEndian.PutUint16(data[:2], uint16(code))
+	copy(data[2:], reason)
+	return data
 }
 
 // runControlHandler calls the app's ping or pong handler with the read side
@@ -1215,6 +1319,10 @@ func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, erro
 // fails on the closed connection. Every path is bounded: the read deadline
 // set here ends the reads, and the timer ends the wait even if the app
 // moves the read deadline out again.
+//
+// A code of 1005 ("no status code", what an OnClose handler is given for a
+// close frame with no body) sends a close frame with no body, reason
+// dropped: 1005 itself may not be sent (RFC 6455 §7.4.1).
 func (ws *WSConn) Close(code int, reason string) error {
 	ws.closeMutex.Lock()
 	if ws.closed.Load() {
@@ -1223,9 +1331,7 @@ func (ws *WSConn) Close(code int, reason string) error {
 	}
 
 	// Send close frame
-	data := make([]byte, 2+len(reason))
-	binary.BigEndian.PutUint16(data[:2], uint16(code))
-	copy(data[2:], reason)
+	data := closeFramePayload(code, reason)
 
 	// Under writeMutex like every other write: frames from two goroutines
 	// must not interleave on the socket, and they share wbuf. closed is set
@@ -1398,10 +1504,15 @@ func (ws *WSConn) handleClose(code int, text string) {
 		return
 	}
 
-	// Send close response. As in Close, closed is set under writeMutex
-	// together with the close frame, so nothing is written after it.
-	data := make([]byte, 2)
-	binary.BigEndian.PutUint16(data, uint16(code))
+	// Send close response: the peer's code echoed (RFC 6455 §5.5.1: "the
+	// endpoint typically echos the status code it received"), without the
+	// reason; for a close frame with no body (code 1005), a close frame with
+	// no body (closeFramePayload). That case used to put 1005 on the wire,
+	// which §7.4.1 forbids, in answer to the most common close there is: a
+	// browser's ws.close() with no arguments sends an empty close frame
+	// (N-082). As in Close, closed is set under writeMutex together with the
+	// close frame, so nothing is written after it.
+	data := closeFramePayload(code, "")
 	ws.writeMutex.Lock()
 	ws.writeFrame(wsClose, data)
 	ws.closed.Store(true)
@@ -1484,6 +1595,12 @@ func (ws *WSConn) SetPongHandler(handler func([]byte) error) {
 // OnClose adds a close handler, run when the peer's close frame arrives.
 // Safe to call from any goroutine; a handler added while a close frame is
 // being handled may or may not run for it.
+//
+// code is the peer's status code, or 1005 when its close frame had no body
+// (answering with Close(1005, …) sends a close frame with no body). text is
+// valid UTF-8: a close frame with a 1-byte body, a code that may not be sent
+// or a reason that is not UTF-8 fails the connection instead
+// (ErrWebSocketBadClose), and no handler runs for it.
 func (ws *WSConn) OnClose(handler func(code int, text string)) {
 	ws.handlersMu.Lock()
 	ws.closeHandlers = append(ws.closeHandlers, handler)
