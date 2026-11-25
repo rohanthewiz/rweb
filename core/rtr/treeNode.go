@@ -1,6 +1,7 @@
 package rtr
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/rohanthewiz/rweb/consts"
@@ -350,6 +351,10 @@ func (node *treeNode[T]) end(path string, data T, i int, offset int) (*treeNode[
 	//   node: /user/|:id (has parameter child)
 	//   path: /user/|:id/profile
 	if node.parameter != nil && path[i] == consts.RuneColon {
+		// The route is about to share this parameter node: its name must be
+		// the node's, or the route's values would be reported under the
+		// earlier route's name (see checkParamName).
+		checkParamName(path, i, node.parameter.prefix)
 		node = node.parameter
 		offset = i
 		return node, offset, flowBegin
@@ -358,6 +363,60 @@ func (node *treeNode[T]) end(path string, data T, i int, offset int) (*treeNode[
 	// No suitable child - append remaining path as new nodes
 	node.append(path[i:], data)
 	return node, offset, flowStop
+}
+
+// checkParamName panics when the route being added (path, with path[i] the
+// ':' of a parameter) names that parameter differently from existing, the
+// name held by the parameter node the route is about to share.
+//
+// Why the names must match: routes of one method that are the same up to a
+// parameter share that parameter's node, and the node holds a single name
+// (its prefix). Lookup reports every value under the name in the node, so a
+// route that called the parameter something else would get its value under
+// the earlier route's name, and its handler's Param(ownName) would be "":
+//
+//	/users/:id              ─┐
+//	/users/:userId/profile  ─┴─► "/users/" ─► :id ─┬─ (handler 1)
+//	                                               └─► "/profile" (handler 2)
+//
+//	GET /users/5/profile → handler 2 with [id=5]; Param("userId") == ""
+//
+// Two routes of the same shape (/posts/:year/:title, /posts/:year/:slug)
+// clash the same way: the second replaced the first, keeping the name title.
+//
+// Why a panic: AddMethod and Get/Post/… return no error, and a renamed
+// parameter otherwise shows up only as an empty value at runtime. A panic
+// at registration fails at startup, as httprouter, chi and gin do for
+// conflicting wildcards.
+//
+// Why only end calls it: end is the one place an Add steps into a parameter
+// node that already exists. append only builds new nodes (an Add reaches it
+// once nothing in the tree matches), so whatever it meets is named by this
+// same path. For the same reason the check always runs before the Add has
+// changed the tree, and a recovered panic leaves the routes already added
+// working.
+//
+// Each method has its own tree, so GET /users/:id beside DELETE
+// /users/:userId never shares a node and is fine.
+func checkParamName(path string, i int, existing string) {
+	// The name runs from after the ':' to the next '/' or the end of path,
+	// as append cuts it when it creates a parameter node.
+	nameEnd := strings.IndexByte(path[i:], consts.RuneFwdSlash)
+	if nameEnd == -1 {
+		nameEnd = len(path)
+	} else {
+		nameEnd += i
+	}
+
+	name := path[i+1 : nameEnd]
+	if name == existing {
+		return
+	}
+
+	panic("rtr: conflicting parameter names at the same position in route " +
+		strconv.Quote(path) + ": :" + name + " where an earlier route has :" +
+		existing + ". Routes that share a parameter position share its node, " +
+		"so they must use the same name")
 }
 
 // each traverses the tree and calls the given function on every node.

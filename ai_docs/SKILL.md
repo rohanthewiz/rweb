@@ -242,6 +242,25 @@ v0.2.0 and earlier did not decode them, so code that did must drop its own
 `url.PathUnescape`. A decoded value can contain `/` (from `%2F`) and `..`
 (from `%2e%2e`), so check it before building a file path from it.
 
+**One name per parameter position (v0.2.1+).** Routes of the same method that
+are the same up to a parameter share that parameter, so they must give it the
+same name. A clash panics when the route is registered, naming the route:
+
+```go
+s.Get("/users/:id", getUser)
+s.Get("/users/:id/posts", listPosts)       // ✓ same name at the shared position
+s.Get("/users/:userId/profile", profile)   // ✗ panics: :userId where an earlier route has :id
+s.Get("/posts/:year/:title", showPost)
+s.Get("/posts/:year/:slug", showBySlug)    // ✗ panics: same shape as the route above
+s.Delete("/users/:userId", deleteUser)     // ✓ other methods have their own routes
+s.Get("/admin/:userId", adminUser)         // ✓ different static prefix, not shared
+```
+
+Before v0.2.1 such a route registered silently and its handler got its value
+under the earlier route's name (`Param("userId")` was `""`), so an app that
+upgrades and panics at startup had that bug already: rename the parameter to
+match.
+
 ### Fixed vs Parameterized Routes
 
 Fixed routes take precedence over parameterized ones when there's an exact match:

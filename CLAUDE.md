@@ -61,7 +61,7 @@ curl http://localhost:8080/some-json
 2. **Middleware Pattern**: Use `ctx.Next()` to pass control to next middleware
 3. **Context Interface**: Central abstraction for request/response operations
 4. **Request Body**: `ctx.Request().Body()` (whole, in memory) or `ctx.Request().BodyReader()` (stream); nothing is read until one of them, or a form accessor, is called. Check `ctx.Request().BodyErr()` after `Body()`/`FormValue` before acting on the body
-5. **Route Parameters**: Access via `ctx.Request().Param("name")`. Values are percent-decoded exactly once, in `request.addParameter` (bad escapes kept raw); the router matches the raw path and `Path()` stays raw. Never decode a param again (StaticFiles relies on this: it validates the raw path for bad escapes and runs its traversal checks on the decoded param)
+5. **Route Parameters**: Access via `ctx.Request().Param("name")`. Values are percent-decoded exactly once, in `request.addParameter` (bad escapes kept raw); the router matches the raw path and `Path()` stays raw. Never decode a param again (StaticFiles relies on this: it validates the raw path for bad escapes and runs its traversal checks on the decoded param). Routes of one method that share a parameter position must use one name: the shared radix node holds one name and lookup reports values under it, so `checkParamName` (core/rtr/treeNode.go, called from `treeNode.end`, the only place an Add steps into an existing parameter node) panics at registration on a clash, before the tree is changed. Each method has its own tree
 6. **Context Data Storage**: Store request-scoped data via `ctx.Set()`, `ctx.Get()`, `ctx.Has()`, `ctx.Delete()`
 
 ### Important Features

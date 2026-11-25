@@ -245,6 +245,16 @@ func main() {
 }
 ```
 
+## Route Parameters
+
+`ctx.Request().Param("name")` gives a `:name` segment's value, percent-decoded once.
+Routes of the same method that are the same up to a parameter share it, so they must
+give it the same name: `/users/:id` with `/users/:id/posts` is fine, but adding
+`/users/:userId/profile` panics when it is registered (the message names the route).
+Earlier versions accepted it silently, and its handler then got `Param("userId") == ""`.
+Different methods, and parameters after different static segments (`/admin/:userId`
+beside `/users/:id`), never share.
+
 ## Logging
 
 The server writes its own log lines (errors it cannot return to anyone,
