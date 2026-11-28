@@ -1192,6 +1192,16 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
   inflate (the error is the `compress/flate` one). The peer gets the code
   instead of a bare TCP close. An I/O error (EOF, reset, a read deadline) sends
   nothing and does not close the connection.
+- Control frames this side sends are kept within the rules (v0.2.1+; RFC 6455
+  §5.5, §7.4): `ws.Close(code, reason)` always sends a close frame the peer
+  accepts. The reason is made valid UTF-8 (bad bytes → U+FFFD) and cut to
+  123 bytes at a character boundary, so `ws.Close(1011, err.Error())` with a
+  long error is safe; a code that may not be sent (0, 1004, 1005, 1006, 1015,
+  1016–2999, 5000 and up) goes out as no code at all, reason dropped (the peer
+  reports 1005). `WritePing`, and `WriteMessage`/`WriteMessages` with a
+  control type, refuse a payload over 125 bytes with
+  `rweb.ErrWebSocketBadControlFrame` before writing anything; the connection
+  stays open.
 
 ### Message Types
 
@@ -1213,12 +1223,15 @@ ws.WriteMessages(rweb.TextMessage, a, b)  // Several messages, one socket write
 
 // Connection lifecycle
 ws.Close(1000, "reason")                  // Send close frame, wait (≤ 2 s) for the peer's, disconnect
+                                          // (reason cut to 123 bytes, made UTF-8; an unsendable
+                                          // code such as 0 or 1006 goes out as no code)
 ws.OnClose(func(code int, text string) {  // Register close handler (peer's close frame)
     fmt.Printf("Closed: %d %s\n", code, text)
 })
 
 // Ping/Pong keepalive — the server already pings every WSOptions.PingInterval
-// (30 s by default); WritePing sends an extra one
+// (30 s by default); WritePing sends an extra one (≤ 125 bytes, else
+// rweb.ErrWebSocketBadControlFrame and nothing sent)
 ws.WritePing([]byte("ping"))
 ws.SetPongHandler(func(data []byte) error {
     return nil

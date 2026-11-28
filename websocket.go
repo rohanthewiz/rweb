@@ -61,7 +61,10 @@ var (
 	ErrWebSocketBadRSV  = errors.New("websocket frame has a reserved bit set that no extension negotiated")
 	// ErrWebSocketBadControlFrame: a ping, pong or close frame longer than
 	// 125 bytes or without FIN (RFC 6455 §5.5). The connection is failed
-	// with close code 1002 when ReadMessage returns it.
+	// with close code 1002 when ReadMessage returns it. WritePing (and
+	// WriteMessage/WriteMessages with a control type) return it, wrapped,
+	// for a payload over 125 bytes, before anything is written; the
+	// connection stays open.
 	ErrWebSocketBadControlFrame = errors.New("websocket control frame longer than 125 bytes or fragmented")
 	// ErrWebSocketBadFragment: a data frame out of place in the message
 	// sequence (RFC 6455 §5.4): a continuation frame with no fragmented
@@ -1005,23 +1008,68 @@ func validCloseCode(code int) bool {
 	return false
 }
 
+// maxCloseReason is the longest close reason that fits a close frame: a
+// control frame's payload is at most 125 bytes (RFC 6455 §5.5), 2 of which
+// are the status code.
+const maxCloseReason = 125 - 2
+
 // closeFramePayload is the body of a close frame this side sends: the code,
-// then the reason. wsCloseNoStatusReceived (1005) means "no status code"
-// and may not be sent (RFC 6455 §7.4.1), so it gives an empty body, with
-// no reason either: a reason cannot go without a code (§5.5.1).
+// then the reason. It never builds a body a peer would refuse, since Close's
+// job is to close and a refused close frame loses the code and reason both
+// (the peer fails the connection with 1002 instead):
+//
+//	input                               body sent
+//	code 1005 (no status code)          empty (1005 may not be sent, §7.4.1)
+//	code not validCloseCode             empty, reason dropped
+//	  (0, 1004, 1006, 1015, unassigned
+//	   1016–2999, ≥ 5000)
+//	reason not UTF-8                    invalid bytes → U+FFFD (§5.5.1: UTF-8)
+//	reason over 123 bytes               cut at 123, at a character boundary
+//
+// An unsendable code goes out as no code at all, as 1005 already did, rather
+// than being swapped for 1000 or 1011: those would tell the peer "normal" or
+// "server error", a meaning the app did not give. A reason cannot go without
+// a code (§5.5.1), so it is dropped with it. The reason is informational
+// only (§7.1.6), so cutting it is a smaller loss than the frame refused.
 //
 // handleClose uses it to answer an empty close frame with an empty one
 // instead of with 1005 on the wire (N-082), and Close uses it so an OnClose
 // handler that answers with the code it was given (1005 for an empty close
-// frame) gets the same.
+// frame) gets the same. Before N-084, Close sent any code and reason as
+// given: ws.Close(1011, err.Error()) with a long error string put a control
+// frame over 125 bytes on the wire.
 func closeFramePayload(code int, reason string) []byte {
-	if code == wsCloseNoStatusReceived {
+	if !validCloseCode(code) {
 		return nil
 	}
+	reason = closeReason(reason)
 	data := make([]byte, 2+len(reason))
 	binary.BigEndian.PutUint16(data[:2], uint16(code))
 	copy(data[2:], reason)
 	return data
+}
+
+// closeReason makes reason sendable in a close frame: valid UTF-8 (each
+// invalid byte sequence replaced with U+FFFD) and at most maxCloseReason
+// bytes, cut before the first character that would not fit whole, so the
+// cut never leaves half a character (which would be invalid UTF-8 again).
+// A short, valid reason, the usual case, is returned as is.
+func closeReason(reason string) string {
+	if len(reason) <= maxCloseReason && utf8.ValidString(reason) {
+		return reason
+	}
+	reason = strings.ToValidUTF8(reason, string(utf8.RuneError))
+	if len(reason) <= maxCloseReason {
+		return reason
+	}
+	// Step back from the byte limit to the start of the character that
+	// straddles it (at most utf8.UTFMax-1 bytes): reason[:cut] then ends
+	// on a whole character.
+	cut := maxCloseReason
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut]
 }
 
 // runControlHandler calls the app's ping or pong handler with the read side
@@ -1300,7 +1348,19 @@ func (ws *WSConn) applyWriteDeadline() {
 //
 // A text or binary message on a connection that negotiated permessage-deflate
 // is compressed first, and marked with RSV1.
+//
+// A control frame's payload over 125 bytes (RFC 6455 §5.5) is refused with
+// ErrWebSocketBadControlFrame and nothing appended: a peer fails the
+// connection on such a frame (rweb's own ReadMessage does), so sending it
+// would end the connection with 1002 from the other side instead of the
+// error going to the app that asked. Every frame this side sends is built
+// here, so the check covers WritePing, the pong answer, and WriteMessage /
+// WriteMessages with a control type alike. Close never gets here with more
+// (closeFramePayload cuts the reason).
 func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, error) {
+	if opcode >= wsClose && len(data) > 125 {
+		return buf, fmt.Errorf("%w: a %d-byte payload (at most 125)", ErrWebSocketBadControlFrame, len(data))
+	}
 	b0 := byte(0x80 | opcode) // FIN = 1, opcode
 	if ws.deflate != nil && (opcode == wsText || opcode == wsBinary) {
 		compressed, err := ws.deflate.compress(data)
@@ -1381,7 +1441,11 @@ func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, erro
 //
 // A code of 1005 ("no status code", what an OnClose handler is given for a
 // close frame with no body) sends a close frame with no body, reason
-// dropped: 1005 itself may not be sent (RFC 6455 §7.4.1).
+// dropped: 1005 itself may not be sent (RFC 6455 §7.4.1). So does any other
+// code that may not be sent (0, 1004, 1006, 1015, 1016–2999, 5000 and up;
+// see validCloseCode). A reason is sent as valid UTF-8, invalid bytes
+// replaced with U+FFFD, and cut to 123 bytes at a character boundary, so the
+// frame stays within a control frame's 125 bytes (closeFramePayload).
 func (ws *WSConn) Close(code int, reason string) error {
 	ws.closeMutex.Lock()
 	if ws.closed.Load() {
@@ -1622,7 +1686,9 @@ func (ws *WSConn) writePong(data []byte) error {
 	return ws.writeFrame(wsPong, data)
 }
 
-// WritePing writes a ping frame
+// WritePing writes a ping frame. data may be at most 125 bytes (RFC 6455
+// §5.5); longer, it returns ErrWebSocketBadControlFrame (wrapped) and writes
+// nothing, and the connection stays open.
 func (ws *WSConn) WritePing(data []byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()

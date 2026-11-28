@@ -523,6 +523,10 @@ The other protocol errors send a close frame too: 1002 for unnegotiated RSV bits
 masking or a reserved opcode (`ErrWebSocketBadRSV`, `ErrWebSocketBadMask`,
 `ErrWebSocketInvalidOpcode`), 1009 for a frame or message (reassembled or inflated) over the
 limit (`ErrWebSocketPayloadTooLarge`), 1007 for compressed data that does not inflate.
+`ws.Close(code, reason)` always sends a close frame a peer accepts: the reason is made UTF-8
+and cut to 123 bytes at a character boundary, and a code that may not be sent (0, 1006, …)
+goes out as no code. `WritePing` refuses more than 125 bytes (`ErrWebSocketBadControlFrame`),
+sending nothing.
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
 connection, reset).
