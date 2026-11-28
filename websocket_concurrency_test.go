@@ -256,11 +256,12 @@ func TestWebSocketHandlerSettersDuringReads(t *testing.T) {
 
 // A 64-bit payload length with its top bit set is invalid (RFC 6455 §5.2);
 // as an int64 it is negative, which used to pass the size check and panic
-// in make. It is refused as too large.
+// in make. It is refused as too large, and the connection failed with 1009.
 func TestWebSocketPayloadLengthTopBitSet(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 	server := NewWSConn(serverConn, true)
+	code := closeCodeFrom(NewWSConn(clientConn, false))
 
 	var frame bytes.Buffer
 	frame.Write([]byte{0x82, 0x80 | 127}) // FIN binary, masked, 64-bit length
@@ -268,9 +269,8 @@ func TestWebSocketPayloadLengthTopBitSet(t *testing.T) {
 	frame.Write([]byte{1, 2, 3, 4}) // mask key
 	go func() { _, _ = clientConn.Write(frame.Bytes()) }()
 
-	if _, err := server.ReadMessage(); !errors.Is(err, ErrWebSocketPayloadTooLarge) {
-		t.Fatalf("ReadMessage = %v, want ErrWebSocketPayloadTooLarge", err)
-	}
+	_, err := server.ReadMessage()
+	expectFailed(t, server, err, ErrWebSocketPayloadTooLarge, code, wsCloseMessageTooBig)
 }
 
 // Two goroutines calling ReadMessage take turns instead of splitting

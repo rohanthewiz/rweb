@@ -1182,6 +1182,16 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
   connection with 1002, and one whose reason is not UTF-8 with 1007:
   `ReadMessage` returns `rweb.ErrWebSocketBadClose` and no `OnClose` handler
   runs. Codes 1000–1003, 1007–1014 and 3000–4999 are accepted and echoed.
+- Every other protocol error also fails the connection with a close frame
+  (v0.2.1+, server and client alike; RFC 6455 §7.1.7): 1002 for RSV bits the
+  connection did not negotiate (`rweb.ErrWebSocketBadRSV`), a frame masked
+  wrongly for its sender (`rweb.ErrWebSocketBadMask`) or a reserved opcode
+  (`rweb.ErrWebSocketInvalidOpcode`); 1009 for a frame, a reassembled message
+  or an inflated message over the message limit
+  (`rweb.ErrWebSocketPayloadTooLarge`); 1007 for compressed data that does not
+  inflate (the error is the `compress/flate` one). The peer gets the code
+  instead of a bare TCP close. An I/O error (EOF, reset, a read deadline) sends
+  nothing and does not close the connection.
 
 ### Message Types
 

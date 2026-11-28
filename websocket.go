@@ -711,8 +711,11 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 	for {
 		frameType, fin, rsv1, data, err := ws.readFrame()
 		if err != nil {
-			if errors.Is(err, ErrWebSocketBadControlFrame) {
-				ws.failConnection(wsCloseProtocolError)
+			// A frame header that breaks the rules fails the connection with
+			// its code; an I/O error (EOF, timeout, reset) has no peer left
+			// to tell, so it is returned as is (frameFailCode says which).
+			if code, ok := frameFailCode(err); ok {
+				ws.failConnection(code)
 			}
 			return nil, err
 		}
@@ -721,6 +724,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 		// anywhere else, or without the extension, the peer is speaking a
 		// protocol this connection never agreed to.
 		if rsv1 && (ws.deflate == nil || (frameType != wsText && frameType != wsBinary)) {
+			ws.failConnection(wsCloseProtocolError)
 			return nil, ErrWebSocketBadRSV
 		}
 
@@ -755,7 +759,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			if fin {
 				// Unfragmented message — the common fast path
 				if rsv1 {
-					if data, err = ws.deflate.decompress(data, ws.maxMessageSize.Load()); err != nil {
+					if data, err = ws.inflate(data); err != nil {
 						return nil, err
 					}
 				}
@@ -779,6 +783,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			if int64(len(ws.fragmentedMessage)) > ws.maxMessageSize.Load() {
 				ws.fragmenting = false
 				ws.fragmentedMessage = nil
+				ws.failConnection(wsCloseMessageTooBig)
 				return nil, ErrWebSocketPayloadTooLarge
 			}
 			if fin {
@@ -787,7 +792,7 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 				ws.fragmenting = false
 				ws.fragmentedMessage = nil
 				if ws.fragmentedCompressed {
-					if data, err = ws.deflate.decompress(data, ws.maxMessageSize.Load()); err != nil {
+					if data, err = ws.inflate(data); err != nil {
 						return nil, err
 					}
 				}
@@ -841,9 +846,63 @@ func (ws *WSConn) ReadMessage() (*WSMessage, error) {
 			// Continue reading for the next message
 
 		default:
+			// Opcodes 0x3-0x7 and 0xB-0xF are reserved (RFC 6455 §5.2); no
+			// extension here defines them, so the frame cannot be parsed.
+			ws.failConnection(wsCloseProtocolError)
 			return nil, fmt.Errorf("%w: %d", ErrWebSocketInvalidOpcode, frameType)
 		}
 	}
+}
+
+// frameFailCode maps an error from readFrame to the close code that fails
+// the connection for it (RFC 6455 §7.1.7, codes from §7.4.1), and reports
+// false for an error that is not the peer breaking the protocol:
+//
+//	ErrWebSocketBadControlFrame   1002  control frame fragmented or > 125 bytes
+//	ErrWebSocketBadRSV            1002  RSV2/RSV3 set (no extension defines them)
+//	ErrWebSocketBadMask           1002  masking wrong for the peer's role (§5.1)
+//	ErrWebSocketPayloadTooLarge   1009  frame over the message limit, or a 64-bit
+//	                                    length with its top bit set
+//	anything else                 —     I/O: EOF, reset, deadline, closed conn
+//
+// A 64-bit length with its top bit set is strictly a framing error (§5.2),
+// but readFrame reports it as too large (the length cannot be held), and
+// 1009 tells the peer as much; either code ends the connection.
+//
+// I/O errors get no close frame: the peer has gone, or the read deadline
+// (keepalive's dead-peer timeout) says it is not there, and a write to it
+// would only wait out closeHandshakeTimeout.
+func frameFailCode(err error) (int, bool) {
+	switch {
+	case errors.Is(err, ErrWebSocketBadControlFrame),
+		errors.Is(err, ErrWebSocketBadRSV),
+		errors.Is(err, ErrWebSocketBadMask):
+		return wsCloseProtocolError, true
+	case errors.Is(err, ErrWebSocketPayloadTooLarge):
+		return wsCloseMessageTooBig, true
+	}
+	return 0, false
+}
+
+// inflate decompresses a complete compressed data message (unfragmented, or
+// reassembled) for ReadMessage, and fails the connection when it cannot:
+// 1009 when the message inflates past the message limit (a deflate bomb is
+// the usual case: the frame size check only saw the compressed size), 1007
+// for anything else, data that does not inflate (§7.4.1: "data within a
+// message that was not consistent with the type of the message"; RFC 7692
+// names no code for it, and a compressed message that does not inflate is
+// data not consistent with its RSV1 bit).
+func (ws *WSConn) inflate(data []byte) ([]byte, error) {
+	out, err := ws.deflate.decompress(data, ws.maxMessageSize.Load())
+	if err != nil {
+		if errors.Is(err, ErrWebSocketPayloadTooLarge) {
+			ws.failConnection(wsCloseMessageTooBig)
+		} else {
+			ws.failConnection(wsCloseInvalidFramePayloadData)
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 // dataMessage is the last step of ReadMessage for a complete data message

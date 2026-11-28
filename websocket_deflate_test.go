@@ -3,7 +3,6 @@ package rweb
 import (
 	"bytes"
 	"compress/flate"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -205,19 +204,21 @@ func TestDeflateFragmentedMessage(t *testing.T) {
 }
 
 // RSV1 means nothing without the extension, and never means anything on a
-// control frame: both are protocol errors, not data.
+// control frame: both are protocol errors, not data, and fail the connection
+// with 1002. The client reads the close frame (closeCodeFrom): on net.Pipe a
+// close frame nobody reads holds failConnection for closeHandshakeTimeout.
 func TestDeflateRSVRules(t *testing.T) {
 	server, client := newTestPair()
 	go func() { _ = writeRawRSVFrame(client.conn, wsText, true, []byte("x")) }()
-	if _, err := server.ReadMessage(); !errors.Is(err, ErrWebSocketBadRSV) {
-		t.Fatalf("RSV1 without the extension: %v", err)
-	}
+	code := closeCodeFrom(client)
+	_, err := server.ReadMessage()
+	expectFailed(t, server, err, ErrWebSocketBadRSV, code, wsCloseProtocolError)
 
 	server, client = deflatePair()
 	go func() { _ = writeRawRSVFrame(client.conn, wsPing, true, nil) }()
-	if _, err := server.ReadMessage(); !errors.Is(err, ErrWebSocketBadRSV) {
-		t.Fatalf("RSV1 on a ping: %v", err)
-	}
+	code = closeCodeFrom(client)
+	_, err = server.ReadMessage()
+	expectFailed(t, server, err, ErrWebSocketBadRSV, code, wsCloseProtocolError)
 }
 
 // The size limit applies to what a message inflates to, not to what it
@@ -231,9 +232,9 @@ func TestDeflateBombIsRefused(t *testing.T) {
 		t.Fatalf("test bomb is %d bytes compressed", len(bomb))
 	}
 	go func() { _ = writeRawRSVFrame(client.conn, wsBinary, true, bomb) }()
-	if _, err := server.ReadMessage(); !errors.Is(err, ErrWebSocketPayloadTooLarge) {
-		t.Fatalf("a message inflating past the limit: %v", err)
-	}
+	code := closeCodeFrom(client)
+	_, err := server.ReadMessage()
+	expectFailed(t, server, err, ErrWebSocketPayloadTooLarge, code, wsCloseMessageTooBig)
 }
 
 // WriteMessages sends a batch in one write, each still its own message.

@@ -519,6 +519,10 @@ A close frame with no body (a browser's `ws.close()`) is answered with one with 
 (`OnClose` reports it as 1005, which is never sent on the wire). A close frame with a 1-byte
 body or a code that may not be sent (1005, 1006, 1015, unassigned) fails the connection with
 1002, and one whose reason is not UTF-8 with 1007 (`rweb.ErrWebSocketBadClose`).
+The other protocol errors send a close frame too: 1002 for unnegotiated RSV bits, wrong
+masking or a reserved opcode (`ErrWebSocketBadRSV`, `ErrWebSocketBadMask`,
+`ErrWebSocketInvalidOpcode`), 1009 for a frame or message (reassembled or inflated) over the
+limit (`ErrWebSocketPayloadTooLarge`), 1007 for compressed data that does not inflate.
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
 connection, reset).

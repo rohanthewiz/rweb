@@ -784,30 +784,40 @@ func TestDialWebSocketLiveness(t *testing.T) {
 // A server that breaks the framing rules fails the read with an error, not
 // a panic: a masked frame (RFC 6455 §5.1) and a 64-bit length with its top
 // bit set (which made the draft client's make() panic and kill the process).
+// The client fails the connection with a close frame carrying the code
+// (N-083), which the raw server reads.
 func TestDialWebSocketRefusesBadServerFrames(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		frame func(t *testing.T) []byte
 		want  error
+		code  int
 	}{
 		{"masked", func(t *testing.T) []byte {
 			var b bytes.Buffer
 			_ = writeRawFrame(&b, wsText, true, true, []byte("masked"))
 			return b.Bytes()
-		}, ErrWebSocketBadMask},
+		}, ErrWebSocketBadMask, wsCloseProtocolError},
 		{"negative length", func(*testing.T) []byte {
 			return []byte{0x81, 127, 0x80, 0, 0, 0, 0, 0, 0, 1}
-		}, ErrWebSocketPayloadTooLarge},
+		}, ErrWebSocketPayloadTooLarge, wsCloseMessageTooBig},
+		{"reserved opcode", func(t *testing.T) []byte {
+			return serverFrame(t, 0x3, true, "x")
+		}, ErrWebSocketInvalidOpcode, wsCloseProtocolError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			code := make(chan int, 1)
 			addr := rawDialServer(t, func(c net.Conn, br *bufio.Reader, req *http.Request) {
 				_, _ = c.Write(append([]byte(upgradeHead(req, "")), tc.frame(t)...))
-				rawSession(c, br)
+				// Read the client's frames as a server would, through br.
+				srv := NewWSConn(c, true)
+				srv.r = br
+				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				code <- <-closeCodeFrom(srv)
 			})
 			ws, _ := mustDial(t, "ws://"+addr+"/", WSDialOptions{})
-			if _, err := ws.ReadMessage(); !errors.Is(err, tc.want) {
-				t.Fatalf("err=%v, want %v", err, tc.want)
-			}
+			_, err := ws.ReadMessage()
+			expectFailed(t, ws, err, tc.want, code, tc.code)
 		})
 	}
 }
