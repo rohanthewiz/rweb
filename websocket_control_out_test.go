@@ -158,8 +158,8 @@ func TestCloseUnsendableCodeSendsNoCode(t *testing.T) {
 	}
 }
 
-// A ping (or any control frame sent through WriteMessage / WriteMessages)
-// over 125 bytes is refused before anything is written, and the connection
+// A ping or pong (WritePing, or PingMessage / PongMessage through
+// WriteMessage / WriteMessages) over 125 bytes is refused before anything is written, and the connection
 // carries on: the next frame the peer sees is the message sent after.
 func TestControlFrameOver125Refused(t *testing.T) {
 	big := bytes.Repeat([]byte("p"), 126)
@@ -170,7 +170,8 @@ func TestControlFrameOver125Refused(t *testing.T) {
 		{"WritePing", func(ws *WSConn) error { return ws.WritePing(big) }},
 		{"WriteMessage ping", func(ws *WSConn) error { return ws.WriteMessage(PingMessage, big) }},
 		{"WriteMessage pong", func(ws *WSConn) error { return ws.WriteMessage(PongMessage, big) }},
-		{"WriteMessage close", func(ws *WSConn) error { return ws.WriteMessage(CloseMessage, big) }},
+		// WriteMessage(CloseMessage, …) is refused for its type since N-085,
+		// whatever the size (TestWriteMessageRefusesType).
 		// The small pong ahead of the big one is not sent either: the batch
 		// is refused whole, before the one write.
 		{"WriteMessages", func(ws *WSConn) error { return ws.WriteMessages(PongMessage, []byte("ok"), big) }},

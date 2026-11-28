@@ -1198,17 +1198,27 @@ These apply to `s.WebSocket()`, `s.WebSocketWithOptions()` and a manual
   123 bytes at a character boundary, so `ws.Close(1011, err.Error())` with a
   long error is safe; a code that may not be sent (0, 1004, 1005, 1006, 1015,
   1016–2999, 5000 and up) goes out as no code at all, reason dropped (the peer
-  reports 1005). `WritePing`, and `WriteMessage`/`WriteMessages` with a
-  control type, refuse a payload over 125 bytes with
+  reports 1005). `WritePing`, and `WriteMessage`/`WriteMessages` with
+  `PingMessage`/`PongMessage`, refuse a payload over 125 bytes with
   `rweb.ErrWebSocketBadControlFrame` before writing anything; the connection
   stays open.
+- `WriteMessage`/`WriteMessages` send `TextMessage`, `BinaryMessage`,
+  `PingMessage` and `PongMessage` only (v0.2.1+). Any other type returns
+  `rweb.ErrWebSocketBadMessageType` with nothing written and the connection
+  open: `CloseMessage` (use `ws.Close(code, reason)`, which checks the code
+  and reason, stops further writes and waits for the peer's answer; a close
+  frame written as a message did none of that), and values that are no
+  message type (0 would be a continuation frame, 3–7 and 11–15 reserved
+  opcodes, each of which a peer fails with 1002). A closed connection reports
+  `rweb.ErrWebSocketAlreadyClosed` first, so an echo loop that writes back
+  `msg.Type` gets that for the peer's `CloseMessage`, as before.
 
 ### Message Types
 
 ```go
 rweb.TextMessage   // UTF-8 text data
 rweb.BinaryMessage // Binary data
-rweb.CloseMessage  // Connection close
+rweb.CloseMessage  // Connection close (read only: ReadMessage reports it; send with ws.Close)
 rweb.PingMessage   // Ping control frame
 rweb.PongMessage   // Pong control frame
 ```
@@ -1218,7 +1228,8 @@ rweb.PongMessage   // Pong control frame
 ```go
 // Reading and writing
 msg, err := ws.ReadMessage()              // Returns *WSMessage{Type, Data}
-ws.WriteMessage(rweb.TextMessage, data)   // Send a message (one socket write)
+ws.WriteMessage(rweb.TextMessage, data)   // Send a message (one socket write); text, binary,
+                                          // ping or pong, else rweb.ErrWebSocketBadMessageType
 ws.WriteMessages(rweb.TextMessage, a, b)  // Several messages, one socket write
 
 // Connection lifecycle

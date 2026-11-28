@@ -526,7 +526,11 @@ limit (`ErrWebSocketPayloadTooLarge`), 1007 for compressed data that does not in
 `ws.Close(code, reason)` always sends a close frame a peer accepts: the reason is made UTF-8
 and cut to 123 bytes at a character boundary, and a code that may not be sent (0, 1006, …)
 goes out as no code. `WritePing` refuses more than 125 bytes (`ErrWebSocketBadControlFrame`),
-sending nothing.
+sending nothing. `WriteMessage`/`WriteMessages` send text, binary, ping and pong only: any
+other type, `CloseMessage` included, returns `ErrWebSocketBadMessageType` with nothing sent
+(close with `ws.Close`, which checks the code, marks the connection closed and waits for the
+answer). On a closed connection they return `ErrWebSocketAlreadyClosed` first, so the echo
+loop above, handing back the peer's `CloseMessage`, gets that and its next read ends it.
 An error the handler returns after the upgrade skips the error handler (no page can be sent
 on a WebSocket) and is logged only if it is more than the peer leaving (EOF, closed
 connection, reset).

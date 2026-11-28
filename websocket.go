@@ -62,8 +62,8 @@ var (
 	// ErrWebSocketBadControlFrame: a ping, pong or close frame longer than
 	// 125 bytes or without FIN (RFC 6455 §5.5). The connection is failed
 	// with close code 1002 when ReadMessage returns it. WritePing (and
-	// WriteMessage/WriteMessages with a control type) return it, wrapped,
-	// for a payload over 125 bytes, before anything is written; the
+	// WriteMessage/WriteMessages with PingMessage or PongMessage) return it,
+	// wrapped, for a payload over 125 bytes, before anything is written; the
 	// connection stays open.
 	ErrWebSocketBadControlFrame = errors.New("websocket control frame longer than 125 bytes or fragmented")
 	// ErrWebSocketBadFragment: a data frame out of place in the message
@@ -83,6 +83,16 @@ var (
 	// valid UTF-8. The connection is failed with close code 1002 (1007 for
 	// the reason) when ReadMessage returns it, and no OnClose handler runs.
 	ErrWebSocketBadClose = errors.New("websocket close frame malformed")
+	// ErrWebSocketBadMessageType: WriteMessage or WriteMessages was given a
+	// type it does not send. They send TextMessage, BinaryMessage,
+	// PingMessage and PongMessage; a close goes through Close(code, reason),
+	// which checks the code and reason, marks the connection closed so no
+	// data frame follows (RFC 6455 §5.5.1) and waits for the peer's answer.
+	// Any other value is no message type at all (0 is a continuation frame,
+	// 3–7 and 11–15 are reserved opcodes) and would make a peer fail the
+	// connection with 1002. Returned, wrapped, before anything is written;
+	// the connection stays open.
+	ErrWebSocketBadMessageType = errors.New("websocket message type not writable (WriteMessage sends text, binary, ping and pong; close with Close)")
 	// ErrWebSocketOriginNotAllowed is returned by UpgradeWebSocket for a
 	// handshake from an origin the route does not accept. The response is
 	// already set to 403 when it is returned; a handler that returns nil
@@ -1093,13 +1103,55 @@ func (ws *WSConn) runControlHandler(h func([]byte) error, data []byte) error {
 	return h(data)
 }
 
-// WriteMessage writes a message to the WebSocket connection
+// checkWriteType refuses a MessageType that WriteMessage / WriteMessages do
+// not send (ErrWebSocketBadMessageType, wrapped with the type).
+//
+// Why a refusal and not a frame: the type used to go to appendFrame as the
+// opcode unchecked, so
+//
+//	CloseMessage       a close frame that bypassed Close: closed not set, so
+//	                   data frames could follow it (RFC 6455 §5.5.1 forbids
+//	                   any), code and reason unchecked (closeFramePayload
+//	                   skipped), and no wait for the peer's answer
+//	0                  a continuation frame with no message in progress
+//	3–7, 11–15, other  a reserved opcode (or, past 15, bits spilling into
+//	                   RSV/FIN of the header byte)
+//
+// each of which a peer fails with 1002. CloseMessage is refused rather than
+// routed to Close because Close needs a code and reason, not a raw payload,
+// and blocks up to closeHandshakeTimeout: neither fits a call that writes
+// one frame. The error names Close for that case.
+func checkWriteType(mt MessageType) error {
+	switch mt {
+	case TextMessage, BinaryMessage, PingMessage, PongMessage:
+		return nil
+	case CloseMessage:
+		return fmt.Errorf("%w: CloseMessage; use Close(code, reason)", ErrWebSocketBadMessageType)
+	}
+	return fmt.Errorf("%w: %d", ErrWebSocketBadMessageType, int(mt))
+}
+
+// WriteMessage writes a message to the WebSocket connection: TextMessage or
+// BinaryMessage, or a PingMessage / PongMessage control frame (at most 125
+// bytes, else ErrWebSocketBadControlFrame). Any other type, CloseMessage
+// included, returns ErrWebSocketBadMessageType and writes nothing; close
+// with Close(code, reason).
+//
+// On a closed connection it returns ErrWebSocketAlreadyClosed whatever the
+// type. That check comes first so that an echo loop handing ReadMessage's
+// result back (WriteMessage(msg.Type, msg.Data)) still gets
+// ErrWebSocketAlreadyClosed for the peer's CloseMessage, as before the type
+// check: ReadMessage has answered that close and closed the connection by
+// the time it returns it.
 func (ws *WSConn) WriteMessage(messageType MessageType, data []byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()
 
 	if ws.closed.Load() {
 		return ErrWebSocketAlreadyClosed
+	}
+	if err := checkWriteType(messageType); err != nil {
+		return err
 	}
 
 	return ws.writeFrame(int(messageType), data)
@@ -1108,13 +1160,17 @@ func (ws *WSConn) WriteMessage(messageType MessageType, data []byte) error {
 // WriteMessages writes several messages of one type in a single write to the
 // socket: each is still its own WebSocket message, but a writer that has a
 // queue to drain pays one syscall (and, on TLS, one flush of records) for the
-// batch instead of one per message.
+// batch instead of one per message. The types and errors are WriteMessage's;
+// a refusal refuses the whole batch, nothing written.
 func (ws *WSConn) WriteMessages(messageType MessageType, data ...[]byte) error {
 	ws.writeMutex.Lock()
 	defer ws.writeMutex.Unlock()
 
 	if ws.closed.Load() {
 		return ErrWebSocketAlreadyClosed
+	}
+	if err := checkWriteType(messageType); err != nil {
+		return err
 	}
 	ws.wbuf = ws.wbuf[:0]
 	for _, d := range data {
@@ -1355,7 +1411,8 @@ func (ws *WSConn) applyWriteDeadline() {
 // would end the connection with 1002 from the other side instead of the
 // error going to the app that asked. Every frame this side sends is built
 // here, so the check covers WritePing, the pong answer, and WriteMessage /
-// WriteMessages with a control type alike. Close never gets here with more
+// WriteMessages with PingMessage or PongMessage alike (they refuse
+// CloseMessage before this: checkWriteType). Close never gets here with more
 // (closeFramePayload cuts the reason).
 func (ws *WSConn) appendFrame(buf []byte, opcode int, data []byte) ([]byte, error) {
 	if opcode >= wsClose && len(data) > 125 {
